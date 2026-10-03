@@ -1279,9 +1279,9 @@ class ApiRepository:
                         if "rechaz" in desc.lower() or "motivo" in desc.lower():
                             rejection_reason_val = desc
 
-                    # If rating found, persist it to IdentityStore
-                    if rating_val and raw_id:
-                        eff_driver_id = driver_id_val or (saved_rating.get("driver_id") if saved_rating else None)
+                    # If rating found, persist it to IdentityStore only if not already saved
+                    if rating_val and raw_id and not saved_rating:
+                        eff_driver_id = driver_id_val or None
                         identity_store.save_order_rating(
                             order_id=raw_id,
                             driver_id=eff_driver_id,

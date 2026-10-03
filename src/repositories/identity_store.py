@@ -171,17 +171,21 @@ class IdentityStore:
         if not order_id:
             return
         self._load()
-        keys = [str(order_id)]
-        digits = re.findall(r"\d+", str(order_id))
-        if digits:
-            keys.append(digits[-1])
+        s_id = str(order_id).strip()
+        keys = [s_id]
+        is_uuid = len(s_id) == 36 and s_id.count("-") == 4
+        if not is_uuid:
+            digits = re.findall(r"\d+", s_id)
+            if digits:
+                keys.append(str(int(digits[-1])))
+                keys.append(digits[-1])
 
         info = {
             "channel": str(channel or "telegram").lower(),
             "channel_user_id": str(channel_user_id or ""),
             "phone": str(phone or ""),
         }
-        for k in keys:
+        for k in set(keys):
             self._order_channels[k] = info
 
         if phone and channel_user_id and str(channel).lower() == "telegram":
@@ -197,9 +201,15 @@ class IdentityStore:
         s_id = str(order_id).strip()
         if s_id in self._order_channels:
             return self._order_channels[s_id]
-        digits = re.findall(r"\d+", s_id)
-        if digits and digits[-1] in self._order_channels:
-            return self._order_channels[digits[-1]]
+        is_uuid = len(s_id) == 36 and s_id.count("-") == 4
+        if not is_uuid:
+            digits = re.findall(r"\d+", s_id)
+            if digits:
+                num_str = str(int(digits[-1]))
+                if num_str in self._order_channels:
+                    return self._order_channels[num_str]
+                if digits[-1] in self._order_channels:
+                    return self._order_channels[digits[-1]]
         return None
 
     def get_phone_for_channel_user(self, channel: str, channel_user_id: str) -> str | None:
