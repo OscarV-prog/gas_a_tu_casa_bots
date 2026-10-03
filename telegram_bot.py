@@ -4,6 +4,7 @@ import logging
 import re
 import sys
 from datetime import datetime
+from typing import Any
 
 # Forzar UTF-8 en terminal de Windows
 if sys.platform == "win32":
@@ -34,8 +35,11 @@ from src.database import init_db
 from src.graphs.sales_graph import compile_sales_graph
 from src.models.customer import CustomerAddress
 from src.repositories import get_repository
+from src.services.audio_transcription import transcribe_audio_file
+from src.services.flow_router import FlowResponse, FlowState, flow_router, get_or_create_session
 from src.services.geocoding import resolve_gps_address_to_name, reverse_geocode
 from src.services.notifications import notify_driver
+from src.tools.get_order_status import format_clean_driver_status
 
 # Configurar logging
 logging.basicConfig(
@@ -55,6 +59,53 @@ TELEGRAM_BOT_TOKEN = settings.telegram_bot_token
 
 # Inicializar base de datos SQLite
 init_db()
+
+
+def get_markup_for_flow_response(flow_res: FlowResponse, phone: str = "", user_id: str = "") -> InlineKeyboardMarkup | None:
+    """Selecciona el markup interactivo apropiado según la acción o estado del flujo."""
+    if flow_res.action_performed == "show_edit_options":
+        return get_botones_editar_opciones()
+
+    # Si la acción solicita explícitamente texto libre para la programación:
+    if flow_res.action_performed == "ask_schedule_text":
+        return None
+
+    # Los estados que requieren texto libre del usuario NUNCA deben mostrar botones interactivos
+    if flow_res.state in (
+        FlowState.WAITING_FOR_PHONE,
+        FlowState.WAITING_FOR_NEW_CUSTOMER_NAME,
+        FlowState.WAITING_FOR_NEW_CUSTOMER_ADDRESS,
+        FlowState.WAITING_FOR_STATIONARY_DETAILS,
+    ):
+        return None
+
+    if flow_res.action_performed == "show_service_buttons" or flow_res.state == FlowState.INITIAL:
+        return get_botones_tipo_servicio()
+    elif flow_res.action_performed == "show_cylinder_catalog" or flow_res.state == FlowState.WAITING_FOR_PRODUCT_OR_QUANTITY:
+        return get_botones_productos_cilindros()
+    elif flow_res.action_performed == "show_address_buttons" or flow_res.state == FlowState.WAITING_FOR_ADDRESS_SELECTION:
+        repo = get_repository()
+        cust = repo.get_customer_by_phone(TENANT_ID, phone) if phone else None
+        if not cust and user_id:
+            cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
+        addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if cust and cust.address else [])
+        if addrs:
+            return get_botones_direcciones_cliente(addrs)
+        return None
+    elif flow_res.action_performed == "show_schedule_alternative":
+        return get_botones_horario_alternativo(flow_res.text)
+    elif flow_res.action_performed == "show_schedule_buttons" or flow_res.state == FlowState.WAITING_FOR_SCHEDULE:
+        return get_botones_programacion_entrega()
+    elif flow_res.action_performed == "show_payment_buttons" or flow_res.state == FlowState.WAITING_FOR_PAYMENT_METHOD:
+        return get_botones_metodo_pago()
+    elif flow_res.action_performed == "show_confirmation" or flow_res.state == FlowState.WAITING_FOR_CONFIRMATION:
+        return get_botones_resumen_confirmacion()
+
+    elif flow_res.action_performed == "order_created":
+        match_order = re.search(r"(?:pedido|folio)\s*#?\s*(\d+)", flow_res.text, re.IGNORECASE)
+        if match_order:
+            return get_botones_pedido_activo(match_order.group(1))
+    return detectar_botones_mensaje(flow_res.text, phone=phone, channel_user_id=str(user_id))
 
 
 def get_teclado_cliente() -> ReplyKeyboardMarkup:
@@ -79,23 +130,65 @@ def get_botones_tipo_servicio() -> InlineKeyboardMarkup:
     )
 
 
+def get_botones_editar_opciones() -> InlineKeyboardMarkup:
+    """Botones interactivos para seleccionar qué dato del pedido corregir o editar."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("⏰ Cambiar Horario", callback_data="client_edit:schedule"),
+                InlineKeyboardButton("📍 Cambiar Dirección", callback_data="client_edit:address"),
+            ],
+            [
+                InlineKeyboardButton("💳 Cambiar Forma de Pago", callback_data="client_edit:payment"),
+                InlineKeyboardButton("📦 Cambiar Producto", callback_data="client_edit:product"),
+            ],
+            [
+                InlineKeyboardButton("📱 Cambiar Teléfono", callback_data="client_edit:phone"),
+                InlineKeyboardButton("🔙 Volver al Resumen", callback_data="client_edit:back"),
+            ],
+        ]
+    )
+
+
+
 def get_catalogo_productos_db(tenant_id: str = "petroil") -> list:
-    """Obtiene los productos activos en existencia directamente desde SQLite."""
+    """Obtiene los productos activos en existencia directamente desde la base de datos SQLite."""
     try:
         repo = get_repository()
         prods = repo.get_all_products(tenant_id)
-        # Filtrar cilindros y productos de gas en existencia
-        return [
+        # Filtrar cilindros y productos de gas en existencia (in_stock == True / 1)
+        cilindros = [
             p for p in prods
-            if getattr(p, "in_stock", True) and (
+            if bool(getattr(p, "in_stock", True)) and (
                 (getattr(p, "category", "") or "").lower() in ("cilindros", "gas lp", "gas")
                 or "cilindro" in p.name.lower()
                 or "gas" in p.name.lower()
+                or "kg" in p.name.lower()
             )
+            and "estacionario" not in p.name.lower()
+            and p.id != "entrega-domicilio"
+            and "servicio" not in (getattr(p, "category", "") or "").lower()
         ]
+        if cilindros:
+            def sort_key(p):
+                m = re.search(r"(\d+)\s*kg", p.name, re.IGNORECASE)
+                if m:
+                    return (0, int(m.group(1)))
+                return (1, p.price)
+            return sorted(cilindros, key=sort_key)
+        elif prods:
+            return []
     except Exception as e:
         logger.error(f"Error cargando catálogo desde BD: {e}")
-        return []
+
+    # Fallback predeterminado de cilindros estándar
+    from src.models.product import Product
+    return [
+        Product(id="gas-lp-10kg", tenant_id="petroil", name="Cilindro 10 kg", price=230.0, description="Cilindro 10 kg", category="CILINDRO", unit="pieza"),
+        Product(id="gas-lp-20kg", tenant_id="petroil", name="Cilindro 20 kg", price=450.0, description="Cilindro 20 kg", category="CILINDRO", unit="pieza"),
+        Product(id="gas-lp-30kg", tenant_id="petroil", name="Cilindro 30 kg", price=670.0, description="Cilindro 30 kg", category="CILINDRO", unit="pieza"),
+        Product(id="gas-lp-45kg", tenant_id="petroil", name="Cilindro 45 kg", price=990.0, description="Cilindro 45 kg", category="CILINDRO", unit="pieza"),
+    ]
 
 
 def get_botones_productos_cilindros(carrito: dict[str, int] | None = None) -> InlineKeyboardMarkup:
@@ -166,8 +259,8 @@ def get_botones_direcciones_cliente(addresses: list[CustomerAddress]) -> InlineK
     botones = []
     for i, addr in enumerate(addresses, 1):
         addr_text = resolve_gps_address_to_name(addr.address.strip())
-        alias_tag = f"[{addr.alias}] " if addr.alias and addr.alias not in ("Principal", f"Dirección {i}") else ""
-        short_addr = f"{i}. 📍 {alias_tag}{addr_text}"
+        addr_text = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", addr_text, flags=re.I).strip()
+        short_addr = f"{i}. 📍 {addr_text}"
         if len(short_addr) > 42:
             short_addr = short_addr[:39] + "..."
         botones.append([InlineKeyboardButton(short_addr, callback_data=f"client_addr:{i}")])
@@ -183,14 +276,44 @@ def get_botones_eliminar_direcciones(addresses: list[CustomerAddress]) -> Inline
     botones = []
     for i, addr in enumerate(addresses, 1):
         addr_text = resolve_gps_address_to_name(addr.address.strip())
-        alias_tag = f"[{addr.alias}] " if addr.alias and addr.alias not in ("Principal", f"Dirección {i}") else ""
-        short_addr = f"🗑️ {i}. {alias_tag}{addr_text}"
+        addr_text = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", addr_text, flags=re.I).strip()
+        short_addr = f"🗑️ {i}. {addr_text}"
         if len(short_addr) > 42:
             short_addr = short_addr[:39] + "..."
         botones.append([InlineKeyboardButton(short_addr, callback_data=f"client_addr_del:{addr.id}:{i}")])
 
     botones.append([InlineKeyboardButton("🔙 Volver a selección de dirección", callback_data="client_addr_back")])
     return InlineKeyboardMarkup(botones)
+
+
+def get_botones_programacion_entrega() -> InlineKeyboardMarkup:
+    """Botones interactivos para elegir horario de entrega (Lo antes posible o Programar)."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("⚡ Lo antes posible", callback_data="client_sch:asap"),
+            ],
+            [
+                InlineKeyboardButton("📅 Programar entrega", callback_data="client_sch:custom"),
+            ],
+        ]
+    )
+
+
+def get_botones_horario_alternativo(text: str = "") -> InlineKeyboardMarkup:
+    """Botones interactivos para aceptar horario alternativo sugerido o elegir otro."""
+    m = re.search(r"disponibilidad libre a las \*\*([^*]+)\*\*", text)
+    time_label = m.group(1).strip() if m else "este horario"
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(f"✅ Sí, aceptar {time_label}", callback_data="client_sch_accept"),
+            ],
+            [
+                InlineKeyboardButton("📅 Indicar otro horario", callback_data="client_sch:custom"),
+            ],
+        ]
+    )
 
 
 def get_botones_metodo_pago() -> InlineKeyboardMarkup:
@@ -220,9 +343,38 @@ def get_botones_resumen_confirmacion() -> InlineKeyboardMarkup:
     )
 
 
+def get_botones_pedido_activo(order_id: int | str) -> InlineKeyboardMarkup:
+    """Botones interactivos para pedidos activos (confirmados o en camino)."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("❌ Cancelar Pedido", callback_data=f"cancel_order_client:{order_id}"),
+            ]
+        ]
+    )
+
+
+def get_botones_confirmar_cancelacion(order_id: int | str) -> InlineKeyboardMarkup:
+    """Botones para validar si el cliente realmente desea cancelar su pedido."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("⚠️ Sí, Cancelar Pedido", callback_data=f"confirm_cancel_order_client:{order_id}"),
+                InlineKeyboardButton("🔙 No, Conservar Pedido", callback_data=f"keep_order_client:{order_id}"),
+            ]
+        ]
+    )
+
+
 def detectar_botones_mensaje(respuesta: str, phone: str = "", channel_user_id: str = "") -> InlineKeyboardMarkup | None:
     """Detecta si la respuesta del asistente debe llevar botones contextuales."""
     resp_lower = respuesta.lower()
+
+    # 0. ¿Es confirmación de cancelación de pedido?
+    if any(k in resp_lower for k in ["confirmación de cancelación", "confirmacion de cancelacion", "¿estás seguro de que deseas cancelar", "seguro de que deseas cancelar"]):
+        match_order = re.search(r"(?:pedido|folio)\s*#?\s*(\d+)", respuesta, re.IGNORECASE)
+        if match_order:
+            return get_botones_confirmar_cancelacion(match_order.group(1))
 
     # 1. ¿Es un pedido ya creado/confirmado en BD o consulta de historial/estatus? -> GUARD ESTRICTO: NINGÚN BOTÓN
     is_confirmed_order_or_history = any(k in resp_lower for k in [
@@ -239,6 +391,13 @@ def detectar_botones_mensaje(respuesta: str, phone: str = "", channel_user_id: s
         and not any(k in resp_lower for k in ["¿deseas confirmar", "¿confirmamos", "resumen de tu pedido"])
     )
     if is_confirmed_order_or_history:
+        match_order = re.search(r"(?:pedido|folio)\s*#?\s*(\d+)", respuesta, re.IGNORECASE)
+        if match_order:
+            order_id = match_order.group(1)
+            es_inactivo = any(k in resp_lower for k in ["cancelado", "entregado", "finalizado"])
+            es_activo = any(k in resp_lower for k in ["confirmado", "en camino", "en ruta", "agendado", "programado", "asignado"])
+            if es_activo and not es_inactivo:
+                return get_botones_pedido_activo(order_id)
         return None
 
     # Detectar si el mensaje es una explicación general del servicio, bienvenida o mensaje de seguridad/límites
@@ -326,14 +485,17 @@ def detectar_botones_mensaje(respuesta: str, phone: str = "", channel_user_id: s
         ])
     )
 
-    if not es_explicacion_general_o_seguridad and (
-        any(k in resp_lower for k in [
-            "qué día", "que dia", "¿qué día", "¿que dia",
-            "recibir tu pedido", "cuándo deseas", "cuando deseas", "cuándo te gustaría", "cuando te gustaria",
-            "fecha de entrega", "programar tu entrega", "a qué hora", "a que hora", "cuándo requieres", "cuando requieres"
-        ])
-        or es_solicitud_escritura_nueva_direccion
-    ):
+    if not es_explicacion_general_o_seguridad and es_solicitud_escritura_nueva_direccion:
+        return None
+
+    # Pregunta por programación de entrega (Lo antes posible / Programar entrega)
+    if not es_explicacion_general_o_seguridad and any(k in resp_lower for k in [
+        "qué día", "que dia", "¿qué día", "¿que dia",
+        "recibir tu pedido", "cuándo deseas", "cuando deseas", "cuándo te gustaría", "cuando te gustaria",
+        "fecha de entrega", "programar tu entrega", "a qué hora", "a que hora", "cuándo requieres", "cuando requieres"
+    ]):
+        if not any(k in resp_lower for k in ["indícame la hora", "indicame la hora", "escribe la hora", "hora y el día", "hora y el dia"]):
+            return get_botones_programacion_entrega()
         return None
 
     # 5. ¿Es selección de DIRECCIÓN para cliente (PASO 3)?
@@ -414,7 +576,9 @@ def detectar_botones_mensaje(respuesta: str, phone: str = "", channel_user_id: s
 
     # 7. ¿Es catálogo de cilindros / selección de capacidad (PASO 1)?
     # Solo si el asistente está preguntando u ofreciendo qué capacidad o tamaño de cilindro desea y NO estamos en pasos posteriores
-    es_tema_cilindro = any(k in resp_lower for k in ["cilindro", "cilindros"]) or any(k in resp_lower for k in ["5 kg", "10 kg", "20 kg", "30 kg", "45 kg"])
+    db_prods = get_catalogo_productos_db()
+    db_kg_keywords = [f"{m.group(1)} kg" for p in db_prods if (m := re.search(r"(\d+)\s*kg", p.name, re.IGNORECASE))]
+    es_tema_cilindro = any(k in resp_lower for k in ["cilindro", "cilindros"]) or any(k in resp_lower for k in db_kg_keywords)
     es_pregunta_catalogo = not es_explicacion_general_o_seguridad and not es_pregunta_pago and not es_pregunta_direccion and (
         any(k in resp_lower for k in [
             "qué capacidad", "que capacidad", "cuántos kilos", "cuantos kilos",
@@ -436,6 +600,15 @@ def detectar_botones_mensaje(respuesta: str, phone: str = "", channel_user_id: s
 
     if es_tema_cilindro and es_pregunta_catalogo:
         return get_botones_productos_cilindros()
+
+    # Guard estricto para registro de nuevo usuario / solicitud de nombre / nuevo cliente -> NINGÚN BOTÓN
+    if any(k in resp_lower for k in [
+        "nombre completo", "cuál es tu nombre", "cual es tu nombre", "para registrar tu cuenta",
+        "primer pedido con este número", "primer pedido con este numero", "tu nombre para registrar",
+        "cómo te llamas", "como te llamas", "indícame tu nombre", "indicame tu nombre",
+        "indícame tu dirección", "indicame tu direccion", "cuál es tu dirección", "cual es tu direccion"
+    ]):
+        return None
 
     # 8. Botones de tipo de servicio [🛻 Cilindro de Gas] y [🚛 Tanque Estacionario]
     # SOLO se muestran al inicio, bienvenida o cuando se pregunta explícitamente qué tipo de servicio/pedido desea.
@@ -533,7 +706,7 @@ def optimizar_respuesta_con_botones(respuesta: str, markup: InlineKeyboardMarkup
             if not re.search(r"bot(?:ón|ones)", texto_limpio, re.I):
                 texto_limpio = (texto_limpio.rstrip() + "\n\nSelecciona la capacidad que deseas en los botones de abajo (o escribe tu pedido si lo prefieres):").strip()
 
-        return texto_limpio
+        return texto_limpio or "🛒 Selecciona los cilindros que necesitas en los botones de abajo:"
 
     # 2. Redundancia en TIPO DE SERVICIO (botones client_svc:cilindro / estacionario)
     if any(cb.startswith("client_svc:") for cb in callbacks):
@@ -544,7 +717,7 @@ def optimizar_respuesta_con_botones(respuesta: str, markup: InlineKeyboardMarkup
         ]
         texto_limpio = "\n".join(lineas_filtradas).strip()
         texto_limpio = re.sub(r"\n{3,}", "\n\n", texto_limpio)
-        return texto_limpio
+        return texto_limpio or "⛽ Selecciona el tipo de servicio que requieres:"
 
     # 3. Redundancia en MÉTODO DE PAGO (botones client_pay:...)
     if any(cb.startswith("client_pay:") for cb in callbacks):
@@ -556,7 +729,22 @@ def optimizar_respuesta_con_botones(respuesta: str, markup: InlineKeyboardMarkup
         ]
         texto_limpio = "\n".join(lineas_filtradas).strip()
         texto_limpio = re.sub(r"\n{3,}", "\n\n", texto_limpio)
-        return texto_limpio
+        return texto_limpio or "💳 ¿Cuál será tu método de pago preferido? (Selecciona en los botones):"
+
+    # Redundancia en PROGRAMACIÓN DE HORARIO (botones client_sch:...)
+    if any(cb.startswith("client_sch:") for cb in callbacks):
+        lineas = respuesta.split("\n")
+        lineas_filtradas = [
+            l for l in lineas
+            if not re.search(r"^\s*(?:[•\-\*▪🔹🔸\d\.\)]+)\s*(?:\*\*)?(?:⚡|📅)?\s*(?:lo antes posible|programar entrega)", l.strip(), re.I)
+        ]
+        texto_limpio = "\n".join(lineas_filtradas).strip()
+        texto_limpio = re.sub(r"\n{3,}", "\n\n", texto_limpio)
+        return texto_limpio or "⏰ ¿Cuándo deseas recibir tu pedido? (Selecciona una opción en los botones):"
+
+    # Redundancia en OPCIONES DE EDICIÓN O CORRECCIÓN (botones client_edit:...)
+    if any(cb.startswith("client_edit:") for cb in callbacks):
+        return respuesta.strip() or "✏️ Por favor selecciona qué dato deseas modificar:"
 
     # 4. Redundancia en DIRECCIONES (botones client_addr:...)
     # Solicitud del usuario: "que salgan solo por botón las direcciones guardadas"
@@ -623,87 +811,60 @@ def optimizar_respuesta_con_botones(respuesta: str, markup: InlineKeyboardMarkup
 
             texto_limpio = re.sub(r"\n{3,}", "\n\n", texto_limpio)
 
-        return texto_limpio
+        return texto_limpio or "📍 Por favor selecciona una de tus direcciones guardadas o ingresa una nueva:"
 
-    return respuesta
+    return respuesta.strip() or "¿En qué puedo ayudarte? 😊"
+
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manejar comando /start e iniciar flujo de bienvenida."""
+    """Manejar comando /start e iniciar flujo de bienvenida sin llamadas a LLM."""
     if not update.effective_user or not update.message:
         return
 
     user_id = update.effective_user.id
-    first_name = update.effective_user.first_name or "Cliente"
     chat_id = update.effective_chat.id if update.effective_chat else user_id
-
     thread_id = f"telegram:{TENANT_ID}:{chat_id}"
 
-    config = {
-        "configurable": {
-            "thread_id": thread_id,
-            "tenant_id": TENANT_ID,
-            "channel": "telegram",
-            "channel_user_id": str(user_id),
-        }
-    }
+    repo = get_repository()
+    bound_cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
+    if bound_cust and bound_cust.phone:
+        context.user_data["phone"] = bound_cust.phone
+        if hasattr(repo, "bind_telegram_user_phone"):
+            repo.bind_telegram_user_phone(str(user_id), bound_cust.phone)
 
-    try:
-        try:
-            await context.bot.send_chat_action(
-                chat_id=chat_id,
-                action=ChatAction.TYPING,
-            )
-        except Exception:
-            pass
+    # Reiniciar sesión para un pedido nuevo desde cero
+    from src.services.flow_router import clear_session
+    clear_session(thread_id)
 
-        resultado = await graph.ainvoke(
-            {
-                "messages": [
-                    HumanMessage(
-                        content="Hola, acabo de iniciar la conversación para pedir gas."
-                    )
-                ],
-                "channel": "telegram",
-                "channel_user_id": str(user_id),
-            },
-            config=config,
-        )
+    flow_res = await flow_router.process_event(
+        session_id=thread_id,
+        text="/start",
+        channel="telegram",
+        channel_user_id=str(user_id),
+        tenant_id=TENANT_ID,
+    )
 
-        ai_message = resultado["messages"][-1]
-        respuesta = ai_message.content
-
-        if not isinstance(respuesta, str):
-            respuesta = str(respuesta)
-
-        markup_start = get_botones_tipo_servicio()
-        respuesta = optimizar_respuesta_con_botones(respuesta, markup_start)
-        await update.message.reply_text(
-            respuesta,
-            reply_markup=markup_start,
-        )
-
-    except Exception as error:
-        logger.error(f"❌ Error en /start para usuario {user_id}: {error}", exc_info=True)
-        await update.message.reply_text(
-            "¡Hola! 👋 Bienvenido a Gas a Tu Puerta - Petroil. ⛽\n\n"
-            "¿En qué podemos ayudarte hoy? ¿Tu pedido será para cilindro o tanque estacionario?",
-            reply_markup=get_botones_tipo_servicio(),
-        )
+    markup_start = get_botones_tipo_servicio()
+    respuesta = optimizar_respuesta_con_botones(flow_res.text, markup_start)
+    await safe_reply_text(update.message, respuesta, reply_markup=markup_start)
 
 
-async def safe_reply_text(message, text: str, reply_markup=None) -> None:
+async def safe_reply_text(message, text: str, reply_markup=None) -> Any:
     """Envía un mensaje a Telegram intentando parse_mode='Markdown' y con fallback a texto plano si falla."""
     if not isinstance(text, str):
-        text = str(text)
+        text = str(text) if text is not None else ""
+    if not text.strip():
+        text = "¿En qué puedo ayudarte? 😊"
     try:
-        await message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        return await message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
     except Exception as e:
         logger.warning(f"Error al enviar mensaje con Markdown ({e}), reintentando en texto plano...")
         try:
-            await message.reply_text(text, reply_markup=reply_markup)
+            return await message.reply_text(text, reply_markup=reply_markup)
         except Exception as e2:
             logger.error(f"Error fatal enviando mensaje: {e2}")
+            return None
 
 
 MENSAJE_SEGURIDAD_ATENCION = (
@@ -718,7 +879,7 @@ MENSAJE_SEGURIDAD_ATENCION = (
 
 
 async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Procesar mensajes de texto enviados por el usuario."""
+    """Procesar mensajes de texto enviados por el usuario usando el enrutador determinista."""
     if not update.message or not update.message.text:
         return
 
@@ -771,27 +932,31 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     thread_id = f"telegram:{TENANT_ID}:{chat_id}"
 
-    config = {
-        "configurable": {
-            "thread_id": thread_id,
-            "tenant_id": TENANT_ID,
-            "channel": "telegram",
-            "channel_user_id": str(user_id),
-        }
-    }
-
     # 3. Control de seguridad y vinculación de teléfono con el usuario de Telegram
     bound_cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
     if bound_cust and bound_cust.phone:
         context.user_data["phone"] = bound_cust.phone
+        if hasattr(repo, "bind_telegram_user_phone"):
+            repo.bind_telegram_user_phone(str(user_id), bound_cust.phone)
     else:
-        # Detectar si se proporcionó un solo teléfono celular legítimo
         if len(found_phones) == 1:
             digits = re.sub(r"\D", "", found_phones[0])
             if len(digits) == 10:
                 context.user_data["phone"] = digits
+                if hasattr(repo, "bind_telegram_user_phone"):
+                    repo.bind_telegram_user_phone(str(user_id), digits)
         elif len(found_phones) > 1:
             context.user_data.pop("phone", None)
+
+    if not context.user_data.get("phone") and user_id:
+        from src.repositories.identity_store import identity_store
+        mapped_phone = identity_store.get_phone_for_channel_user("telegram", str(user_id))
+        if mapped_phone:
+            context.user_data["phone"] = mapped_phone
+
+    phone_ctx = context.user_data.get("phone", "")
+    if phone_ctx and hasattr(repo, "bind_telegram_user_phone"):
+        repo.bind_telegram_user_phone(str(user_id), phone_ctx)
 
     try:
         try:
@@ -802,38 +967,35 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             pass
 
-        # Invocación asíncrona del grafo LangGraph
-        resultado = await graph.ainvoke(
-            {
-                "messages": [
-                    HumanMessage(content=texto_usuario)
-                ],
-                "channel": "telegram",
-                "channel_user_id": str(user_id),
-            },
-            config=config,
+        # Invocación del motor determinista de flujo
+        flow_res = await flow_router.process_event(
+            session_id=thread_id,
+            text=texto_usuario,
+            channel="telegram",
+            channel_user_id=str(user_id),
+            tenant_id=TENANT_ID,
         )
 
-        ai_message = resultado["messages"][-1]
-        respuesta = ai_message.content
-        if not isinstance(respuesta, str):
-            respuesta = str(respuesta)
-
-        # Si la respuesta contiene denegación de acceso o de seguridad, mostrar mensaje estructurado
-        if "⛔ ACCESO DENEGADO" in respuesta or "ACCESO DENEGADO" in respuesta:
-            respuesta = MENSAJE_SEGURIDAD_ATENCION
-
         phone_ctx = context.user_data.get("phone", "")
-        inline_markup = detectar_botones_mensaje(respuesta, phone=phone_ctx, channel_user_id=str(user_id))
-        respuesta = optimizar_respuesta_con_botones(respuesta, inline_markup)
+        inline_markup = get_markup_for_flow_response(flow_res, phone=phone_ctx, user_id=str(user_id))
+        respuesta = optimizar_respuesta_con_botones(flow_res.text, inline_markup)
 
         max_len = 4000
+        sent_msg = None
         if len(respuesta) <= max_len:
-            await safe_reply_text(update.message, respuesta, reply_markup=inline_markup)
+            sent_msg = await safe_reply_text(update.message, respuesta, reply_markup=inline_markup)
         else:
             for i in range(0, len(respuesta), max_len):
                 sub_markup = inline_markup if (i + max_len >= len(respuesta)) else None
-                await safe_reply_text(update.message, respuesta[i:i + max_len], reply_markup=sub_markup)
+                sub_sent = await safe_reply_text(update.message, respuesta[i:i + max_len], reply_markup=sub_markup)
+                if sub_markup:
+                    sent_msg = sub_sent
+
+        if sent_msg and inline_markup:
+            match_order = re.search(r"(?:pedido|folio)\s*#?\s*(\d+)", respuesta, re.IGNORECASE)
+            if match_order and "cancel_order_client" in str(inline_markup):
+                from src.services.notifications import cleanup_client_order_buttons
+                cleanup_client_order_buttons(match_order.group(1), chat_id=chat_id, keep_message_id=sent_msg.message_id)
 
     except Exception as error:
         logger.error(f"❌ Error procesando mensaje de {user_id}: {error}", exc_info=True)
@@ -859,29 +1021,7 @@ async def recibir_ubicacion_cliente(
     lng = loc.longitude
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-
-    direccion_detectada = reverse_geocode(lat, lng)
-
     thread_id = f"telegram:{TENANT_ID}:{chat_id}"
-
-    config = {
-        "configurable": {
-            "thread_id": thread_id,
-            "tenant_id": TENANT_ID,
-            "channel": "telegram",
-            "channel_user_id": str(user_id),
-        }
-    }
-
-    prompt_gps = (
-        f"📍 [UBICACIÓN GPS EN TIEMPO REAL COMPARTIDA POR EL CLIENTE]\n"
-        f"- Dirección detectada en mapa: {direccion_detectada}\n"
-        f"- Coordenadas GPS exactas: Latitud {lat:.6f}, Longitud {lng:.6f}\n\n"
-        f"INSTRUCCIÓN PARA EL ASISTENTE:\n"
-        f"1. Confirma al cliente que recibiste con éxito su ubicación en '{direccion_detectada}'.\n"
-        f"2. Pregúntale amablemente si confirma esta ubicación como su punto de entrega y si tiene referencias adicionales (ej. color de casa o portón).\n"
-        f"3. Cuando llames a la herramienta create_order para finalizar el pedido, en el campo 'delivery_address' DEBES registrar el nombre de la calle/colonia ('{direccion_detectada}'), agregando cualquier referencia del cliente (ej. '{direccion_detectada} - Casa blanca con portón'). NUNCA uses números de latitud ni longitud como nombre de dirección. Y DEBES pasar obligatoriamente: delivery_lat={lat:.6f}, delivery_lng={lng:.6f}."
-    )
 
     try:
         try:
@@ -892,36 +1032,96 @@ async def recibir_ubicacion_cliente(
         except Exception:
             pass
 
-        resultado = await graph.ainvoke(
-            {
-                "messages": [
-                    HumanMessage(content=prompt_gps)
-                ],
-                "channel": "telegram",
-                "channel_user_id": str(user_id),
-            },
-            config=config,
+        flow_res = await flow_router.process_event(
+            session_id=thread_id,
+            location={"latitude": lat, "longitude": lng},
+            channel="telegram",
+            channel_user_id=str(user_id),
+            tenant_id=TENANT_ID,
         )
 
-        ai_message = resultado["messages"][-1]
-        respuesta = ai_message.content
-
-        if not isinstance(respuesta, str):
-            respuesta = str(respuesta)
-
-        await update.message.reply_text(respuesta)
+        phone_ctx = context.user_data.get("phone", "")
+        inline_markup = get_markup_for_flow_response(flow_res, phone=phone_ctx, user_id=str(user_id))
+        respuesta = optimizar_respuesta_con_botones(flow_res.text, inline_markup)
+        await safe_reply_text(update.message, respuesta, reply_markup=inline_markup)
 
     except Exception as error:
         logger.error(f"❌ Error procesando ubicación GPS de {user_id}: {error}", exc_info=True)
-        await update.message.reply_text(
+        await safe_reply_text(
+            update.message,
             f"📍 ¡Ubicación GPS recibida ({lat:.5f}, {lng:.5f})!\n"
-            f"Dirección detectada: {direccion_detectada}.\n"
-            "¿Deseas que programemos tu entrega en este punto?"
+            "Si tienes un pedido activo en curso, tus coordenadas han sido actualizadas para el chofer. ⛽✨"
+        )
+
+
+async def recibir_voz_cliente(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Procesar notas de voz y mensajes de audio enviados por el cliente."""
+    if not update.message or (not update.message.voice and not update.message.audio):
+        return
+
+    if not update.effective_chat or not update.effective_user:
+        return
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    thread_id = f"telegram:{TENANT_ID}:{chat_id}"
+
+    try:
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    except Exception:
+        pass
+
+    voice_obj = update.message.voice or update.message.audio
+    file_id = voice_obj.file_id
+
+    audio_dir = Path(__file__).parent / "uploads" / "voice_notes"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = audio_dir / f"voice_{user_id}_{int(datetime.now().timestamp())}.ogg"
+
+    try:
+        tg_file = await context.bot.get_file(file_id)
+        await tg_file.download_to_drive(custom_path=str(audio_path))
+
+        # Transcribir nota de voz
+        texto_transcrito = await transcribe_audio_file(audio_path)
+        if not texto_transcrito:
+            await safe_reply_text(
+                update.message,
+                "🎙️ He recibido tu nota de voz, pero no fue posible transcribirla con claridad. "
+                "Por favor intenta escribir tu mensaje o enviar un nuevo audio."
+            )
+            return
+
+        logger.info(f"[Audio Telegram] Usuario {user_id}: \"{texto_transcrito}\"")
+
+        flow_res = await flow_router.process_event(
+            session_id=thread_id,
+            text=texto_transcrito,
+            channel="telegram",
+            channel_user_id=str(user_id),
+            tenant_id=TENANT_ID,
+        )
+
+        phone_ctx = context.user_data.get("phone", "")
+        inline_markup = get_markup_for_flow_response(flow_res, phone=phone_ctx, user_id=str(user_id))
+        respuesta = optimizar_respuesta_con_botones(flow_res.text, inline_markup)
+
+        header = f"🎙️ _Nota de voz:_ \"{texto_transcrito}\"\n\n"
+        await safe_reply_text(update.message, header + respuesta, reply_markup=inline_markup)
+
+    except Exception as error:
+        logger.error(f"❌ Error procesando nota de voz de {user_id}: {error}", exc_info=True)
+        await safe_reply_text(
+            update.message,
+            "⚠️ Ocurrió un error al procesar tu nota de voz. Por favor intenta escribir tu solicitud."
         )
 
 
 async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manejar botones interactivos del cliente (ej. Selección de servicio, Cancelar Pedido)."""
+    """Manejar botones interactivos del cliente de forma 100% determinista sin LLM."""
     query = update.callback_query
     if not query or not query.data:
         return
@@ -930,21 +1130,32 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
     data = query.data
     repo = get_repository()
 
+    user_id = query.from_user.id if query.from_user else (update.effective_user.id if update.effective_user else 0)
+    chat_id = update.effective_chat.id if update.effective_chat else user_id
+    thread_id = f"telegram:{TENANT_ID}:{chat_id}"
+
+    if not context.user_data.get("phone") and user_id:
+        from src.repositories.identity_store import identity_store
+        mapped_phone = identity_store.get_phone_for_channel_user("telegram", str(user_id))
+        if mapped_phone:
+            context.user_data["phone"] = mapped_phone
+
+    # 1. Tipo de servicio
     if data.startswith("client_svc:"):
-        svc_type = data.split(":")[1]
-        context.user_data["service_type"] = svc_type
-
-        user_id = query.from_user.id if query.from_user else (update.effective_user.id if update.effective_user else 0)
-        chat_id = update.effective_chat.id if update.effective_chat else user_id
-
-        # Remover botones del mensaje anterior
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
 
-        if svc_type == "cilindro":
-            # Desplegar de inmediato el catálogo interactivo de cilindros con botones dinámicos y carrito
+        flow_res = await flow_router.process_event(
+            session_id=thread_id,
+            callback_data=data,
+            channel="telegram",
+            channel_user_id=str(user_id),
+            tenant_id=TENANT_ID,
+        )
+
+        if data == "client_svc:cilindro":
             context.user_data["carrito_cilindros"] = {}
             texto_catalogo = texto_resumen_catalogo({})
             markup_catalogo = get_botones_productos_cilindros({})
@@ -955,70 +1166,14 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
                 parse_mode="Markdown",
             )
             return
-
-        texto_usuario = "Deseo pedir gas para tanque estacionario"
-
-        try:
-            await context.bot.send_chat_action(
-                chat_id=chat_id,
-                action=ChatAction.TYPING,
-            )
-        except Exception:
-            pass
-
-        thread_id = f"telegram:{TENANT_ID}:{chat_id}"
-        config = {
-            "configurable": {
-                "thread_id": thread_id,
-                "tenant_id": TENANT_ID,
-                "channel": "telegram",
-                "channel_user_id": str(user_id),
-            }
-        }
-
-        try:
-            resultado = await graph.ainvoke(
-                {
-                    "messages": [HumanMessage(content=texto_usuario)],
-                    "channel": "telegram",
-                    "channel_user_id": str(user_id),
-                },
-                config=config,
-            )
-
-            ai_message = resultado["messages"][-1]
-            respuesta = ai_message.content
-            if not isinstance(respuesta, str):
-                respuesta = str(respuesta)
-
-            phone_ctx = context.user_data.get("phone", "")
-            inline_markup = detectar_botones_mensaje(respuesta, phone=phone_ctx, channel_user_id=str(user_id))
-            respuesta = optimizar_respuesta_con_botones(respuesta, inline_markup)
-
-            max_len = 4000
-            if len(respuesta) <= max_len:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=respuesta,
-                    reply_markup=inline_markup,
-                )
-            else:
-                for i in range(0, len(respuesta), max_len):
-                    sub_markup = inline_markup if (i + max_len >= len(respuesta)) else None
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=respuesta[i:i + max_len],
-                        reply_markup=sub_markup,
-                    )
-        except Exception as error:
-            logger.error(f"❌ Error procesando tipo de servicio para {user_id}: {error}", exc_info=True)
+        else:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text="⚠️ Ocurrió un error al procesar tu solicitud. Por favor intenta de nuevo.",
+                text=flow_res.text,
             )
-        return
+            return
 
-    # Agregar producto al carrito interactivo
+    # 2. Carrito interactivo de cilindros
     if data.startswith("cart_add:"):
         key = data.split(":")[1]
         carrito = context.user_data.setdefault("carrito_cilindros", {})
@@ -1043,7 +1198,6 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
                 pass
         return
 
-    # Vaciar carrito interactivo
     if data == "cart_clear":
         context.user_data["carrito_cilindros"] = {}
         nuevo_texto = texto_resumen_catalogo({})
@@ -1065,101 +1219,50 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
                 pass
         return
 
-    # Confirmar productos del carrito y continuar con el pedido
     if data == "cart_checkout":
         carrito = context.user_data.get("carrito_cilindros", {})
         if not carrito or sum(carrito.values()) == 0:
             await query.answer("Por favor selecciona al menos un cilindro.", show_alert=True)
             return
 
-        partes = []
-        prods = get_catalogo_productos_db()
-        prods_by_id = {p.id: p for p in prods}
-
-        for k, cant in carrito.items():
-            if cant > 0:
-                if k in prods_by_id:
-                    nombre = prods_by_id[k].name
-                else:
-                    nombre = f"Cilindro de {k}"
-                partes.append(f"{cant} {nombre}")
-
-        texto_usuario = f"Deseo ordenar {', '.join(partes)}"
+        # Sincronizar con flow_router
+        sess = get_or_create_session(thread_id, tenant_id=TENANT_ID, channel="telegram", channel_user_id=str(user_id))
+        sess.cart = dict(carrito)
         context.user_data["carrito_cilindros"] = {}
 
-        # Remover botones del mensaje previo de catálogo
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
 
-        user_id = query.from_user.id if query.from_user else (update.effective_user.id if update.effective_user else 0)
-        chat_id = update.effective_chat.id if update.effective_chat else user_id
+        flow_res = await flow_router.process_event(
+            session_id=thread_id,
+            callback_data="cart_checkout",
+            channel="telegram",
+            channel_user_id=str(user_id),
+            tenant_id=TENANT_ID,
+        )
 
-        try:
-            await context.bot.send_chat_action(
-                chat_id=chat_id,
-                action=ChatAction.TYPING,
-            )
-        except Exception:
-            pass
+        phone_ctx = context.user_data.get("phone", "")
+        markup = get_markup_for_flow_response(flow_res, phone=phone_ctx, user_id=str(user_id))
+        respuesta = optimizar_respuesta_con_botones(flow_res.text, markup)
 
-        thread_id = f"telegram:{TENANT_ID}:{chat_id}"
-        config = {
-            "configurable": {
-                "thread_id": thread_id,
-                "tenant_id": TENANT_ID,
-                "channel": "telegram",
-                "channel_user_id": str(user_id),
-            }
-        }
-
-        try:
-            resultado = await graph.ainvoke(
-                {
-                    "messages": [HumanMessage(content=texto_usuario)],
-                    "channel": "telegram",
-                    "channel_user_id": str(user_id),
-                },
-                config=config,
-            )
-
-            ai_message = resultado["messages"][-1]
-            respuesta = ai_message.content
-            if not isinstance(respuesta, str):
-                respuesta = str(respuesta)
-
-            phone_ctx = context.user_data.get("phone", "")
-            inline_markup = detectar_botones_mensaje(respuesta, phone=phone_ctx, channel_user_id=str(user_id))
-            respuesta = optimizar_respuesta_con_botones(respuesta, inline_markup)
-
-            max_len = 4000
-            if len(respuesta) <= max_len:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=respuesta,
-                    reply_markup=inline_markup,
-                )
-            else:
-                for i in range(0, len(respuesta), max_len):
-                    sub_markup = inline_markup if (i + max_len >= len(respuesta)) else None
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=respuesta[i:i + max_len],
-                        reply_markup=sub_markup,
-                    )
-        except Exception as error:
-            logger.error(f"❌ Error en cart_checkout para {user_id}: {error}", exc_info=True)
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="⚠️ Ocurrió un error al procesar tu selección. Por favor intenta de nuevo.",
-            )
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=respuesta,
+            reply_markup=markup,
+        )
         return
 
-    # Menú para eliminar una dirección guardada
+    # 3. Menú para eliminar una dirección guardada
     if data == "client_addr_del_menu":
         user_id = query.from_user.id if query.from_user else (update.effective_user.id if update.effective_user else 0)
         phone = context.user_data.get("phone", "")
+        if not phone and user_id:
+            from src.repositories.identity_store import identity_store
+            phone = identity_store.get_phone_for_channel_user("telegram", str(user_id)) or ""
+            if phone:
+                context.user_data["phone"] = phone
         cust = repo.get_customer_by_phone(TENANT_ID, phone) if phone else None
         if not cust and user_id:
             cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
@@ -1174,56 +1277,108 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
                 reply_markup=get_botones_eliminar_direcciones(cust.addresses),
                 parse_mode="Markdown",
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to edit message in client_addr_del_menu Markdown: {e}")
+            try:
+                await query.edit_message_text(
+                    text="🗑️ Eliminar Dirección Guardada\n\nSelecciona la dirección que deseas borrar de tu cuenta:",
+                    reply_markup=get_botones_eliminar_direcciones(cust.addresses),
+                )
+            except Exception as e2:
+                logger.error(f"Failed to edit message in client_addr_del_menu plain text: {e2}")
         return
 
-    # Confirmación previa antes de borrar la dirección seleccionada
-    if data.startswith("client_addr_del:"):
+    # 3b. Paso de confirmación previa antes de eliminar
+    if data.startswith("client_addr_del:") and not data.startswith("client_addr_del_confirm:"):
         parts = data.split(":")
-        addr_id = int(parts[1])
+        raw_aid = parts[1]
+        addr_id = int(raw_aid) if raw_aid.isdigit() else raw_aid
         idx = parts[2] if len(parts) > 2 else "1"
         user_id = query.from_user.id if query.from_user else (update.effective_user.id if update.effective_user else 0)
         phone = context.user_data.get("phone", "")
+        if not phone and user_id:
+            from src.repositories.identity_store import identity_store
+            phone = identity_store.get_phone_for_channel_user("telegram", str(user_id)) or ""
+            if phone:
+                context.user_data["phone"] = phone
         cust = repo.get_customer_by_phone(TENANT_ID, phone) if phone else None
         if not cust and user_id:
             cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
 
-        addr_obj = next((a for a in (cust.addresses if cust else []) if a.id == addr_id), None)
-        addr_str = addr_obj.address if addr_obj else f"Dirección #{idx}"
+        target_addr = None
+        if cust and cust.addresses:
+            target_addr = next((a for a in cust.addresses if str(a.id) == str(raw_aid)), None)
+            if not target_addr and idx.isdigit():
+                i_idx = int(idx) - 1
+                if 0 <= i_idx < len(cust.addresses):
+                    target_addr = cust.addresses[i_idx]
 
-        confirm_markup = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("🗑️ Sí, eliminar", callback_data=f"client_addr_del_confirm:{addr_id}"),
-                ],
-                [
-                    InlineKeyboardButton("🔙 Cancelar", callback_data="client_addr_del_menu"),
-                ],
-            ]
+        addr_str = target_addr.address if target_addr else f"Dirección #{idx}"
+        actual_aid = target_addr.id if target_addr else addr_id
+
+        clean_addr = resolve_gps_address_to_name(addr_str.strip())
+        clean_addr = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_addr, flags=re.I).strip()
+
+        confirm_text = (
+            "⚠️ *¿Estás seguro de que deseas eliminar esta dirección?*\n\n"
+            f"📍 *Dirección seleccionada:*\n`{clean_addr}`\n\n"
+            "⚠️ _Esta acción no se puede deshacer. Por favor confirma tu decisión:_"
         )
+        confirm_markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🗑️ Sí, eliminar dirección", callback_data=f"client_addr_del_confirm:{actual_aid}:{idx}")
+            ],
+            [
+                InlineKeyboardButton("❌ No, cancelar", callback_data="client_addr_del_menu")
+            ]
+        ])
 
         try:
             await query.edit_message_text(
-                text=f"⚠️ *¿Estás seguro de eliminar esta dirección?*\n\n📍 `{addr_str}`\n\nEsta acción no se puede deshacer.",
+                text=confirm_text,
                 reply_markup=confirm_markup,
                 parse_mode="Markdown",
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Error editing message for delete confirmation: {e}")
+            try:
+                await query.edit_message_text(
+                    text=f"⚠️ ¿Estás seguro de que deseas eliminar esta dirección?\n\n📍 Dirección:\n{clean_addr}\n\nEsta acción no se puede deshacer. Por favor confirma tu decisión:",
+                    reply_markup=confirm_markup,
+                )
+            except Exception as e2:
+                logger.error(f"Error editing message plain text: {e2}")
         return
 
-    # Ejecutar eliminación definitiva de la dirección
     if data.startswith("client_addr_del_confirm:"):
-        addr_id = int(data.split(":")[1])
+        parts = data.split(":")
+        raw_aid = parts[1]
+        addr_id = int(raw_aid) if raw_aid.isdigit() else raw_aid
+        idx = parts[2] if len(parts) > 2 else "1"
         user_id = query.from_user.id if query.from_user else (update.effective_user.id if update.effective_user else 0)
         phone = context.user_data.get("phone", "")
+        if not phone and user_id:
+            from src.repositories.identity_store import identity_store
+            phone = identity_store.get_phone_for_channel_user("telegram", str(user_id)) or ""
+            if phone:
+                context.user_data["phone"] = phone
         cust = repo.get_customer_by_phone(TENANT_ID, phone) if phone else None
         if not cust and user_id:
             cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
 
+        target_addr = None
+        if cust and cust.addresses:
+            target_addr = next((a for a in cust.addresses if str(a.id) == str(raw_aid)), None)
+            if not target_addr and idx.isdigit():
+                i_idx = int(idx) - 1
+                if 0 <= i_idx < len(cust.addresses):
+                    target_addr = cust.addresses[i_idx]
+
+        addr_str = target_addr.address if target_addr else f"Dirección #{idx}"
+        actual_aid = target_addr.id if target_addr else addr_id
+
         if cust:
-            repo.delete_customer_address(cust.id, addr_id)
+            repo.delete_customer_address(cust.id, actual_aid, phone=phone, address_text=addr_str)
             updated_cust = repo.get_customer_by_phone(TENANT_ID, phone) if phone else repo.get_customer(TENANT_ID, "telegram", str(user_id))
             remaining_addrs = updated_cust.addresses if (updated_cust and updated_cust.addresses) else []
         else:
@@ -1250,14 +1405,25 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
                 reply_markup=markup_resp,
                 parse_mode="Markdown",
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Error editing message with Markdown after address deletion: {e}")
+            try:
+                await query.edit_message_text(
+                    text=texto_resp.replace("*", "").replace("`", ""),
+                    reply_markup=markup_resp,
+                )
+            except Exception as e2:
+                logger.error(f"Error editing message plain text after address deletion: {e2}")
         return
 
-    # Volver del menú de eliminación a selección de dirección
     if data == "client_addr_back":
         user_id = query.from_user.id if query.from_user else (update.effective_user.id if update.effective_user else 0)
         phone = context.user_data.get("phone", "")
+        if not phone and user_id:
+            from src.repositories.identity_store import identity_store
+            phone = identity_store.get_phone_for_channel_user("telegram", str(user_id)) or ""
+            if phone:
+                context.user_data["phone"] = phone
         cust = repo.get_customer_by_phone(TENANT_ID, phone) if phone else None
         if not cust and user_id:
             cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
@@ -1276,327 +1442,259 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
                 reply_markup=markup_resp,
                 parse_mode="Markdown",
             )
-        except Exception:
-            pass
-        return
-
-    # Selección de dirección guardada o nueva dirección
-    if data.startswith("client_addr:"):
-        choice = data.split(":", 1)[1]
-        user_id = query.from_user.id if query.from_user else (update.effective_user.id if update.effective_user else 0)
-        chat_id = update.effective_chat.id if update.effective_chat else user_id
-
-        # Remover botones del mensaje anterior
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-
-        try:
-            await context.bot.send_chat_action(
-                chat_id=chat_id,
-                action=ChatAction.TYPING,
-            )
-        except Exception:
-            pass
-
-        phone = context.user_data.get("phone", "")
-        cust = repo.get_customer_by_phone(TENANT_ID, phone) if phone else None
-        if not cust and user_id:
-            cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
-
-        if choice == "new":
-            texto_usuario = "Deseo ingresar una nueva dirección de entrega"
-        else:
+        except Exception as e:
+            logger.warning(f"Error editing message in client_addr_back Markdown: {e}")
             try:
-                idx = int(choice) - 1
-                if cust and cust.addresses and 0 <= idx < len(cust.addresses):
-                    selected_addr = cust.addresses[idx].address
-                elif cust and cust.address and idx == 0:
-                    selected_addr = cust.address
-                else:
-                    selected_addr = f"dirección #{choice}"
-                texto_usuario = f"Deseo que envíen el pedido a mi dirección registrada: {selected_addr}"
-            except Exception:
-                texto_usuario = f"Deseo la dirección número {choice}"
-
-        thread_id = f"telegram:{TENANT_ID}:{chat_id}"
-        config = {
-            "configurable": {
-                "thread_id": thread_id,
-                "tenant_id": TENANT_ID,
-                "channel": "telegram",
-                "channel_user_id": str(user_id),
-            }
-        }
-
-        try:
-            resultado = await graph.ainvoke(
-                {
-                    "messages": [HumanMessage(content=texto_usuario)],
-                    "channel": "telegram",
-                    "channel_user_id": str(user_id),
-                },
-                config=config,
-            )
-
-            ai_message = resultado["messages"][-1]
-            respuesta = ai_message.content
-            if not isinstance(respuesta, str):
-                respuesta = str(respuesta)
-
-            inline_markup = detectar_botones_mensaje(respuesta, phone=phone, channel_user_id=str(user_id))
-            respuesta = optimizar_respuesta_con_botones(respuesta, inline_markup)
-
-            max_len = 4000
-            if len(respuesta) <= max_len:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=respuesta,
-                    reply_markup=inline_markup,
+                await query.edit_message_text(
+                    text=texto_resp.replace("*", "").replace("`", ""),
+                    reply_markup=markup_resp,
                 )
-            else:
-                for i in range(0, len(respuesta), max_len):
-                    sub_markup = inline_markup if (i + max_len >= len(respuesta)) else None
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=respuesta[i:i + max_len],
-                        reply_markup=sub_markup,
-                    )
-        except Exception as error:
-            logger.error(f"❌ Error en selección de dirección para {user_id}: {error}", exc_info=True)
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="⚠️ Ocurrió un error al procesar tu selección de dirección. Por favor intenta de nuevo.",
-            )
+            except Exception as e2:
+                logger.error(f"Error editing message in client_addr_back plain text: {e2}")
         return
 
-    # Selección de método de pago (Efectivo / Terminal)
+    # 4. Selección de dirección guardada o nueva
+    if data.startswith("client_addr:"):
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        flow_res = await flow_router.process_event(
+            session_id=thread_id,
+            callback_data=data,
+            channel="telegram",
+            channel_user_id=str(user_id),
+            tenant_id=TENANT_ID,
+        )
+
+        phone_ctx = context.user_data.get("phone", "")
+        markup = get_markup_for_flow_response(flow_res, phone=phone_ctx, user_id=str(user_id))
+        respuesta = optimizar_respuesta_con_botones(flow_res.text, markup)
+
+        sent_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=respuesta,
+            reply_markup=markup,
+        )
+        if sent_msg and markup:
+            match_order = re.search(r"(?:pedido|folio)\s*#?\s*(\d+)", respuesta, re.IGNORECASE)
+            if match_order and "cancel_order_client" in str(markup):
+                from src.services.notifications import cleanup_client_order_buttons
+                cleanup_client_order_buttons(match_order.group(1), chat_id=chat_id, keep_message_id=sent_msg.message_id)
+        return
+
+    # 4.5 Selección de programación de horario (Lo antes posible / Programar entrega / Aceptar alternativa)
+    if data.startswith("client_sch:") or data.startswith("client_sch_accept"):
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        flow_res = await flow_router.process_event(
+            session_id=thread_id,
+            callback_data=data,
+            channel="telegram",
+            channel_user_id=str(user_id),
+            tenant_id=TENANT_ID,
+        )
+
+        phone_ctx = context.user_data.get("phone", "")
+        markup = get_markup_for_flow_response(flow_res, phone=phone_ctx, user_id=str(user_id))
+        respuesta = optimizar_respuesta_con_botones(flow_res.text, markup)
+
+        sent_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=respuesta,
+            reply_markup=markup,
+        )
+        if sent_msg and markup:
+            match_order = re.search(r"(?:pedido|folio)\s*#?\s*(\d+)", respuesta, re.IGNORECASE)
+            if match_order and "cancel_order_client" in str(markup):
+                from src.services.notifications import cleanup_client_order_buttons
+                cleanup_client_order_buttons(match_order.group(1), chat_id=chat_id, keep_message_id=sent_msg.message_id)
+        return
+
+    # 5. Selección de método de pago (Efectivo / Terminal)
     if data.startswith("client_pay:"):
-        pay_type = data.split(":", 1)[1]
-        user_id = query.from_user.id if query.from_user else (update.effective_user.id if update.effective_user else 0)
-        chat_id = update.effective_chat.id if update.effective_chat else user_id
-
-        # Remover botones del mensaje anterior
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
 
+        flow_res = await flow_router.process_event(
+            session_id=thread_id,
+            callback_data=data,
+            channel="telegram",
+            channel_user_id=str(user_id),
+            tenant_id=TENANT_ID,
+        )
+
+        phone_ctx = context.user_data.get("phone", "")
+        markup = get_markup_for_flow_response(flow_res, phone=phone_ctx, user_id=str(user_id))
+        respuesta = optimizar_respuesta_con_botones(flow_res.text, markup)
+
+        sent_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=respuesta,
+            reply_markup=markup,
+        )
+        if sent_msg and markup:
+            match_order = re.search(r"(?:pedido|folio)\s*#?\s*(\d+)", respuesta, re.IGNORECASE)
+            if match_order and "cancel_order_client" in str(markup):
+                from src.services.notifications import cleanup_client_order_buttons
+                cleanup_client_order_buttons(match_order.group(1), chat_id=chat_id, keep_message_id=sent_msg.message_id)
+    # 5.5 Modificación o corrección de datos del pedido
+    if data.startswith("client_edit:"):
         try:
-            await context.bot.send_chat_action(
-                chat_id=chat_id,
-                action=ChatAction.TYPING,
-            )
+            await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
 
-        texto_usuario = "Mi método de pago será en Efectivo" if pay_type == "efectivo" else "Mi método de pago será con Terminal (Tarjeta)"
+        flow_res = await flow_router.process_event(
+            session_id=thread_id,
+            callback_data=data,
+            channel="telegram",
+            channel_user_id=str(user_id),
+            tenant_id=TENANT_ID,
+        )
 
-        thread_id = f"telegram:{TENANT_ID}:{chat_id}"
-        config = {
-            "configurable": {
-                "thread_id": thread_id,
-                "tenant_id": TENANT_ID,
-                "channel": "telegram",
-                "channel_user_id": str(user_id),
-            }
-        }
+        phone_ctx = context.user_data.get("phone", "")
+        markup = get_markup_for_flow_response(flow_res, phone=phone_ctx, user_id=str(user_id))
+        respuesta = optimizar_respuesta_con_botones(flow_res.text, markup)
 
-        try:
-            resultado = await graph.ainvoke(
-                {
-                    "messages": [HumanMessage(content=texto_usuario)],
-                    "channel": "telegram",
-                    "channel_user_id": str(user_id),
-                },
-                config=config,
-            )
-
-            ai_message = resultado["messages"][-1]
-            respuesta = ai_message.content
-            if not isinstance(respuesta, str):
-                respuesta = str(respuesta)
-
-            phone_ctx = context.user_data.get("phone", "")
-            inline_markup = detectar_botones_mensaje(respuesta, phone=phone_ctx, channel_user_id=str(user_id))
-            respuesta = optimizar_respuesta_con_botones(respuesta, inline_markup)
-
-            max_len = 4000
-            if len(respuesta) <= max_len:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=respuesta,
-                    reply_markup=inline_markup,
-                )
-            else:
-                for i in range(0, len(respuesta), max_len):
-                    sub_markup = inline_markup if (i + max_len >= len(respuesta)) else None
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=respuesta[i:i + max_len],
-                        reply_markup=sub_markup,
-                    )
-        except Exception as error:
-            logger.error(f"❌ Error en selección de pago para {user_id}: {error}", exc_info=True)
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="⚠️ Ocurrió un error al procesar tu método de pago. Por favor intenta de nuevo.",
-            )
+        sent_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=respuesta,
+            reply_markup=markup,
+        )
+        if sent_msg and markup:
+            match_order = re.search(r"(?:pedido|folio)\s*#?\s*(\d+)", respuesta, re.IGNORECASE)
+            if match_order and "cancel_order_client" in str(markup):
+                from src.services.notifications import cleanup_client_order_buttons
+                cleanup_client_order_buttons(match_order.group(1), chat_id=chat_id, keep_message_id=sent_msg.message_id)
         return
 
-    # Confirmar, editar o cancelar pedido desde el resumen
+    # 6. Confirmación, modificación o cancelación de pedido
     if data.startswith("client_confirm:"):
-        action = data.split(":", 1)[1]
-        user_id = query.from_user.id if query.from_user else (update.effective_user.id if update.effective_user else 0)
-        chat_id = update.effective_chat.id if update.effective_chat else user_id
-
-        # Remover botones del mensaje anterior
         try:
             await query.edit_message_reply_markup(reply_markup=None)
+
         except Exception:
             pass
 
-        try:
-            await context.bot.send_chat_action(
-                chat_id=chat_id,
-                action=ChatAction.TYPING,
-            )
-        except Exception:
-            pass
+        flow_res = await flow_router.process_event(
+            session_id=thread_id,
+            callback_data=data,
+            channel="telegram",
+            channel_user_id=str(user_id),
+            tenant_id=TENANT_ID,
+        )
 
-        if action == "yes":
-            texto_usuario = "Sí, confirmar pedido"
-        elif action == "edit":
-            texto_usuario = "Deseo modificar los datos de mi pedido"
-        else:
-            texto_usuario = "No, deseo cancelar este pedido"
+        phone_ctx = context.user_data.get("phone", "")
+        markup = get_markup_for_flow_response(flow_res, phone=phone_ctx, user_id=str(user_id))
+        respuesta = optimizar_respuesta_con_botones(flow_res.text, markup)
 
-        thread_id = f"telegram:{TENANT_ID}:{chat_id}"
-        config = {
-            "configurable": {
-                "thread_id": thread_id,
-                "tenant_id": TENANT_ID,
-                "channel": "telegram",
-                "channel_user_id": str(user_id),
-            }
-        }
-
-        try:
-            resultado = await graph.ainvoke(
-                {
-                    "messages": [HumanMessage(content=texto_usuario)],
-                    "channel": "telegram",
-                    "channel_user_id": str(user_id),
-                },
-                config=config,
-            )
-
-            ai_message = resultado["messages"][-1]
-            respuesta = ai_message.content
-            if not isinstance(respuesta, str):
-                respuesta = str(respuesta)
-
-            phone_ctx = context.user_data.get("phone", "")
-            inline_markup = detectar_botones_mensaje(respuesta, phone=phone_ctx, channel_user_id=str(user_id))
-            respuesta = optimizar_respuesta_con_botones(respuesta, inline_markup)
-
-            max_len = 4000
-            if len(respuesta) <= max_len:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=respuesta,
-                    reply_markup=inline_markup,
-                )
-            else:
-                for i in range(0, len(respuesta), max_len):
-                    sub_markup = inline_markup if (i + max_len >= len(respuesta)) else None
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=respuesta[i:i + max_len],
-                        reply_markup=sub_markup,
-                    )
-        except Exception as error:
-            logger.error(f"❌ Error en confirmación de pedido para {user_id}: {error}", exc_info=True)
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="⚠️ Ocurrió un error al procesar tu confirmación. Por favor intenta de nuevo.",
-            )
+        sent_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=respuesta,
+            reply_markup=markup,
+        )
+        if sent_msg and markup:
+            match_order = re.search(r"(?:pedido|folio)\s*#?\s*(\d+)", respuesta, re.IGNORECASE)
+            if match_order and "cancel_order_client" in str(markup):
+                from src.services.notifications import cleanup_client_order_buttons
+                cleanup_client_order_buttons(match_order.group(1), chat_id=chat_id, keep_message_id=sent_msg.message_id)
         return
 
-    # Selección de producto específico del catálogo
+    # 7. Selección directa de producto
     if data.startswith("client_prod:"):
-        prod_text = data.split(":", 1)[1]
-        user_id = query.from_user.id if query.from_user else (update.effective_user.id if update.effective_user else 0)
-        chat_id = update.effective_chat.id if update.effective_chat else user_id
-
-        # Remover botones del mensaje anterior
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
 
-        try:
-            await context.bot.send_chat_action(
-                chat_id=chat_id,
-                action=ChatAction.TYPING,
-            )
-        except Exception:
-            pass
+        prod_text = data.split(":", 1)[1]
+        flow_res = await flow_router.process_event(
+            session_id=thread_id,
+            text=prod_text,
+            channel="telegram",
+            channel_user_id=str(user_id),
+            tenant_id=TENANT_ID,
+        )
 
-        thread_id = f"telegram:{TENANT_ID}:{chat_id}"
-        config = {
-            "configurable": {
-                "thread_id": thread_id,
-                "tenant_id": TENANT_ID,
-                "channel": "telegram",
-                "channel_user_id": str(user_id),
-            }
-        }
+        phone_ctx = context.user_data.get("phone", "")
+        markup = get_markup_for_flow_response(flow_res, phone=phone_ctx, user_id=str(user_id))
+        respuesta = optimizar_respuesta_con_botones(flow_res.text, markup)
 
-        try:
-            resultado = await graph.ainvoke(
-                {
-                    "messages": [HumanMessage(content=prod_text)],
-                    "channel": "telegram",
-                    "channel_user_id": str(user_id),
-                },
-                config=config,
-            )
-
-            ai_message = resultado["messages"][-1]
-            respuesta = ai_message.content
-            if not isinstance(respuesta, str):
-                respuesta = str(respuesta)
-
-            phone_ctx = context.user_data.get("phone", "")
-            inline_markup = detectar_botones_mensaje(respuesta, phone=phone_ctx, channel_user_id=str(user_id))
-            respuesta = optimizar_respuesta_con_botones(respuesta, inline_markup)
-
-            max_len = 4000
-            if len(respuesta) <= max_len:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=respuesta,
-                    reply_markup=inline_markup,
-                )
-            else:
-                for i in range(0, len(respuesta), max_len):
-                    sub_markup = inline_markup if (i + max_len >= len(respuesta)) else None
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=respuesta[i:i + max_len],
-                        reply_markup=sub_markup,
-                    )
-        except Exception as error:
-            logger.error(f"❌ Error procesando producto para {user_id}: {error}", exc_info=True)
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="⚠️ Ocurrió un error al procesar tu selección. Por favor intenta de nuevo.",
-            )
+        sent_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=respuesta,
+            reply_markup=markup,
+        )
+        if sent_msg and markup:
+            match_order = re.search(r"(?:pedido|folio)\s*#?\s*(\d+)", respuesta, re.IGNORECASE)
+            if match_order and "cancel_order_client" in str(markup):
+                from src.services.notifications import cleanup_client_order_buttons
+                cleanup_client_order_buttons(match_order.group(1), chat_id=chat_id, keep_message_id=sent_msg.message_id)
         return
 
     if data.startswith("cancel_order_client:"):
+        order_id = int(data.split(":")[1])
+        order = repo.get_order_by_id(TENANT_ID, order_id)
+        if not order:
+            await query.edit_message_text("⚠️ Pedido no encontrado.")
+            return
+
+        if order.status == "delivered":
+            await query.edit_message_text("⚠️ Tu pedido ya fue entregado y no puede cancelarse.")
+            return
+
+        if order.status == "cancelled":
+            await query.edit_message_text(f"⚠️ El pedido #{order_id} ya se encuentra cancelado.")
+            return
+
+        # Validación previa de seguridad: preguntar si está seguro
+        markup_confirm = get_botones_confirmar_cancelacion(order_id)
+        await query.edit_message_text(
+            f"⚠️ **¿Estás seguro de que deseas cancelar tu pedido #{order_id}?**\n\n"
+            f"📍 Entrega: {order.delivery_address}\n"
+            f"💰 Total a pagar: ${order.total_amount:.2f} ({order.payment_method})\n\n"
+            "Si confirmas la cancelación, la unidad de reparto asignada será liberada y tu entrega quedará suspendida definitivamente.",
+            reply_markup=markup_confirm,
+            parse_mode="Markdown",
+        )
+        return
+
+    if data.startswith("keep_order_client:"):
+        order_id = int(data.split(":")[1])
+        order = repo.get_order_by_id(TENANT_ID, order_id)
+        if not order:
+            await query.edit_message_text("⚠️ Pedido no encontrado.")
+            return
+
+        await query.answer("¡Excelente! Tu pedido sigue activo.", show_alert=False)
+        status_text = format_clean_driver_status(order, repo=repo)
+        markup = get_botones_pedido_activo(order_id)
+        try:
+            await query.edit_message_text(
+                status_text,
+                reply_markup=markup,
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            await query.edit_message_text(
+                status_text.replace("**", ""),
+                reply_markup=markup,
+                disable_web_page_preview=True,
+            )
+        if query.message:
+            from src.services.notifications import cleanup_client_order_buttons
+            cleanup_client_order_buttons(order_id, chat_id=query.message.chat_id, keep_message_id=query.message.message_id)
+        return
+
+    if data.startswith("confirm_cancel_order_client:"):
         order_id = int(data.split(":")[1])
         order = repo.get_order_by_id(TENANT_ID, order_id)
         if not order:
@@ -1620,17 +1718,23 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
         # Cancelar orden en BD y liberar chofer
         repo.cancel_order(TENANT_ID, order_id, cancelled_by="el cliente")
 
-        # Notificar al chofer asignado si tiene Telegram
+        # Limpiar botones anteriores de cliente y chofer
+        from src.services.notifications import cleanup_client_order_buttons
+        cleanup_client_order_buttons(order_id, chat_id=query.message.chat_id if query.message else None, keep_message_id=None)
+
+        # Notificar al chofer asignado si tiene Telegram y limpiar botones activos de su chat
         if order.driver_id:
             driver = repo.get_driver(order.driver_id)
             if driver and driver.telegram_user_id:
-                msg_driver = (
-                    f"❌ **PEDIDO #{order_id} CANCELADO**\n\n"
-                    f"👤 Cliente: {order.customer_name}\n"
-                    f"📍 Dirección: {order.delivery_address}\n\n"
-                    "El cliente ha cancelado este pedido. Ya no es necesario acudir al domicilio. Has quedado disponible para otros viajes."
+                from src.services.notifications import notify_driver_order_cancelled
+                notify_driver_order_cancelled(
+                    tenant_id=TENANT_ID,
+                    order_id=order_id,
+                    driver_telegram_user_id=driver.telegram_user_id,
+                    customer_name=order.customer_name,
+                    delivery_address=order.delivery_address,
+                    cancelled_by="el cliente",
                 )
-                notify_driver(driver.telegram_user_id, msg_driver)
 
         await query.edit_message_text(
             f"❌ **Tu pedido #{order_id} ha sido cancelado exitosamente.**\n\n"
@@ -1638,12 +1742,66 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
         )
         return
 
+    if data.startswith("check_order_status:"):
+        order_id = int(data.split(":")[1])
+        order = repo.get_order_by_id(TENANT_ID, order_id)
+        if not order:
+            await query.edit_message_text("⚠️ Pedido no encontrado.")
+            return
+
+        status_text = format_clean_driver_status(order, repo=repo)
+        status_raw = str(getattr(order, "status", "")).lower()
+
+        if status_raw in ("confirmed", "confirmado", "in_route", "en_ruta", "scheduled", "programado", "assigned"):
+            markup = get_botones_pedido_activo(order_id)
+            try:
+                await query.edit_message_text(
+                    status_text,
+                    reply_markup=markup,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                )
+                if query.message:
+                    from src.services.notifications import cleanup_client_order_buttons
+                    cleanup_client_order_buttons(order_id, chat_id=query.message.chat_id, keep_message_id=query.message.message_id)
+            except Exception as e:
+                if "message is not modified" in str(e).lower():
+                    await query.answer("El estatus ya está actualizado al momento.", show_alert=False)
+                    return
+                try:
+                    await query.edit_message_text(
+                        status_text.replace("**", ""),
+                        reply_markup=markup,
+                        disable_web_page_preview=True,
+                    )
+                    if query.message:
+                        from src.services.notifications import cleanup_client_order_buttons
+                        cleanup_client_order_buttons(order_id, chat_id=query.message.chat_id, keep_message_id=query.message.message_id)
+                except Exception:
+                    sent_msg = await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=status_text,
+                        reply_markup=markup,
+                        parse_mode="Markdown",
+                        disable_web_page_preview=True,
+                    )
+                    if sent_msg:
+                        from src.services.notifications import cleanup_client_order_buttons
+                        cleanup_client_order_buttons(order_id, chat_id=chat_id, keep_message_id=sent_msg.message_id)
+        else:
+            try:
+                await query.edit_message_text(status_text, parse_mode="Markdown")
+            except Exception:
+                await query.edit_message_text(status_text.replace("**", ""))
+        return
+
     # -------------------------------------------------------------------------
     # Calificación del Chofer y Encuesta de Entrega
     # -------------------------------------------------------------------------
     if data.startswith("rate_driver:"):
         parts = data.split(":")
-        order_id = int(parts[1])
+        raw_oid = parts[1]
+        order_id = int(raw_oid) if raw_oid.isdigit() else raw_oid
         stars = max(1, min(5, int(parts[2])))
 
         order = repo.get_order_by_id(TENANT_ID, order_id)
@@ -1715,7 +1873,8 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
 
     if data.startswith("rate_tag:"):
         parts = data.split(":")
-        order_id = int(parts[1])
+        raw_oid = parts[1]
+        order_id = int(raw_oid) if raw_oid.isdigit() else raw_oid
         tag = parts[2]
 
         tag_labels = {
@@ -1788,6 +1947,9 @@ def main() -> None:
 
     # Recepción de ubicación GPS / tiempo real
     application.add_handler(MessageHandler(filters.LOCATION, recibir_ubicacion_cliente))
+
+    # Recepción de notas de voz y archivos de audio
+    application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, recibir_voz_cliente))
 
     # Botones interactivos (Cancelar pedido)
     application.add_handler(CallbackQueryHandler(manejar_callback_cliente))

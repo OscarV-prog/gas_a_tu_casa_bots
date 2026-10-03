@@ -112,7 +112,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadDrivers();
     loadCustomers();
 
-    // Auto-refresh metrics, orders, rejections and drivers continually
+    // Auto-refresh metrics, orders, rejections and drivers continually in near-real-time (2.5s)
     setInterval(() => {
         loadDashboardMetrics();
         loadDrivers(); // Keep fleet status always fresh in background
@@ -129,7 +129,22 @@ document.addEventListener('DOMContentLoaded', () => {
         } else if (currentTab === 'vehicles') {
             loadVehicles();
         }
-    }, 8000);
+    }, 2500);
+
+    // Instant refresh whenever window regains focus or tab becomes visible
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) {
+            loadDashboardMetrics();
+            loadDrivers();
+            if (currentTab === 'dashboard' || currentTab === 'orders') loadOrders();
+            if (currentTab === 'agenda' || currentTab === 'dashboard') loadAgenda();
+        }
+    });
+    window.addEventListener('focus', () => {
+        loadDashboardMetrics();
+        loadDrivers();
+        if (currentTab === 'dashboard' || currentTab === 'orders') loadOrders();
+    });
 });
 
 // -----------------------------------------------------------------------------
@@ -326,7 +341,7 @@ async function loadDashboardShifts() {
                     <td>${iniGas}</td>
                     <td>${finGas}</td>
                     <td>
-                        <button class="btn btn-secondary btn-sm" onclick="openDriverTankReadingsModal(${s.driver_id}, '${escapeQuote(s.driver_name || '')}', '${escapeQuote(s.vehicle_plate || '')}')" title="Ver Historial y Lecturas">⏱️ Ver Detalle</button>
+                        <button class="btn btn-secondary btn-sm" onclick="openDriverTankReadingsModal('${s.driver_id}', '${escapeQuote(s.driver_name || '')}', '${escapeQuote(s.vehicle_plate || '')}')" title="Ver Historial y Lecturas">⏱️ Ver Detalle</button>
                     </td>
                 </tr>
             `;
@@ -433,11 +448,55 @@ function renderAgendaTable() {
 
     if (!dashTbody && !fullTbody) return;
 
-    let items = allAgendaCache;
+    // Ordenar pedidos programados por hora pactada de entrega / deadline ascendente (más temprano primero)
+    let items = [...allAgendaCache].sort((a, b) => {
+        const timeA = a.scheduled_for ? new Date(a.scheduled_for).getTime() : 9999999999999;
+        const timeB = b.scheduled_for ? new Date(b.scheduled_for).getTime() : 9999999999999;
+        if (timeA !== timeB) return timeA - timeB;
+
+        const getOrderNum = (item) => {
+            const val = String(item.id || '');
+            const digits = val.match(/\d+/g);
+            return digits ? parseInt(digits[digits.length - 1], 10) : 0;
+        };
+        return getOrderNum(a) - getOrderNum(b);
+    });
+    const now = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    const todayLocalStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+
+    const tom = new Date(now);
+    tom.setDate(tom.getDate() + 1);
+    const tomLocalStr = `${tom.getFullYear()}-${pad(tom.getMonth() + 1)}-${pad(tom.getDate())}`;
+
     if (currentAgendaFilter === 'today') {
-        items = items.filter(x => x.deadline_display && x.deadline_display.includes('Hoy'));
+        items = items.filter(x => {
+            if (x.deadline_display && x.deadline_display.toLowerCase().includes('hoy')) return true;
+            if (x.scheduled_for) {
+                const sDate = x.scheduled_for.slice(0, 10);
+                if (sDate === todayLocalStr) return true;
+                const d = new Date(x.scheduled_for);
+                if (!isNaN(d.getTime())) {
+                    const dStr = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+                    if (dStr === todayLocalStr) return true;
+                }
+            }
+            return false;
+        });
     } else if (currentAgendaFilter === 'tomorrow') {
-        items = items.filter(x => x.deadline_display && x.deadline_display.includes('Mañana'));
+        items = items.filter(x => {
+            if (x.deadline_display && x.deadline_display.toLowerCase().includes('mañana')) return true;
+            if (x.scheduled_for) {
+                const sDate = x.scheduled_for.slice(0, 10);
+                if (sDate === tomLocalStr) return true;
+                const d = new Date(x.scheduled_for);
+                if (!isNaN(d.getTime())) {
+                    const dStr = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+                    if (dStr === tomLocalStr) return true;
+                }
+            }
+            return false;
+        });
     }
 
     if (agendaSearchQuery) {
@@ -505,7 +564,7 @@ function renderAgendaTable() {
             `;
         } else {
             driverHtml = `
-                <button class="btn btn-secondary btn-sm" onclick="openReassignModal(${item.id}, '${escapeQuote(item.customer_name)}', null, '${item.status}')" title="Asignar chofer con anticipación">
+                <button class="btn btn-secondary btn-sm" onclick="openReassignModal('${item.id}', '${escapeQuote(item.customer_name)}', null, '${item.status}')" title="Asignar chofer con anticipación">
                     🛻 Pre-asignar Chofer
                 </button>
             `;
@@ -513,7 +572,7 @@ function renderAgendaTable() {
 
         // Action buttons
         const advanceBtn = !item.is_activated ? `
-            <button class="btn btn-sm btn-primary" onclick="activateScheduledOrderNow(${item.id})" title="Pasar ahora a la mesa de pedidos activos sin esperar los 30 minutos">
+            <button class="btn btn-sm btn-primary" onclick="activateScheduledOrderNow('${item.id}')" title="Pasar ahora a la mesa de pedidos activos sin esperar los 30 minutos">
                 ⚡ Pasar a Pedidos Ya
             </button>
         ` : '';
@@ -544,8 +603,8 @@ function renderAgendaTable() {
                 <td>
                     <div style="display: flex; gap: 6px; align-items: center;">
                         ${advanceBtn}
-                        <button class="btn btn-secondary btn-sm" onclick="openOrderDetailsModal(${item.id})" title="Ver detalle completo">📋</button>
-                        <button class="btn btn-secondary btn-sm" onclick="openRescheduleModal(${item.id}, '${escapeQuote(item.delivery_schedule || '')}', '${item.scheduled_for || ''}', '${escapeQuote(item.customer_name)}')" title="Reprogramar horario">✏️</button>
+                        <button class="btn btn-secondary btn-sm" onclick="openOrderDetailsModal('${item.id}')" title="Ver detalle completo">📋</button>
+                        <button class="btn btn-secondary btn-sm" onclick="openRescheduleModal('${item.id}', '${escapeQuote(item.delivery_schedule || '')}', '${item.scheduled_for || ''}', '${escapeQuote(item.customer_name)}')" title="Reprogramar horario">✏️</button>
                     </div>
                 </td>
             </tr>
@@ -653,7 +712,7 @@ async function openCreateOrderModal() {
     if (schedType) schedType.value = 'now';
 
     const dispMode = document.getElementById('create-order-dispatch-mode');
-    if (dispMode) dispMode.value = 'auto';
+    if (dispMode) dispMode.value = 'none';
 
     toggleCreateOrderSchedule();
     toggleCreateOrderDispatch();
@@ -843,9 +902,10 @@ async function submitCreateOrderForm() {
     const notes = document.getElementById('create-order-notes')?.value?.trim() || '';
     const scheduleType = document.getElementById('create-order-schedule-type')?.value;
     const paymentMethod = document.getElementById('create-order-payment-method')?.value || 'Efectivo';
-    const dispatchMode = document.getElementById('create-order-dispatch-mode')?.value || 'auto';
+    const dispatchMode = document.getElementById('create-order-dispatch-mode')?.value || 'none';
     const driverSelect = document.getElementById('create-order-driver-select');
-    const driverId = (dispatchMode === 'driver' && driverSelect) ? parseInt(driverSelect.value, 10) : null;
+    const rawDriverVal = (dispatchMode === 'driver' && driverSelect) ? driverSelect.value?.trim() : null;
+    const driverId = rawDriverVal ? ((!isNaN(rawDriverVal) && !rawDriverVal.includes('-')) ? parseInt(rawDriverVal, 10) : rawDriverVal) : null;
 
     if (!name || !phone || !address) {
         showToast('Nombre, teléfono y dirección son obligatorios', 'error');
@@ -869,7 +929,7 @@ async function submitCreateOrderForm() {
         deliverySchedule = schedText || scheduledFor.replace('T', ' ');
     }
 
-    if (dispatchMode === 'driver' && (!driverId || isNaN(driverId))) {
+    if (dispatchMode === 'driver' && !driverId) {
         showToast('Selecciona un chofer válido de la lista', 'error');
         return;
     }
@@ -970,35 +1030,47 @@ function renderOrdersTable(orders, tbodyId) {
         const itemsSummary = (ord.items || []).map(it => `${it.quantity}x ${it.product_name}`).join(', ');
         const payIcon = (ord.payment_method || '').toLowerCase().includes('efectivo') ? '💵 Efectivo' : '💳 Terminal';
         
-        let statusBadge = `<span class="badge badge-${ord.status}">${getStatusLabel(ord.status)}</span>`;
-        if (ord.status === 'rejected_by_driver' && ord.rejection_reason) {
-            statusBadge += `<div class="rejection-reason-tag">⚠️ ${ord.rejection_reason}</div>`;
+        const rawStatus = String(ord.status || 'confirmed').toLowerCase().trim();
+        const normStatus = (rawStatus === 'en_ruta' || rawStatus === 'en_reparto' || rawStatus === 'en_camino' || rawStatus === 'in_route') ? 'in_route' 
+            : (rawStatus === 'entregado' || rawStatus === 'delivered' ? 'delivered' 
+            : (rawStatus === 'cancelado' || rawStatus === 'cancelled' ? 'cancelled' 
+            : (rawStatus === 'asignado' || rawStatus === 'assigned' ? 'assigned' 
+            : (rawStatus === 'programado' || rawStatus === 'scheduled' ? 'scheduled' 
+            : (rawStatus === 'rejected_by_driver' || rawStatus === 'rechazado' ? 'rejected_by_driver'
+            : (rawStatus === 'pendiente' || rawStatus === 'pending' || rawStatus === 'confirmado' ? 'confirmed' : rawStatus))))));
+
+        let statusBadge = `<span class="badge badge-${normStatus}">${getStatusLabel(ord.status)}</span>`;
+        if (normStatus === 'rejected_by_driver' && ord.rejection_reason) {
+            statusBadge += `<div class="rejection-reason-tag">⚠️ ${escapeQuote(ord.rejection_reason)}</div>`;
         }
 
         let driverDisplay = '';
-        if (ord.status === 'cancelled') {
+        if (normStatus === 'cancelled') {
             driverDisplay = `<span style="color: var(--text-muted); font-size: 0.82rem; font-style: italic;">⛔ Cancelado</span>`;
-        } else if (ord.status === 'delivered') {
+        } else if (normStatus === 'delivered') {
             const ratingHtml = ord.driver_rating ? `
                 <div style="color: var(--accent-amber); font-size: 0.76rem; font-weight: 700; margin-top: 3px;" title="${ord.rating_comment ? escapeQuote(ord.rating_comment) : ''}">
                     ⭐ ${ord.driver_rating}/5 ${ord.rating_tag ? `• ${ord.rating_tag}` : ''}
                 </div>
             ` : '';
             driverDisplay = ord.driver_name ? `
-                <div style="font-weight: 600;">🛻 ${ord.driver_name}</div>
+                <div style="font-weight: 600;">🛻 ${escapeQuote(ord.driver_name)}</div>
                 <div style="font-size: 0.75rem; color: var(--text-muted);">${ord.driver_vehicle || ''} (${ord.driver_phone || ''})</div>
                 ${ratingHtml}
             ` : `<span style="color: var(--accent-emerald); font-size: 0.82rem;">✅ Entregado</span>`;
         } else if (ord.driver_id && ord.driver_name) {
+            const isDelivering = normStatus === 'in_route';
+            const tripTag = isDelivering ? `<span style="color: var(--accent-amber); font-size: 0.74rem; font-weight: 700;">🚚 En Reparto</span>` : '';
             driverDisplay = `
-                <div style="font-weight: 600;">🛻 ${ord.driver_name}</div>
+                <div style="font-weight: 600;">🛻 ${escapeQuote(ord.driver_name)}</div>
                 <div style="font-size: 0.75rem; color: var(--text-muted);">${ord.driver_vehicle || ''} (${ord.driver_phone || ''})</div>
+                ${tripTag}
             `;
         } else {
-            const btnColor = ord.status === 'rejected_by_driver' ? 'btn-danger' : 'btn-primary';
-            const btnText = ord.status === 'rejected_by_driver' ? '🔄 Reasignar' : '🛻 Asignar Chofer';
+            const btnColor = normStatus === 'rejected_by_driver' ? 'btn-danger' : 'btn-primary';
+            const btnText = normStatus === 'rejected_by_driver' ? '🔄 Reasignar' : '🛻 Asignar Chofer';
             driverDisplay = `
-                <button class="btn ${btnColor} btn-sm" onclick="openReassignModal(${ord.id}, '${escapeQuote(ord.customer_name)}', null, '${ord.status}')">
+                <button class="btn ${btnColor} btn-sm" onclick="openReassignModal('${ord.id}', '${escapeQuote(ord.customer_name)}', null, '${normStatus}')">
                     ${btnText}
                 </button>
             `;
@@ -1013,9 +1085,9 @@ function renderOrdersTable(orders, tbodyId) {
         }
 
         let reassignActionBtn = '';
-        if (ord.status !== 'cancelled' && ord.status !== 'delivered') {
+        if (normStatus !== 'cancelled' && normStatus !== 'delivered') {
             reassignActionBtn = `
-                <button class="btn btn-secondary btn-sm" onclick="openReassignModal(${ord.id}, '${escapeQuote(ord.customer_name)}', ${ord.driver_id || 'null'}, '${ord.status}')" title="Asignar / Reasignar chofer">🛻</button>
+                <button class="btn btn-secondary btn-sm" onclick="openReassignModal('${ord.id}', '${escapeQuote(ord.customer_name)}', ${ord.driver_id ? `'${ord.driver_id}'` : 'null'}, '${normStatus}')" title="Asignar / Reasignar chofer">🛻</button>
             `;
         }
 
@@ -1028,29 +1100,29 @@ function renderOrdersTable(orders, tbodyId) {
                     </div>
                 </td>
                 <td>
-                    <div style="font-weight: 600; color: var(--text-heading);">${ord.customer_name}</div>
-                    <div style="font-size: 0.78rem; color: var(--text-secondary);">${ord.customer_phone}</div>
+                    <div style="font-weight: 600; color: var(--text-heading);">${escapeQuote(ord.customer_name)}</div>
+                    <div style="font-size: 0.78rem; color: var(--text-secondary);">${ord.customer_phone || ''}</div>
                 </td>
                 <td>
-                    <div style="max-width: 240px; font-size: 0.82rem; line-height: 1.3;">${ord.delivery_address}</div>
-                    ${ord.notes ? `<div style="font-size: 0.72rem; color: var(--accent-cyan); margin-top: 2px;">📝 ${ord.notes}</div>` : ''}
+                    <div style="max-width: 240px; font-size: 0.82rem; line-height: 1.3;">${escapeQuote(ord.delivery_address)}</div>
+                    ${ord.notes ? `<div style="font-size: 0.72rem; color: var(--accent-cyan); margin-top: 2px;">📝 ${escapeQuote(ord.notes)}</div>` : ''}
                 </td>
                 <td>
                     <div style="font-size: 0.82rem; font-weight: 500;">${itemsSummary || 'Cilindro Gas LP'}</div>
                     <div style="font-size: 0.75rem; color: var(--text-muted);">🕒 ${ord.delivery_schedule}</div>
                 </td>
                 <td>
-                    <div style="font-weight: 700; color: var(--text-heading);">$${ord.total_amount.toFixed(2)}</div>
+                    <div style="font-weight: 700; color: var(--text-heading);">$${(Number(ord.total_amount) || 0).toFixed(2)}</div>
                     <div style="font-size: 0.72rem; color: var(--text-secondary);">${payIcon}</div>
                 </td>
                 <td>${driverDisplay}</td>
                 <td>${statusBadge}</td>
                 <td>
                     <div style="display: flex; gap: 6px;">
-                        <button class="btn btn-secondary btn-sm" onclick="openOrderDetailsModal(${ord.id})" title="Ver detalle completo">📋</button>
+                        <button class="btn btn-secondary btn-sm" onclick="openOrderDetailsModal('${ord.id}')" title="Ver detalle completo">📋</button>
                         ${gmapsBtn}
                         ${reassignActionBtn}
-                        <button class="btn btn-secondary btn-sm" onclick="openStatusModal(${ord.id}, '${ord.status}', '${escapeQuote(ord.customer_name)}')" title="Cambiar estado">⚙️</button>
+                        <button class="btn btn-secondary btn-sm" onclick="openStatusModal('${ord.id}', '${normStatus}', '${escapeQuote(ord.customer_name)}')" title="Cambiar estado">⚙️</button>
                     </div>
                 </td>
             </tr>
@@ -1059,16 +1131,29 @@ function renderOrdersTable(orders, tbodyId) {
 }
 
 function getStatusLabel(status) {
+    if (!status) return '🔵 Por Asignar';
+    const s = String(status).toLowerCase().trim().replace(/ /g, '_');
     const map = {
         'confirmed': '🔵 Por Asignar',
-        'rejected_by_driver': '⚠️ Rechazado por Chofer',
+        'pending': '🔵 Por Asignar',
+        'pendiente': '🔵 Por Asignar',
+        'confirmado': '🔵 Por Asignar',
         'assigned': '🟣 Asignado',
-        'in_route': '🟡 En Camino',
+        'asignado': '🟣 Asignado',
+        'in_route': '🚚 En Reparto',
+        'en_ruta': '🚚 En Reparto',
+        'en_reparto': '🚚 En Reparto',
+        'en_camino': '🚚 En Reparto',
         'delivered': '🟢 Entregado',
+        'entregado': '🟢 Entregado',
         'cancelled': '🔴 Cancelado',
-        'scheduled': '🔷 Programado'
+        'cancelado': '🔴 Cancelado',
+        'scheduled': '🔷 Programado',
+        'programado': '🔷 Programado',
+        'rejected_by_driver': '⚠️ Rechazado por Chofer',
+        'rechazado': '⚠️ Rechazado por Chofer'
     };
-    return map[status] || status;
+    return map[s] || status;
 }
 
 function escapeQuote(str) {
@@ -1134,7 +1219,7 @@ function renderRejectionsTable(rejections) {
                 <td>
                     <div style="display: flex; gap: 6px;">
                         ${reassignBtn}
-                        <button class="btn btn-secondary btn-sm" onclick="openOrderDetailsModal(${r.order_id})" title="Ver pedido">📋</button>
+                        <button class="btn btn-secondary btn-sm" onclick="openOrderDetailsModal('${r.order_id}')" title="Ver pedido">📋</button>
                     </div>
                 </td>
             </tr>
@@ -1143,7 +1228,7 @@ function renderRejectionsTable(rejections) {
 }
 
 function openOrderDetailsModal(orderId) {
-    const ord = allOrdersCache.find(o => o.id === orderId);
+    const ord = allOrdersCache.find(o => String(o.id) === String(orderId));
     if (!ord) return;
 
     document.getElementById('modal-details-title').innerText = `📋 Detalle del Pedido #${ord.id}`;
@@ -1595,7 +1680,7 @@ async function openAddDriverModal() {
 }
 
 async function openEditDriverModal(driverId) {
-    const d = allDriversCache.find(x => x.id === driverId);
+    const d = allDriversCache.find(x => String(x.id).toLowerCase() === String(driverId).toLowerCase());
     if (!d) return;
 
     document.getElementById('modal-driver-title').innerText = `✏️ Editar Chofer: ${d.name}`;
@@ -2156,7 +2241,7 @@ async function openReassignModal(orderId, customerName, currentDriverId, orderSt
 
     function renderOptions(drivers) {
         select.innerHTML = drivers.map(d => {
-            const isSelected = d.id === currentDriverId ? 'selected' : '';
+            const isSelected = String(d.id).toLowerCase() === String(currentDriverId).toLowerCase() ? 'selected' : '';
             let icon = '🟢';
             let opLabel = 'Disponible';
             if (d.operational_status === 'en_entrega') {
@@ -2203,7 +2288,15 @@ function filterActiveOrders() {
 
 async function submitReassignOrder() {
     const orderId = document.getElementById('modal-reassign-order-id').value;
-    const driverId = parseInt(document.getElementById('modal-reassign-driver-select').value);
+    const selectElem = document.getElementById('modal-reassign-driver-select');
+    const rawVal = selectElem ? selectElem.value?.trim() : '';
+
+    if (!rawVal) {
+        showToast('⚠️ Por favor selecciona un chofer de la lista.', 'warning');
+        return;
+    }
+
+    const driverId = (!isNaN(rawVal) && !rawVal.includes('-')) ? parseInt(rawVal, 10) : rawVal;
 
     // Instant close modal so the user feels immediate responsiveness
     closeModals();
@@ -2215,12 +2308,15 @@ async function submitReassignOrder() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ driver_id: driverId })
         });
-        if (!res.ok) throw new Error('Error al asignar o reasignar');
+        if (!res.ok) {
+            const errData = await res.json().catch(() => ({}));
+            throw new Error(errData.detail || 'Error al asignar o reasignar');
+        }
         const data = await res.json();
-        const dName = data.driver_name || `Chofer #${driverId}`;
+        const dName = data.driver_name || `Chofer ${driverId}`;
         
         if (data.reassigned) {
-            showToast(`✅ Pedido #${orderId} reasignado a ${dName}. Se notificó y ofreció disculpa al cliente por Telegram.`, 'success');
+            showToast(`✅ Pedido #${orderId} reasignado a ${dName}. Se notificó a la unidad y al cliente por Telegram.`, 'success');
         } else {
             showToast(`✅ Pedido #${orderId} asignado a ${dName}. Notificaciones enviadas al chofer y cliente.`, 'success');
         }
@@ -2233,7 +2329,7 @@ async function submitReassignOrder() {
             loadDashboardMetrics()
         ]);
     } catch (err) {
-        showToast(`Error al asignar pedido: ${err.message}`, 'error');
+        showToast(`❌ Error al asignar pedido: ${err.message}`, 'error');
         loadOrders();
     }
 }
@@ -2627,7 +2723,8 @@ async function submitCreateOrderForm() {
     const scheduleText = document.getElementById('create-order-schedule-text')?.value?.trim() || '';
     const dispatchMode = document.getElementById('create-order-dispatch-mode')?.value || 'auto';
     const driverSelect = document.getElementById('create-order-driver-select');
-    const driverId = (dispatchMode === 'driver' && driverSelect && driverSelect.value) ? parseInt(driverSelect.value) : null;
+    const rawDriverVal = (dispatchMode === 'driver' && driverSelect && driverSelect.value) ? driverSelect.value.trim() : null;
+    const driverId = rawDriverVal ? ((!isNaN(rawDriverVal) && !rawDriverVal.includes('-')) ? parseInt(rawDriverVal, 10) : rawDriverVal) : null;
 
     if (!customerName || !customerPhone || !address) {
         showToast('Por favor completa los campos obligatorios: Nombre, Teléfono y Dirección.', 'error');

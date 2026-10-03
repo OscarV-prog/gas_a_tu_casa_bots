@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS orders (
     delivery_lng REAL,
     live_location_message_id INTEGER,
     live_location_chat_id TEXT,
+    driver_message_ids TEXT,
     assigned_at TEXT,
     delivered_at TEXT,
     scheduled_for TEXT,
@@ -210,7 +211,12 @@ CREATE INDEX IF NOT EXISTS idx_vehicles_identifier ON vehicles(unit_identifier);
 
 
 def init_db() -> None:
-    """Initialize database tables, run migrations, create indices, and auto-seed initial products and drivers."""
+    """Initialize database tables, run migrations, create indices, and auto-seed initial products and drivers only if SQLite is active."""
+    import os
+    if os.getenv("DATA_SOURCE", "api").lower().strip() != "sqlite":
+        # SQLite está completamente desactivado; todo opera contra PostgreSQL
+        return
+
     with get_db_connection() as conn:
         conn.executescript(CREATE_TABLES_SQL)
 
@@ -258,6 +264,8 @@ def migrate_orders_schema() -> None:
             conn.execute("ALTER TABLE orders ADD COLUMN delivered_at TEXT")
         if "scheduled_for" not in columns:
             conn.execute("ALTER TABLE orders ADD COLUMN scheduled_for TEXT")
+        if "driver_message_ids" not in columns:
+            conn.execute("ALTER TABLE orders ADD COLUMN driver_message_ids TEXT")
 
 
 def migrate_customer_addresses() -> None:

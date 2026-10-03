@@ -115,8 +115,11 @@
             <div class="top-bar-left">
                 <button id="sidebar-toggle" class="sidebar-toggle-btn" aria-label="Abrir Menú de Navegación">☰</button>
                 <div>
-                    <h1 class="page-title">Centro de Operaciones y Administración</h1>
-                    <p class="page-subtitle">Supervisión logística, ventas y gestión de recursos en tiempo real</p>
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <h1 class="page-title" style="margin: 0;">Centro de Operaciones y Administración</h1>
+                        <span class="badge badge-delivered" style="font-size: 0.7rem; padding: 3px 8px; font-weight: 700; letter-spacing: 0.03em;">⚡ EN VIVO (2.5s)</span>
+                    </div>
+                    <p class="page-subtitle">Supervisión logística, ventas y despacho dinámico de pedidos en tiempo real</p>
                 </div>
             </div>
             <div class="top-actions">
@@ -127,7 +130,7 @@
                 <button class="btn btn-primary" onclick="openCreateOrderModal()">
                     ➕ Levantar Pedido
                 </button>
-                <button class="btn btn-secondary" onclick="loadDashboardMetrics(); loadOrders(); loadProducts(); loadDrivers(); showToast('Datos actualizados', 'info');">
+                <button class="btn btn-secondary" onclick="loadDashboardMetrics(); loadOrders(); loadProducts(); loadDrivers(); loadAgenda(); showToast('Datos actualizados en vivo', 'info');">
                     🔄 Actualizar
                 </button>
             </div>
@@ -1199,11 +1202,10 @@
                         <span>🛻</span> 4. Modo de Despacho
                     </h4>
                     <div class="form-group" style="margin-bottom: 0;">
-                        <label class="form-label">¿Cómo deseas asignar el pedido?</label>
+                        <label class="form-label">Asignación de Chofer:</label>
                         <select id="create-order-dispatch-mode" class="form-control" onchange="toggleCreateOrderDispatch()">
-                            <option value="auto">🤖 Despacho Automático Inteligente (Asignar a chofer más cercano en turno)</option>
+                            <option value="none" selected>📋 Sin Asignar (Esperar a asignación manual por un operador en el Tablero)</option>
                             <option value="driver">🛻 Asignar a un Chofer Específico Ahora</option>
-                            <option value="none">📋 Guardar como Pendiente de Asignar (En cola de espera)</option>
                         </select>
                     </div>
 

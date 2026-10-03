@@ -23,12 +23,11 @@ def clean_address_for_geocoding(address: str) -> list[str]:
     """Generate multiple cleaned variations of an address to maximize geocoding hit rate.
 
     Strips descriptive landmarks, building colors, references, and landmark notes.
+    Yields street+colonia, street without number+colonia, street alone, and colonia alone.
     """
     raw = address.strip()
     if not raw:
         return []
-
-    variations = []
 
     # 1. Clean common noise separators and reference phrases
     cleaned_main = raw
@@ -50,26 +49,41 @@ def clean_address_for_geocoding(address: str) -> list[str]:
         cleaned_main = re.sub(pattern, "", cleaned_main, flags=re.IGNORECASE).strip()
 
     cleaned_main = re.sub(r"[\(\)\-\,\.]+$", "", cleaned_main).strip()
+
+    variations = []
     if cleaned_main:
         variations.append(cleaned_main)
 
     # 2. Extract Street + Number and Neighborhood
     parts = [p.strip() for p in cleaned_main.split(",") if p.strip()]
-    if len(parts) >= 2:
-        street_part = parts[0]
-        neigh_part = parts[1]
+    street_part = parts[0] if parts else cleaned_main
+    neigh_part = parts[1] if len(parts) >= 2 else ""
 
-        # Clean 'Col.', 'Fracc.', 'Colonia', 'Fraccionamiento'
-        clean_neigh = re.sub(r"\b(?:col\.?|colonia|fracc\.?|fraccionamiento)\s*", "", neigh_part, flags=re.IGNORECASE).strip()
-        v2 = f"{street_part}, {clean_neigh}"
-        if v2 not in variations:
-            variations.append(v2)
+    # Clean 'Col.', 'Fracc.', 'Colonia', 'Fraccionamiento', 'Privada'
+    clean_neigh = re.sub(r"\b(?:col\.?|colonia|fracc\.?|fraccionamiento|privada|residencial)\s*", "", neigh_part, flags=re.IGNORECASE).strip()
 
-        # Just Street + Number
-        if street_part not in variations:
-            variations.append(street_part)
+    # Street without house numbers (e.g. "Misión San Javier 5246" -> "Misión San Javier")
+    street_no_num = re.sub(r"\s*#?\s*\d+[\w\-]*", "", street_part).strip()
 
-    # 3. Add raw address as fallback
+    # 3. Add clean variations in priority order
+    if clean_neigh:
+        v1 = f"{street_part}, {clean_neigh}"
+        if v1 not in variations:
+            variations.append(v1)
+        if street_no_num and street_no_num != street_part:
+            v2 = f"{street_no_num}, {clean_neigh}"
+            if v2 not in variations:
+                variations.append(v2)
+
+    if street_part not in variations:
+        variations.append(street_part)
+    if street_no_num and street_no_num not in variations:
+        variations.append(street_no_num)
+
+    if clean_neigh and clean_neigh not in variations:
+        variations.append(clean_neigh)
+
+    # 4. Add raw address as fallback
     if raw not in variations:
         variations.append(raw)
 
@@ -98,7 +112,8 @@ _geocode_cache: dict[str, Tuple[float, float, str]] = {}
 def geocode_address(address: str, city_context: str | None = None) -> Tuple[float, float, str]:
     """Convert an address string into latitude and longitude coordinates.
 
-    Uses smart in-memory caching, ultra-fast Photon Komoot OSM with Nominatim fallback.
+    Uses smart in-memory caching, multi-candidate Photon Komoot OSM with Nominatim fallback,
+    and strict Mexican bounds and city proximity filtering to ensure pinpoint accuracy.
     """
     if not address or not address.strip():
         return DEFAULT_LAT, DEFAULT_LNG, ""
@@ -108,61 +123,98 @@ def geocode_address(address: str, city_context: str | None = None) -> Tuple[floa
         return _geocode_cache[clean_key]
 
     settings = get_settings()
-    city = city_context or settings.default_city
+    city = city_context or settings.default_city or "Mazatlán"
     candidates = clean_address_for_geocoding(address)
-    primary_cand = candidates[0] if candidates else address.strip()
 
-    # 1. Try Photon Komoot (fast, ~100-200ms) with Mazatlán location bias
-    try:
-        query = f"{primary_cand}, {city}".strip(", ")
-        encoded = urllib.parse.quote(query)
-        url = f"https://photon.komoot.io/api/?q={encoded}&lat={DEFAULT_LAT}&lon={DEFAULT_LNG}&limit=1"
-        req = urllib.request.Request(url, headers={"User-Agent": "PetroilGasDeliveryAgent/2.0"})
-        with urllib.request.urlopen(req, timeout=1.0) as response:
-            if response.status == 200:
-                data = json.loads(response.read().decode("utf-8"))
-                features = data.get("features", [])
-                if features:
-                    coords = features[0].get("geometry", {}).get("coordinates", [])
-                    props = features[0].get("properties", {})
-                    if len(coords) >= 2:
-                        lng = float(coords[0])
-                        lat = float(coords[1])
-                        country = str(props.get("country") or "").lower()
-                        is_mx = country in ("méxico", "mexico", "mx") or (14.0 <= lat <= 33.0 and -118.0 <= lng <= -86.0)
-                        if is_mx and lat > 0:
-                            res = (lat, lng, address)
+    # 1. Primary: ESRI ArcGIS World Geocoding (high-precision door / house number resolution in Mexico)
+    for cand in candidates[:2]:
+        try:
+            query = f"{cand}, {city}".strip(", ")
+            encoded = urllib.parse.quote(query)
+            url = (
+                f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates"
+                f"?SingleLine={encoded}&f=json&outFields=Match_addr,Addr_type,Score&location={DEFAULT_LNG:.4f},{DEFAULT_LAT:.4f}&distance=60000&maxLocations=2"
+            )
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with urllib.request.urlopen(req, timeout=3.0) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode("utf-8"))
+                    cands = data.get("candidates", [])
+                    if cands:
+                        top = cands[0]
+                        score = float(top.get("score", 0))
+                        loc = top.get("location", {})
+                        lat = float(loc.get("y", 0))
+                        lng = float(loc.get("x", 0))
+                        if lat > 0 and (14.0 <= lat <= 33.0 and -118.0 <= lng <= -86.0):
+                            dist_km = calculate_distance_km(lat, lng, DEFAULT_LAT, DEFAULT_LNG)
+                            if dist_km < 75.0 and score >= 60.0:
+                                matched_name = top.get("address") or top.get("attributes", {}).get("Match_addr") or address
+                                res = (lat, lng, matched_name)
+                                _geocode_cache[clean_key] = res
+                                addr_type = top.get("attributes", {}).get("Addr_type", "Address")
+                                logger.info(f"🎯 Pinpoint High-Precision Geocoded (ArcGIS {addr_type} score={score}) '{cand}' -> ({lat:.5f}, {lng:.5f}) dist={dist_km:.1f}km")
+                                return res
+        except Exception as e:
+            logger.debug(f"ArcGIS geocode attempt failed for candidate '{cand}': {e}")
+
+    # 2. Secondary fallback: Photon Komoot (OSM) with city location bias across all candidates
+    for cand in candidates:
+        try:
+            query = f"{cand}, {city}".strip(", ")
+            encoded = urllib.parse.quote(query)
+            url = f"https://photon.komoot.io/api/?q={encoded}&lat={DEFAULT_LAT}&lon={DEFAULT_LNG}&limit=3"
+            req = urllib.request.Request(url, headers={"User-Agent": "PetroilGasDeliveryAgent/2.0"})
+            with urllib.request.urlopen(req, timeout=2.0) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode("utf-8"))
+                    features = data.get("features", [])
+                    for feat in features:
+                        coords = feat.get("geometry", {}).get("coordinates", [])
+                        props = feat.get("properties", {})
+                        if len(coords) >= 2:
+                            lng = float(coords[0])
+                            lat = float(coords[1])
+                            country = str(props.get("country") or "").lower()
+                            is_mx = country in ("méxico", "mexico", "mx") or (14.0 <= lat <= 33.0 and -118.0 <= lng <= -86.0)
+                            if is_mx and lat > 0:
+                                # Ensure it's reasonably close to city context (< 75 km)
+                                dist_km = calculate_distance_km(lat, lng, DEFAULT_LAT, DEFAULT_LNG)
+                                if dist_km < 75.0:
+                                    res = (lat, lng, address)
+                                    _geocode_cache[clean_key] = res
+                                    logger.info(f"✅ Pinpoint Geocoded (Photon) '{cand}' -> ({lat:.5f}, {lng:.5f}) dist={dist_km:.1f}km")
+                                    return res
+        except Exception as e:
+            logger.debug(f"Photon geocode attempt failed for candidate '{cand}': {e}")
+
+    # 2. Fallback to OpenStreetMap Nominatim with 2.5s timeout across candidates
+    for cand in candidates[:3]:
+        try:
+            query = f"{cand}, {city}".strip(", ")
+            encoded_query = urllib.parse.quote(query)
+            url = f"https://nominatim.openstreetmap.org/search?q={encoded_query}&countrycodes=mx&format=json&limit=2"
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "PetroilGasDeliveryAgent/2.0 (contact: soporte@petroil.com.mx)"},
+            )
+            with urllib.request.urlopen(req, timeout=2.5) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode("utf-8"))
+                    for item in data:
+                        lat = float(item["lat"])
+                        lng = float(item["lon"])
+                        dist_km = calculate_distance_km(lat, lng, DEFAULT_LAT, DEFAULT_LNG)
+                        if dist_km < 75.0:
+                            display_name = item.get("display_name", address)
+                            res = (lat, lng, display_name)
                             _geocode_cache[clean_key] = res
-                            logger.info(f"✅ Fast-geocoded (Photon) '{primary_cand}' -> ({lat:.5f}, {lng:.5f})")
+                            logger.info(f"✅ Geocoded (Nominatim) '{cand}' -> ({lat:.5f}, {lng:.5f}) dist={dist_km:.1f}km")
                             return res
-    except Exception as e:
-        logger.debug(f"Photon geocode attempt failed for '{primary_cand}': {e}")
+        except Exception as e:
+            logger.debug(f"Nominatim geocode attempt failed for candidate '{cand}': {e}")
 
-    # 2. Fallback to OpenStreetMap Nominatim with tight 1.0s timeout and countrycodes=mx
-    try:
-        query = f"{primary_cand}, {city}".strip(", ")
-        encoded_query = urllib.parse.quote(query)
-        url = f"https://nominatim.openstreetmap.org/search?q={encoded_query}&countrycodes=mx&format=json&limit=1"
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "PetroilGasDeliveryAgent/2.0 (contact: soporte@petroil.com.mx)"},
-        )
-        with urllib.request.urlopen(req, timeout=1.0) as response:
-            if response.status == 200:
-                data = json.loads(response.read().decode("utf-8"))
-                if data and len(data) > 0:
-                    first = data[0]
-                    lat = float(first["lat"])
-                    lng = float(first["lon"])
-                    display_name = first.get("display_name", address)
-                    res = (lat, lng, display_name)
-                    _geocode_cache[clean_key] = res
-                    logger.info(f"✅ Geocoded (Nominatim) '{primary_cand}' -> ({lat:.5f}, {lng:.5f})")
-                    return res
-    except Exception as e:
-        logger.debug(f"Nominatim geocode attempt failed for '{primary_cand}': {e}")
-
-    logger.warning(f"⚠️ Geocoding failed for all candidates of '{address}'. Using city fallback.")
+    logger.warning(f"⚠️ Geocoding failed for all candidates of '{address}'. Using city default.")
     fallback_res = (DEFAULT_LAT, DEFAULT_LNG, address)
     _geocode_cache[clean_key] = fallback_res
     return fallback_res
@@ -177,7 +229,24 @@ def reverse_geocode(lat: float, lng: float) -> str:
     if lat is None or lng is None:
         return ""
 
-    # Provider 1: Photon by Komoot (Ultra-fast, OSM-based, high rate-limit tolerance)
+    # Provider 1: ESRI ArcGIS World Reverse Geocoder (High-precision house numbers and street addresses in Mexico)
+    try:
+        url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/reverseGeocode?location={lng:.6f},{lat:.6f}&f=json"
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+        )
+        with urllib.request.urlopen(req, timeout=3.5) as response:
+            if response.status == 200:
+                data = json.loads(response.read().decode("utf-8"))
+                addr_info = data.get("address", {})
+                match_addr = addr_info.get("Match_addr") or addr_info.get("LongLabel")
+                if match_addr:
+                    return str(match_addr).strip()
+    except Exception as e:
+        logger.debug(f"ArcGIS reverse geocode error for ({lat}, {lng}): {e}")
+
+    # Provider 2: Photon by Komoot (OSM-based fallback)
     try:
         url = f"https://photon.komoot.io/reverse?lat={lat:.6f}&lon={lng:.6f}"
         req = urllib.request.Request(

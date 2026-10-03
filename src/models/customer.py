@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pydantic import BaseModel, Field
 
 
@@ -12,13 +13,15 @@ class CustomerAddress(BaseModel):
     customer_id: int | str | None = None
     address: str
     alias: str = "Principal"
-    notes: str = ""
+    notes: str | None = ""
     is_default: bool = False
     created_at: str | None = None
     updated_at: str | None = None
 
     def to_display(self, index: int = 1) -> str:
-        tag = " [Predeterminada]" if self.is_default else f" [{self.alias}]" if self.alias and self.alias != "Principal" else ""
+        alias_clean = (self.alias or "").strip()
+        es_generico = bool(re.match(r"^(?:principal|predeterminada|nueva\s*direcci[oó]n|direcci[oó]n(?:\s*\d+)?)$", alias_clean, re.I))
+        tag = f" [{alias_clean}]" if (alias_clean and not es_generico) else ""
         ref = f" (Referencias: {self.notes})" if self.notes else ""
         return f"{index}. 📍{tag} {self.address}{ref}"
 

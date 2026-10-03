@@ -62,6 +62,10 @@ def cancel_order(
     # Cancel order in DB and release driver
     cancelled_order = repo.cancel_order(tenant_id, order_id, cancelled_by="el cliente", reason=reason)
 
+    # Limpiar botones interactivos del cliente
+    from src.services.notifications import cleanup_client_order_buttons
+    cleanup_client_order_buttons(order_id, tenant_id=tenant_id, keep_message_id=None)
+
     # If driver was assigned and has telegram, notify them immediately
     if order.driver_id:
         driver = repo.get_driver(order.driver_id)

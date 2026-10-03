@@ -52,7 +52,7 @@ def parse_schedule_deadline(schedule: str, ref_time: datetime | None = None) -> 
     Understands:
     - 'Hoy a las 4:00 PM', 'Hoy 16:30', '4:00 PM', '17:00', 'a las 5 pm'
     - 'Mañana a las 10:00 AM', 'Mañana 11:30', 'Pasado mañana 9:00 am'
-    - '2026-09-04 15:00', '2026-09-04T15:00:00'
+    - '2026-09-04 15:00', '2026-09-04T15:00:00', '2026-10-05T17:00:00.000Z'
     - Ignores 'Lo antes posible', 'Inmediato', 'Ahorita', 'Urgente' -> returns None.
     """
     if not schedule:
@@ -64,7 +64,16 @@ def parse_schedule_deadline(schedule: str, ref_time: datetime | None = None) -> 
     if ref_time is None:
         ref_time = datetime.now()
 
-    # 1. Try direct ISO format
+    # 1. Try direct ISO format (including UTC Z and offsets)
+    clean_iso = schedule.strip()
+    if clean_iso.endswith("Z"):
+        clean_iso = clean_iso[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(clean_iso)
+        return dt.replace(tzinfo=None) if dt.tzinfo else dt
+    except Exception:
+        pass
+
     for iso_fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
             return datetime.strptime(schedule.strip(), iso_fmt)
@@ -73,34 +82,195 @@ def parse_schedule_deadline(schedule: str, ref_time: datetime | None = None) -> 
 
     # 2. Check day offset
     day_offset = 0
+    is_explicit_today = bool(re.search(r'\b(?:hoy|el\s+d[ií]a\s+de\s+hoy)\b', s, re.I))
     if "pasado mañana" in s or "pasado manana" in s:
         day_offset = 2
     elif "mañana" in s or "manana" in s:
         day_offset = 1
 
-    # 3. Match time expression like '4:00 pm', '16:30', '5 pm', '10:00 am', 'a las 4'
-    time_match = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?', s, re.IGNORECASE)
-    if time_match:
-        hour = int(time_match.group(1))
-        minute = int(time_match.group(2)) if time_match.group(2) else 0
-        meridiem = time_match.group(3)
-        if meridiem:
-            meridiem = meridiem.lower().replace(".", "")
-            if meridiem == "pm" and hour < 12:
-                hour += 12
-            elif meridiem == "am" and hour == 12:
-                hour = 0
-        elif hour < 7:  # When user says 'a las 4' or 'a las 5', standard Mexican work hours mean PM (16:00, 17:00)
+    # Special mediodia / mediodía
+    if "mediodia" in s or "mediodía" in s:
+        target_date = ref_time.date() + timedelta(days=day_offset)
+        return datetime.combine(target_date, datetime.min.time()).replace(hour=12, minute=0)
+
+    # Contextual meridiem from phrases
+    forced_pm = bool(re.search(r'\b(?:de\s+la|en\s+la|por\s+la)\s*(?:tarde|noche)\b', s, re.I))
+    forced_am = bool(re.search(r'\b(?:de\s+la|en\s+la|por\s+la)\s*(?:mañana|manana)\b', s, re.I))
+
+    # Match time expressions:
+    hour, minute, meridiem = None, 0, None
+
+    # 3a. Colon format: 5:30, 16:30, 4:00 pm, 5.30
+    m_colon = re.search(r'\b(\d{1,2})[:\.](\d{2})\s*(am|pm|a\.m\.|p\.m\.)?\b', s, re.I)
+    # 3b. Direct meridiem: 5 pm, 11 am, 5pm
+    m_meridiem = re.search(r'\b(\d{1,2})\s*(am|pm|a\.m\.|p\.m\.)\b', s, re.I)
+    # 3c. Spanish time phrase: '6 de la tarde', '11 de la mañana', '8 de la noche', '12 del dia'
+    m_span_meridiem = re.search(r'\b(\d{1,2})(?::(\d{2}))?\s*(?:de\s+la|en\s+la|por\s+la|del)\s*(tarde|noche|mañana|manana|d[ií]a)\b', s, re.I)
+    # 3d. Prefix with article: 'a las 5', 'para las 4', 'las 5', 'como a las 6', 'a la 1', 'la 1', 'tipo las 4'
+    m_prefix = re.search(r'(?:(?:como\s+a|a\s+eso\s+de|tipo|alrededor\s+de|para|a)\s+)?(?:las?|la)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?', s, re.I)
+    # 3e. Suffix: '17 hrs', '5 horas'
+    m_suffix = re.search(r'\b(\d{1,2})\s*(?:hrs?|horas?)\b', s, re.I)
+
+    if m_colon:
+        hour = int(m_colon.group(1))
+        minute = int(m_colon.group(2))
+        meridiem = m_colon.group(3)
+    elif m_meridiem:
+        hour = int(m_meridiem.group(1))
+        minute = 0
+        meridiem = m_meridiem.group(2)
+    elif m_span_meridiem:
+        hour = int(m_span_meridiem.group(1))
+        minute = int(m_span_meridiem.group(2)) if m_span_meridiem.group(2) else 0
+        p_word = m_span_meridiem.group(3).lower()
+        if "tarde" in p_word or "noche" in p_word:
+            meridiem = "pm"
+        elif "mañana" in p_word or "manana" in p_word:
+            meridiem = "am"
+        elif "d" in p_word:  # 'del dia'
+            meridiem = "pm" if hour == 12 else ("am" if hour < 12 else "pm")
+    elif m_prefix:
+        hour = int(m_prefix.group(1))
+        minute = int(m_prefix.group(2)) if m_prefix.group(2) else 0
+        meridiem = m_prefix.group(3)
+    elif m_suffix:
+        hour = int(m_suffix.group(1))
+        minute = 0
+        meridiem = None
+    elif s.strip().isdigit() and 1 <= int(s.strip()) <= 23:
+        hour = int(s.strip())
+        minute = 0
+        meridiem = None
+    elif day_offset > 0:
+        m_day = re.search(r'(?:mañana|manana)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?', s, re.I)
+        if m_day:
+            hour = int(m_day.group(1))
+            minute = int(m_day.group(2)) if m_day.group(2) else 0
+            meridiem = m_day.group(3)
+        elif forced_pm:
+            hour, minute, meridiem = 16, 0, "pm"
+        elif forced_am:
+            hour, minute, meridiem = 10, 0, "am"
+        else:
+            return None
+    elif forced_pm:
+        hour, minute, meridiem = 16, 0, "pm"
+    elif forced_am:
+        hour, minute, meridiem = 10, 0, "am"
+    else:
+        return None
+
+    if hour is None:
+        return None
+
+    if forced_pm and not meridiem:
+        meridiem = "pm"
+    elif forced_am and not meridiem:
+        meridiem = "am"
+
+    if meridiem:
+        meridiem = meridiem.lower().replace(".", "")
+        if meridiem == "pm" and hour < 12:
+            hour += 12
+        elif meridiem == "am" and hour == 12:
+            hour = 0
+    elif hour < 7:  # When user says 'a las 4' or 'a las 5', work hours mean PM (13:00 to 18:00)
+        hour += 12
+    elif hour == 7:
+        # If user says 'a las 7', in afternoon or if 7am passed, means 19:00 (closing hour)
+        if ref_time.hour >= 12 or hour < ref_time.hour or forced_pm:
+            hour = 19
+        else:
+            hour = 7
+    elif hour in (8, 9, 10, 11):
+        # 8, 9, 10, 11 are morning operating hours (8:00 to 11:00 AM).
+        if forced_pm:
             hour += 12
 
-        target_date = ref_time.date() + timedelta(days=day_offset)
-        res = datetime.combine(target_date, datetime.min.time()).replace(hour=hour, minute=minute)
-        # If no day specified and parsed time is more than 2 hours in the past today, assume next day
-        if day_offset == 0 and res < ref_time - timedelta(hours=2):
-            res += timedelta(days=1)
-        return res
+    if not (0 <= hour <= 23) or not (0 <= minute <= 59):
+        return None
 
-    return None
+    target_date = ref_time.date() + timedelta(days=day_offset)
+    res = datetime.combine(target_date, datetime.min.time()).replace(hour=hour, minute=minute)
+
+    # Regla de Horario de Operación de la Gasera (8:00 AM a 7:00 PM / 19:00 hrs):
+    # - Si el pedido cae a las 7:00 PM o después (ref_time.hour >= 19), la gasera ya cerró: se va al día siguiente a las 8:00 AM.
+    # - Si la hora solicitada es a las 7:00 PM o posterior (res.hour >= 19), se va al día siguiente a las 8:00 AM.
+    # - Si la hora solicitada es antes de las 8:00 AM (res.hour < 8), se programa a partir de las 8:00 AM.
+    # - Si el pedido se hace para hoy antes de las 7:00 PM (ej. hoy a las 5:00 PM = 17:00), se mantiene para HOY.
+    if day_offset == 0:
+        if ref_time.hour >= 19 or res.hour >= 19:
+            res = datetime.combine(ref_time.date() + timedelta(days=1), datetime.min.time()).replace(hour=8, minute=0)
+        elif res.hour < 8:
+            res = res.replace(hour=8, minute=0)
+    elif day_offset > 0:
+        if res.hour >= 19:
+            res = datetime.combine(res.date() + timedelta(days=1), datetime.min.time()).replace(hour=8, minute=0)
+        elif res.hour < 8:
+            res = res.replace(hour=8, minute=0)
+
+    return res
+
+
+def normalize_schedule_datetime(val: Any, ref_time: datetime | None = None) -> datetime | None:
+    """Safely parse any date/time string into a normalized naive local datetime."""
+    if not val:
+        return None
+    if ref_time is None:
+        ref_time = datetime.now()
+    if isinstance(val, datetime):
+        return val.astimezone().replace(tzinfo=None) if val.tzinfo else val
+    val_str = str(val).strip()
+    if not val_str:
+        return None
+
+    # Si es "lo antes posible" / inmediato:
+    # Si la gasera ya cerró (>= 19:00 hrs), se programa para mañana a las 8:00 AM
+    if any(w in val_str.lower() for w in ["lo antes posible", "inmediato", "urgente", "ahorita", "ahora"]):
+        if ref_time.hour >= 19:
+            return datetime.combine(ref_time.date() + timedelta(days=1), datetime.min.time()).replace(hour=8, minute=0)
+        elif ref_time.hour < 8:
+            return datetime.combine(ref_time.date(), datetime.min.time()).replace(hour=8, minute=0)
+        return None
+    clean_iso = val_str
+    if clean_iso.endswith("Z"):
+        clean_iso = clean_iso[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(clean_iso)
+        if dt.tzinfo:
+            return dt.astimezone().replace(tzinfo=None)
+        return dt
+    except Exception:
+        pass
+    dt = parse_schedule_deadline(val_str, ref_time)
+    if dt and dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt
+
+
+def to_utc_iso(val: Any, ref_time: datetime | None = None) -> str | None:
+    """Convert any local datetime or schedule string to standard UTC ISO string (YYYY-MM-DDTHH:MM:SS.000Z) for NestJS and browser dashboards."""
+    dt = normalize_schedule_datetime(val, ref_time)
+    if not dt:
+        return None
+    dt_aware = dt.astimezone()
+    dt_utc = dt_aware.astimezone(timezone.utc)
+    return dt_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def format_schedule_display(dt: datetime | None, ref_time: datetime | None = None) -> str:
+    """Format a datetime into a clean, human-readable Spanish delivery schedule string."""
+    if not dt:
+        return "Lo antes posible"
+    if ref_time is None:
+        ref_time = datetime.now()
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    is_today = dt.date() == ref_time.date()
+    is_tomorrow = dt.date() == (ref_time.date() + timedelta(days=1))
+    day_label = "Hoy" if is_today else ("Mañana" if is_tomorrow else dt.strftime("%d/%m/%Y"))
+    hour_12 = dt.strftime("%I:%M %p").lstrip("0")
+    return f"{day_label} a las {hour_12}"
 
 
 def _row_to_product(row: Any) -> Product:
@@ -825,16 +995,14 @@ class SqliteRepository(ProductRepository):
         clean_payment = payment_method.strip() if payment_method else "Efectivo"
 
         # Check deadline and scheduled status
-        deadline_dt = None
-        if scheduled_for:
-            try:
-                deadline_dt = datetime.fromisoformat(scheduled_for)
-            except Exception:
-                deadline_dt = parse_schedule_deadline(scheduled_for, now_dt)
+        deadline_dt = normalize_schedule_datetime(scheduled_for, now_dt)
         if not deadline_dt and clean_schedule:
-            deadline_dt = parse_schedule_deadline(clean_schedule, now_dt)
+            deadline_dt = normalize_schedule_datetime(clean_schedule, now_dt)
 
         scheduled_for_iso = deadline_dt.isoformat() if deadline_dt else None
+        if deadline_dt and (not clean_schedule or clean_schedule == "Lo antes posible"):
+            clean_schedule = format_schedule_display(deadline_dt, now_dt)
+
         if deadline_dt:
             # If scheduled delivery is more than 30 minutes in the future, hold in 'scheduled'
             if now_dt < (deadline_dt - timedelta(minutes=30)):
@@ -1044,6 +1212,7 @@ class SqliteRepository(ProductRepository):
             assigned_at = row["assigned_at"] if "assigned_at" in keys else None
             delivered_at = row["delivered_at"] if "delivered_at" in keys else None
             scheduled_for = row["scheduled_for"] if "scheduled_for" in keys else None
+            driver_message_ids = row["driver_message_ids"] if "driver_message_ids" in keys else None
 
             return Order(
                 id=row["id"],
@@ -1066,6 +1235,7 @@ class SqliteRepository(ProductRepository):
                 delivery_lng=delivery_lng,
                 live_location_message_id=live_location_message_id,
                 live_location_chat_id=live_location_chat_id,
+                driver_message_ids=driver_message_ids,
                 assigned_at=assigned_at,
                 delivered_at=delivered_at,
                 scheduled_for=scheduled_for,
@@ -1104,30 +1274,82 @@ class SqliteRepository(ProductRepository):
             )
             return True
 
+    def add_order_driver_message_id(self, tenant_id: str, order_id: int, message_id: int) -> bool:
+        """Store Telegram message ID sent to the driver for this order so buttons can be removed on cancellation."""
+        if not order_id or not message_id:
+            return False
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with get_db_connection() as conn:
+            row = conn.execute("SELECT driver_message_ids FROM orders WHERE tenant_id = ? AND id = ?", (tenant_id, order_id)).fetchone()
+            current_str = (row["driver_message_ids"] or "") if row else ""
+            existing = [int(x) for x in current_str.split(",") if x.strip().isdigit()]
+            if message_id not in existing:
+                existing.append(message_id)
+                new_str = ",".join(str(x) for x in existing[-15:])
+                conn.execute(
+                    "UPDATE orders SET driver_message_ids = ?, updated_at = ? WHERE tenant_id = ? AND id = ?",
+                    (new_str, now_iso, tenant_id, order_id),
+                )
+            return True
+
+    def get_order_driver_message_ids(self, tenant_id: str, order_id: int) -> list[int]:
+        """Retrieve all Telegram message IDs sent to the driver for this order."""
+        with get_db_connection() as conn:
+            row = conn.execute("SELECT driver_message_ids FROM orders WHERE tenant_id = ? AND id = ?", (tenant_id, order_id)).fetchone()
+            if not row or not row["driver_message_ids"]:
+                return []
+            return [int(x) for x in str(row["driver_message_ids"]).split(",") if x.strip().isdigit()]
+
+    def clear_order_driver_message_ids(self, tenant_id: str, order_id: int) -> bool:
+        """Clear the driver message IDs for an order."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with get_db_connection() as conn:
+            conn.execute(
+                "UPDATE orders SET driver_message_ids = NULL, updated_at = ? WHERE tenant_id = ? AND id = ?",
+                (now_iso, tenant_id, order_id),
+            )
+            return True
+
     def assign_order_to_driver(
         self,
         tenant_id: str,
         order_id: int,
-        driver_id: int,
+        driver_id: int | None,
         delivery_lat: float | None = None,
         delivery_lng: float | None = None,
+        force_activate: bool = False,
     ) -> Order | None:
-        """Assign an order to a driver with geocoded coordinates and update status to assigned."""
+        """Assign an order to a driver with geocoded coordinates.
+        If the order is scheduled for a future time (>30m) and not force_activated, status remains 'scheduled' until T-30 activation.
+        """
+        now_dt = datetime.now()
+        existing_order = self.get_order_by_id(tenant_id, order_id)
+        is_future_scheduled = False
+        if existing_order and not force_activate and existing_order.status in ("scheduled", "PROGRAMADO", "SCHEDULED"):
+            s_for = existing_order.scheduled_for
+            s_text = existing_order.delivery_schedule
+            deadline_dt = normalize_schedule_datetime(s_for, now_dt)
+            if not deadline_dt and s_text:
+                deadline_dt = normalize_schedule_datetime(s_text, now_dt)
+            if deadline_dt and now_dt < (deadline_dt - timedelta(minutes=30)):
+                is_future_scheduled = True
+
+        new_status = "scheduled" if is_future_scheduled else ("assigned" if driver_id else "confirmed")
         now_iso = datetime.now(timezone.utc).isoformat()
         with get_db_connection() as conn:
             conn.execute(
                 """
                 UPDATE orders
-                SET driver_id = ?, status = 'assigned', delivery_lat = ?, delivery_lng = ?,
+                SET driver_id = ?, status = ?, delivery_lat = ?, delivery_lng = ?,
                     assigned_at = ?, updated_at = ?
                 WHERE tenant_id = ? AND id = ?
                 """,
-                (driver_id, delivery_lat, delivery_lng, now_iso, now_iso, tenant_id, order_id),
+                (driver_id, new_status, delivery_lat, delivery_lng, now_iso, now_iso, tenant_id, order_id),
             )
         return self.get_order_by_id(tenant_id, order_id)
 
     def update_order_status(
-        self, tenant_id: str, order_id: int, status: str, notes_append: str = ""
+        self, tenant_id: str, order_id: int, status: str, notes_append: str = "", **kwargs: Any
     ) -> Order | None:
         """Update order lifecycle status (e.g. in_route, delivered, cancelled)."""
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -1170,6 +1392,32 @@ class SqliteRepository(ProductRepository):
 
         return self.get_order_by_id(tenant_id, order_id)
 
+    def update_order_delivery_coords(
+        self, tenant_id: str, order_id: int, delivery_lat: float, delivery_lng: float, delivery_address: str | None = None
+    ) -> bool:
+        """Update delivery coordinates and optionally address for an order."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with get_db_connection() as conn:
+            if delivery_address:
+                conn.execute(
+                    """
+                    UPDATE orders
+                    SET delivery_lat = ?, delivery_lng = ?, delivery_address = ?, updated_at = ?
+                    WHERE tenant_id = ? AND id = ?
+                    """,
+                    (delivery_lat, delivery_lng, delivery_address, now_iso, tenant_id, order_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE orders
+                    SET delivery_lat = ?, delivery_lng = ?, updated_at = ?
+                    WHERE tenant_id = ? AND id = ?
+                    """,
+                    (delivery_lat, delivery_lng, now_iso, tenant_id, order_id),
+                )
+        return True
+
     def get_orders_by_customer_phone(
         self, tenant_id: str, phone: str, limit: int = 5
     ) -> list[Order]:
@@ -1195,19 +1443,22 @@ class SqliteRepository(ProductRepository):
             return matched_orders
 
     def get_orders_by_driver(
-        self, tenant_id: str, driver_id: int, active_only: bool = True
+        self, tenant_id: str, driver_id: Any, active_only: bool = True
     ) -> list[Order]:
         """Get orders assigned to a specific driver."""
+        if not driver_id:
+            return []
+        d_int = int(driver_id) if str(driver_id).isdigit() else None
         with get_db_connection() as conn:
             if active_only:
                 cur = conn.execute(
-                    "SELECT id FROM orders WHERE tenant_id = ? AND driver_id = ? AND status IN ('assigned', 'in_route') ORDER BY id DESC",
-                    (tenant_id, driver_id),
+                    "SELECT id FROM orders WHERE tenant_id = ? AND (driver_id = ? OR driver_id = ? OR (? IS NOT NULL AND driver_id = ?)) AND status IN ('assigned', 'in_route') ORDER BY id DESC",
+                    (tenant_id, driver_id, str(driver_id), d_int, d_int),
                 )
             else:
                 cur = conn.execute(
-                    "SELECT id FROM orders WHERE tenant_id = ? AND driver_id = ? ORDER BY id DESC LIMIT 10",
-                    (tenant_id, driver_id),
+                    "SELECT id FROM orders WHERE tenant_id = ? AND (driver_id = ? OR driver_id = ? OR (? IS NOT NULL AND driver_id = ?)) ORDER BY id DESC LIMIT 10",
+                    (tenant_id, driver_id, str(driver_id), d_int, d_int),
                 )
             rows = cur.fetchall()
             return [self.get_order_by_id(tenant_id, r["id"]) for r in rows if r]
@@ -1276,14 +1527,9 @@ class SqliteRepository(ProductRepository):
                 status = r["status"]
                 driver_id = r["driver_id"]
 
-                deadline_dt = None
-                if s_for:
-                    try:
-                        deadline_dt = datetime.fromisoformat(s_for)
-                    except Exception:
-                        deadline_dt = parse_schedule_deadline(s_for, now)
+                deadline_dt = normalize_schedule_datetime(s_for, now)
                 if not deadline_dt and schedule_text:
-                    deadline_dt = parse_schedule_deadline(schedule_text, now)
+                    deadline_dt = normalize_schedule_datetime(schedule_text, now)
 
                 if not deadline_dt:
                     continue
@@ -1328,7 +1574,7 @@ class SqliteRepository(ProductRepository):
                 WHERE o.tenant_id = ?
                   AND o.status NOT IN ('cancelled', 'delivered')
                   AND (o.scheduled_for IS NOT NULL OR o.status = 'scheduled')
-                ORDER BY o.scheduled_for ASC, o.id ASC
+                ORDER BY o.id DESC
                 """,
                 (tenant_id,),
             )
@@ -1337,20 +1583,33 @@ class SqliteRepository(ProductRepository):
             agenda = []
             for r in rows:
                 oid = r["id"]
+                st = r["status"]
+                created_raw = r["created_at"]
+                order_ref_dt = now
+                if created_raw:
+                    try:
+                        c_clean = str(created_raw).replace("Z", "+00:00")
+                        order_ref_dt = datetime.fromisoformat(c_clean)
+                        if order_ref_dt.tzinfo:
+                            order_ref_dt = order_ref_dt.astimezone().replace(tzinfo=None)
+                    except Exception:
+                        order_ref_dt = now
+
                 s_for = r["scheduled_for"]
                 schedule_text = r["delivery_schedule"] or "Lo antes posible"
 
-                deadline_dt = None
-                if s_for:
-                    try:
-                        deadline_dt = datetime.fromisoformat(s_for)
-                    except Exception:
-                        deadline_dt = parse_schedule_deadline(s_for, now)
+                deadline_dt = normalize_schedule_datetime(s_for, now)
                 if not deadline_dt and schedule_text:
-                    deadline_dt = parse_schedule_deadline(schedule_text, now)
+                    deadline_dt = normalize_schedule_datetime(schedule_text, order_ref_dt)
 
                 if not deadline_dt:
                     continue
+
+                if st != "scheduled" and deadline_dt and deadline_dt.date() < now.date():
+                    continue
+
+                if not schedule_text or schedule_text == "Lo antes posible":
+                    schedule_text = format_schedule_display(deadline_dt, now)
 
                 activation_time = deadline_dt - timedelta(minutes=30)
                 is_activated = now >= activation_time
@@ -1358,12 +1617,11 @@ class SqliteRepository(ProductRepository):
                 diff_deadline_mins = int((deadline_dt - now).total_seconds() / 60)
                 diff_act_mins = int((activation_time - now).total_seconds() / 60)
 
+                deadline_display = format_schedule_display(deadline_dt, now)
+                act_time_label = activation_time.strftime("%I:%M %p").lstrip("0")
                 is_today = deadline_dt.date() == now.date()
                 is_tomorrow = deadline_dt.date() == (now.date() + timedelta(days=1))
                 day_label = "Hoy" if is_today else ("Mañana" if is_tomorrow else deadline_dt.strftime("%d/%m/%Y"))
-                time_label = deadline_dt.strftime("%I:%M %p")
-                deadline_display = f"{day_label} a las {time_label}"
-                act_time_label = activation_time.strftime("%I:%M %p")
                 act_display = f"{day_label} a las {act_time_label}"
 
                 items_cur = conn.execute(
@@ -1408,6 +1666,15 @@ class SqliteRepository(ProductRepository):
                     "created_at": r["created_at"],
                 })
 
+            def _agenda_sort_key(item: dict[str, Any]) -> tuple[str, int]:
+                deadline = str(item.get("scheduled_for") or "9999-12-31T23:59:59")
+                try:
+                    order_num = int(item.get("id") or 0)
+                except Exception:
+                    order_num = 0
+                return (deadline, order_num)
+
+            agenda.sort(key=_agenda_sort_key, reverse=False)
             return agenda
 
     def reschedule_order(
@@ -1415,16 +1682,13 @@ class SqliteRepository(ProductRepository):
     ) -> Order | None:
         """Update scheduled time for an order and adjust its activation status."""
         now = datetime.now()
-        deadline_dt = None
-        if new_datetime_iso:
-            try:
-                deadline_dt = datetime.fromisoformat(new_datetime_iso)
-            except Exception:
-                deadline_dt = parse_schedule_deadline(new_datetime_iso, now)
+        deadline_dt = normalize_schedule_datetime(new_datetime_iso, now)
         if not deadline_dt and new_schedule:
-            deadline_dt = parse_schedule_deadline(new_schedule, now)
+            deadline_dt = normalize_schedule_datetime(new_schedule, now)
 
         s_iso = deadline_dt.isoformat() if deadline_dt else None
+        if deadline_dt and (not new_schedule or new_schedule == "Lo antes posible"):
+            new_schedule = format_schedule_display(deadline_dt, now)
         
         order = self.get_order_by_id(tenant_id, order_id)
         if not order:

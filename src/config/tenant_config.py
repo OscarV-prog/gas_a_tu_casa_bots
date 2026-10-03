@@ -33,10 +33,12 @@ class AgentConfig(BaseModel):
 class LLMConfig(BaseModel):
     """LLM provider settings (can differ per tenant)."""
 
-    provider: str = "openai"  # "openai" or "anthropic"
+    provider: str = "openai"  # "openai", "anthropic", or "openrouter"
     model: str = "gpt-4o-mini"
     temperature: float = 0.7
-    max_tokens: int = 1024
+    max_tokens: int = 4096
+    provider_routing: dict[str, Any] = Field(default_factory=dict)
+    extra_body: dict[str, Any] = Field(default_factory=dict)
 
 
 class FeaturesConfig(BaseModel):

@@ -43,12 +43,21 @@ def create_llm(tenant_config: TenantConfig) -> BaseChatModel:
                 "No se encontró OPENROUTER_API_KEY en el archivo .env"
             )
 
+        # OpenRouter provider routing & price limits
+        prov_cfg = cfg.provider_routing.get("provider") if cfg.provider_routing else None
+        if not prov_cfg:
+            prov_cfg = {"sort": "price"}
+        extra_body = cfg.extra_body or {"provider": prov_cfg}
+
+        model_name = os.getenv("LLM_MODEL", cfg.model)
+
         return ChatOpenAI(
-            model=cfg.model,
+            model=model_name,
             api_key=api_key,
             base_url="https://openrouter.ai/api/v1",
             temperature=cfg.temperature,
-            max_tokens=cfg.max_tokens,
+            max_tokens=cfg.max_tokens or 4096,
+            extra_body=extra_body,
         )
 
     raise ValueError(

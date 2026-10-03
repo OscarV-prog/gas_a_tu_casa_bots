@@ -6,7 +6,8 @@ from src.repositories.sqlite_repo import SqliteRepository
 from src.repositories.api_repo import ApiRepository
 
 _sqlite_repo = SqliteRepository()
-_api_repo = ApiRepository(fallback_repo=_sqlite_repo)
+# Conectar exclusivamente a PostgreSQL (API Centralizada) con SQLite totalmente desactivado
+_api_repo = ApiRepository(fallback_repo=None)
 
 
 def get_repository() -> ApiRepository | SqliteRepository:

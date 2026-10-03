@@ -1,4 +1,4 @@
-"""Tool: create and register a customer order in SQLite, triggering driver dispatch."""
+"""Tool: create and register a customer order in database for Control Tower dispatch."""
 
 from __future__ import annotations
 
@@ -8,8 +8,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
 from src.repositories import get_repository
-from src.services.dispatch import dispatch_order
-from src.services.geocoding import resolve_gps_address_to_name, reverse_geocode
+from src.services.geocoding import geocode_address, resolve_gps_address_to_name, reverse_geocode
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +24,7 @@ def create_order(
     notes: str = "",
     delivery_lat: float | None = None,
     delivery_lng: float | None = None,
+    scheduled_for: str | None = None,
     config: RunnableConfig = None,
 ) -> str:
     """Registra y confirma formalmente un pedido de gas en la base de datos.
@@ -115,37 +115,97 @@ def create_order(
             if resolved and not resolved.lower().startswith("ubicaci"):
                 clean_addr = f"{resolved} - {notes.strip()}" if notes.strip() else resolved
 
+        if delivery_lat is None or delivery_lng is None or delivery_lat == 0.0:
+            try:
+                g_lat, g_lng, _ = geocode_address(clean_addr, city_context="Mazatlán")
+                if g_lat and g_lng:
+                    delivery_lat, delivery_lng = g_lat, g_lng
+            except Exception:
+                pass
+
+        # Asegurar cálculo de scheduled_for si no vino explícito pero el horario no es ASAP
+        clean_sched = delivery_schedule.strip() if delivery_schedule else "Lo antes posible"
+        clean_sched_for = scheduled_for
+        if (not clean_sched_for or clean_sched_for.strip() == "") and clean_sched and "antes posible" not in clean_sched.lower():
+            from src.repositories.sqlite_repo import normalize_schedule_datetime, format_schedule_display
+            dt_parsed = normalize_schedule_datetime(clean_sched)
+            if dt_parsed:
+                clean_sched_for = dt_parsed.isoformat()
+                clean_sched = format_schedule_display(dt_parsed)
+
         order = repo.create_order(
             tenant_id=tenant_id,
             customer_name=customer_name.strip(),
             customer_phone=customer_phone.strip(),
             delivery_address=clean_addr,
             items=validated_items,
-            delivery_schedule=delivery_schedule.strip() if delivery_schedule else "Lo antes posible",
+            delivery_schedule=clean_sched,
             payment_method=payment_method.strip() if payment_method else "Efectivo",
             notes=notes.strip(),
             channel=channel,
             channel_user_id=channel_user_id,
             delivery_lat=delivery_lat,
             delivery_lng=delivery_lng,
+            scheduled_for=clean_sched_for,
         )
 
         # La orden queda registrada (o programada en agenda si es a futuro)
         updated_order = repo.get_order_by_id(tenant_id, order.id) or order
 
-        if updated_order.status == "scheduled":
+        # Registrar canal e identidad del cliente para que Torre de Control notifique al asignar chofer
+        try:
+            from src.repositories.identity_store import identity_store
+            identity_store.save_order_channel_info(
+                order.id,
+                channel=channel,
+                channel_user_id=str(channel_user_id),
+                phone=customer_phone.strip(),
+            )
+        except Exception:
+            pass
+
+        # Resumen limpio y mínimo para el cliente
+        def _get_item_desc(it: Any) -> str:
+            if isinstance(it, dict):
+                qty = it.get("quantity", 1)
+                name = it.get("product_name") or it.get("name") or "Gas LP"
+            else:
+                qty = getattr(it, "quantity", 1)
+                name = getattr(it, "product_name", None) or getattr(it, "name", None) or "Gas LP"
+            try:
+                qty_val = float(qty)
+                qty_str = f"{int(qty_val)}" if qty_val.is_integer() else f"{qty_val}"
+            except Exception:
+                qty_str = str(qty)
+            return f"{qty_str}x {name}"
+
+        items_summary = ", ".join(_get_item_desc(it) for it in (getattr(updated_order, "items", []) or [])) or "Gas LP"
+        pay_method_val = getattr(updated_order, "payment_method", "") or "Efectivo"
+        pay_str = "Efectivo" if "efectivo" in str(pay_method_val).lower() else str(pay_method_val)
+        tot_amount = getattr(updated_order, "total_amount", 0.0) or 0.0
+        currency_val = getattr(updated_order, "currency", "MXN")
+        addr_val = getattr(updated_order, "delivery_address", "")
+        sched_val = getattr(updated_order, "delivery_schedule", "")
+
+        if getattr(updated_order, "status", "") == "scheduled":
             return (
-                f"🗓️ ¡PEDIDO PROGRAMADO CON ÉXITO EN AGENDA!\n\n"
-                f"{updated_order.to_display()}\n\n"
-                f"Indica al cliente su número de folio (#{order.id}) y confirma que su pedido quedó agendado para: {updated_order.delivery_schedule}. "
-                f"Infórmale que nuestra Torre de Control activará la unidad de reparto 30 minutos antes de su horario pactado para garantizar su entrega puntual."
+                f"🗓️ *¡Pedido #{order.id} agendado!*\n\n"
+                f"📦 *Detalle:* {items_summary}\n"
+                f"💰 *Total:* ${tot_amount:.2f} {currency_val} ({pay_str})\n"
+                f"📍 *Entrega:* {addr_val}\n"
+                f"📅 *Programado para:* {sched_val}\n\n"
+                f"Te avisaremos en cuanto tu unidad vaya en camino. ⛽✨"
             )
 
+        logger.info(f"[create_order] Pedido #{order.id} registrado exitosamente en BD.")
+
         return (
-            f"✅ ¡PEDIDO REGISTRADO EXITOSAMENTE EN BASE DE DATOS!\n\n"
-            f"{updated_order.to_display()}\n\n"
-            f"Indica al cliente su número de folio (#{order.id}), confirma el horario de entrega y el método de pago registrado. "
-            f"Infórmale que nuestra Torre de Control está coordinando la unidad de reparto para su servicio."
+            f"✅ *¡Pedido #{order.id} confirmado!*\n\n"
+            f"📦 *Detalle:* {items_summary}\n"
+            f"💰 *Total:* ${tot_amount:.2f} {currency_val} ({pay_str})\n"
+            f"📍 *Entrega:* {addr_val}\n"
+            f"📅 *Horario:* {sched_val}\n\n"
+            f"Estamos asignando tu unidad. Te avisaremos en breve. ⛽✨"
         )
     except Exception as e:
         return f"Error al registrar el pedido en la base de datos: {e}"

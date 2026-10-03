@@ -16,14 +16,21 @@ from src.services.notifications import notify_driver
 logger = logging.getLogger(__name__)
 
 
-def is_future_order(schedule: str) -> bool:
-    """Check if the delivery schedule is for a future day rather than today."""
+def is_future_order(schedule: str, ref_time: datetime | None = None) -> bool:
+    """Check if the delivery schedule is for a scheduled future time (today later or future days)."""
     if not schedule:
         return False
-    s = schedule.lower().strip()
+    from datetime import datetime, timedelta
+    from src.repositories.sqlite_repo import parse_schedule_deadline
 
-    # Explicit positive signals for today / immediate
-    if any(today_word in s for today_word in ["hoy", "lo antes posible", "ahorita", "inmediato", "ahora", "urgente"]):
+    now = ref_time or datetime.now()
+    deadline_dt = parse_schedule_deadline(schedule, now)
+    if deadline_dt:
+        # If deadline is more than 30 minutes in the future, it's a scheduled order
+        return now < (deadline_dt - timedelta(minutes=30))
+
+    s = schedule.lower().strip()
+    if any(today_word in s for today_word in ["lo antes posible", "ahorita", "inmediato", "ahora", "urgente"]):
         return False
 
     future_signals = [
@@ -131,7 +138,9 @@ def dispatch_order(order_id: int, tenant_id: str = "petroil", force_immediate: b
 
     if not available_drivers:
         logger.warning(f"[Dispatch] No available drivers on shift for order #{order_id}.")
-        repo.assign_order_to_driver(tenant_id, order_id, driver_id=None, delivery_lat=lat, delivery_lng=lng)
+        repo.assign_order_to_driver(
+            tenant_id, order_id, driver_id=None, delivery_lat=lat, delivery_lng=lng, force_activate=force_immediate
+        )
         return False
 
     # 5. Prioritize drivers with Telegram connected (numeric ID only)
@@ -150,6 +159,7 @@ def dispatch_order(order_id: int, tenant_id: str = "petroil", force_immediate: b
         driver_id=selected_driver.id,
         delivery_lat=lat,
         delivery_lng=lng,
+        force_activate=force_immediate,
     )
 
     # 7. Send alert to assigned driver (or active telegram drivers if unassigned)
@@ -166,6 +176,25 @@ def dispatch_order(order_id: int, tenant_id: str = "petroil", force_immediate: b
             logger.info(f"[Dispatch] Order #{order_id} alert sent to driver Telegram {d.name} ({d.telegram_user_id}).")
         else:
             logger.warning(f"[Dispatch] Failed to send Telegram alert to driver {d.name}.")
+
+    # 8. Notify client that their order has been assigned to a driver
+    recipient_id = str(order.channel_user_id or order.customer_phone or "").strip()
+    if recipient_id:
+        from src.services.notifications import notify_client
+        v_plate = selected_driver.vehicle_plate or "Unidad de reparto"
+        d_phone = selected_driver.phone or ""
+        phone_line = f"📞 **Teléfono:** `{d_phone}`\n" if d_phone else ""
+        msg_asignacion = (
+            f"🛻 **¡Tu pedido #{order.id} ha sido asignado!**\n\n"
+            f"👨‍✈️ **Chofer:** {selected_driver.name}\n"
+            f"🚘 **Unidad:** {v_plate}\n"
+            f"{phone_line}\n"
+            f"El operador está preparando su unidad y te avisaremos en cuanto inicie su recorrido hacia tu domicilio. ⛽"
+        )
+        try:
+            notify_client(recipient_id, msg_asignacion, channel=order.channel)
+        except Exception as e:
+            logger.warning(f"[Dispatch] Error al notificar asignación al cliente: {e}")
 
     return True
 
@@ -219,22 +248,31 @@ def send_driver_trip_alert(
         "inline_keyboard": [
             [
                 {"text": "✅ Aceptar Viaje", "callback_data": f"accept_order:{order.id}"},
-                {"text": "❌ Rechazar", "callback_data": f"reject_order:{order.id}"},
+                {"text": "📦 Marcar como Entregado", "callback_data": f"confirm_deliver:{order.id}"},
             ],
             [
+                {"text": "❌ Rechazar", "callback_data": f"reject_order:{order.id}"},
                 {"text": "🗺️ Google Maps", "url": gmaps_url},
                 {"text": "🚗 Waze", "url": waze_url},
             ],
         ]
     }
 
-    return notify_driver(
+    msg_id = notify_driver(
         telegram_user_id=telegram_user_id,
         message=driver_card,
         reply_markup=inline_keyboard,
         lat=order_lat,
         lng=order_lng,
     )
+    if msg_id and getattr(order, "id", None):
+        try:
+            from src.repositories import get_repository
+            repo = get_repository()
+            repo.add_order_driver_message_id("petroil", order.id, msg_id)
+        except Exception:
+            pass
+    return bool(msg_id)
 
 
 def dispatch_scheduled_orders_for_shift(tenant_id: str = "petroil") -> list[int]:

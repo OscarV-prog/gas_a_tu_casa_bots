@@ -9,6 +9,7 @@ from src.tools.get_order_status import get_order_status
 from src.tools.customer_info import get_customer_info
 from src.tools.cancel_order import cancel_order
 from src.tools.delete_customer_address import delete_customer_address
+from src.tools.check_schedule_availability import check_schedule_availability
 
 ALL_TOOLS = [
     search_products,
@@ -20,6 +21,7 @@ ALL_TOOLS = [
     get_customer_info,
     cancel_order,
     delete_customer_address,
+    check_schedule_availability,
 ]
 
 __all__ = [
@@ -32,5 +34,6 @@ __all__ = [
     "get_customer_info",
     "cancel_order",
     "delete_customer_address",
+    "check_schedule_availability",
     "ALL_TOOLS",
 ]

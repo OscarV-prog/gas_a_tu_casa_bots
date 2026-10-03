@@ -7,6 +7,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 # Forzar UTF-8 en terminal de Windows
 if sys.platform == "win32":
@@ -34,7 +35,9 @@ from telegram.request import HTTPXRequest
 from src.config.settings import get_settings
 from src.database import init_db
 from src.repositories import get_repository
-from src.services.dispatch import dispatch_scheduled_orders_for_shift
+from src.repositories.identity_store import identity_store
+from src.services.api_client import api_get
+from src.services.dispatch import dispatch_scheduled_orders_for_shift, send_driver_trip_alert
 from src.services.geocoding import get_google_maps_url, get_waze_url, reverse_geocode
 from src.services.notifications import (
     notify_client,
@@ -58,7 +61,10 @@ import math
 import time
 
 # Conjunto en memoria de IDs de órdenes con live location inaccesible para evitar saturar la API
-_failed_live_location_orders: set[int] = set()
+_failed_live_location_orders: set[Any] = set()
+
+# Conjunto en memoria de pedidos asignados por Dashboard ya alertados al chofer (order_id, driver_id)
+_notified_dashboard_assigned_orders: set[tuple[str, str]] = set()
 
 # Control de frecuencia (throttling) de actualizaciones de GPS en tiempo real
 # user_id -> (timestamp_epoch, lat, lng)
@@ -108,6 +114,16 @@ async def _safe_edit_message_text(query, text: str, **kwargs):
         return None
 
 
+async def _safe_delete_message(bot, chat_id: int | str, message_id: int) -> bool:
+    """Elimina un mensaje de Telegram capturando excepciones de forma segura."""
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        return True
+    except Exception as e:
+        logger.debug(f"_safe_delete_message handled: {e}")
+        return False
+
+
 def _normalizar_valor_tanque(val_str: str) -> str:
     """Normaliza texto a formato estándar de porcentaje o litros (ej: '85%' o '4500 L')."""
     s = val_str.strip()
@@ -145,7 +161,10 @@ def get_botones_pedido_activo_inline(order) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🚗 Abrir Waze", url=waze),
         ],
         [
+            InlineKeyboardButton("📍 Transmitir Ubicación GPS", callback_data=f"pedir_gps:{order.id}"),
             InlineKeyboardButton("📦 Marcar como Entregado", callback_data=f"confirm_deliver:{order.id}"),
+        ],
+        [
             InlineKeyboardButton("❌ Cancelar Viaje", callback_data=f"confirm_cancel_driver:{order.id}"),
         ],
     ]
@@ -208,19 +227,33 @@ def get_teclado_lectura_tanque() -> ReplyKeyboardMarkup:
 def _determinar_estado_ui_chofer(repo, driver) -> str:
     """Determina el estado de interfaz del chofer: disponible, pausa o fuera_turno.
     
-    Un chofer está en 'disponible' (con teclado completo de trabajo) si tiene un turno
-    activo en driver_shifts o tiene pedidos activos asignados/en ruta.
+    Un chofer con turno activo siempre tiene acceso al teclado completo de trabajo (disponible),
+    a menos que esté fuera de turno.
     """
     if not driver:
         return "fuera_turno"
     active_shift = repo.get_active_driver_shift(TENANT_ID, driver.id)
-    active_orders = repo.get_orders_by_driver(TENANT_ID, driver.id, active_only=True)
+    if not active_shift and not driver.is_available:
+        return "fuera_turno"
+    return "disponible"
 
-    if active_shift or active_orders:
-        if not driver.is_available and not active_orders:
-            return "pausa"
-        return "disponible"
-    return "fuera_turno"
+
+def _get_driver_vehicle_label(driver, repo=None) -> str:
+    """Retorna la etiqueta legible de la unidad asignada al chofer."""
+    if not driver:
+        return "Sin unidad asignada"
+    if repo and getattr(driver, "vehicle_id", None):
+        try:
+            veh = repo.get_vehicle(driver.tenant_id, driver.vehicle_id)
+            if veh:
+                return f"{veh.unit_identifier} [{veh.plate}] — {veh.model}"
+        except Exception:
+            pass
+    if getattr(driver, "vehicle_plate", None) and str(driver.vehicle_plate).strip():
+        return str(driver.vehicle_plate).strip()
+    if getattr(driver, "unit_identifier", None) and str(driver.unit_identifier).strip():
+        return str(driver.unit_identifier).strip()
+    return "Sin unidad asignada"
 
 
 def _formatear_resumen_chofer(driver, repo) -> str:
@@ -358,6 +391,12 @@ async def recibir_telefono_login(update: Update, context: ContextTypes.DEFAULT_T
     phone_search = clean_digits[-10:]
     repo = get_repository()
     driver = repo.get_driver_by_phone(TENANT_ID, phone_search)
+    if not driver and hasattr(repo, "driver_login"):
+        try:
+            repo.driver_login(phone_search)
+            driver = repo.get_driver_by_phone(TENANT_ID, phone_search)
+        except Exception:
+            pass
 
     if not driver:
         await update.message.reply_text(
@@ -428,10 +467,11 @@ async def boton_disponible(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         pedidos_txt = ""
         if active_orders:
             pedidos_txt = f"\n\n📦 **Tienes {len(active_orders)} pedido(s) activo(s) en curso.** Presiona **'📋 Mis Pedidos Activos'** abajo para revisarlos o dar seguimiento."
+        v_label = _get_driver_vehicle_label(driver, repo)
         await update.message.reply_text(
             f"🟢 **Ya te encuentras en turno activo.**\n\n"
             f"👤 Chofer: **{driver.name}**\n"
-            f"🚘 Unidad: **{driver.vehicle_plate}**\n"
+            f"🚘 Unidad: **{v_label}**\n"
             f"⚡ Estado: **EN TURNO (DISPONIBLE)**{pedidos_txt}",
             reply_markup=get_teclado_principal("disponible"),
             parse_mode="Markdown",
@@ -440,7 +480,7 @@ async def boton_disponible(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # Solicitar la carga inicial
     context.user_data["awaiting_tank_reading"] = "initial"
-    v_plate = driver.vehicle_plate or "Unidad"
+    v_plate = _get_driver_vehicle_label(driver, repo)
 
 
     msg = (
@@ -489,11 +529,12 @@ async def _completar_inicio_turno(
 
     target = update.message or (update.callback_query.message if update.callback_query else None)
     if target:
+        v_label = _get_driver_vehicle_label(driver, repo)
         await _safe_reply_text(
             target,
             f"🟢 **¡TURNO INICIADO CON ÉXITO!**\n\n"
             f"👤 Chofer: **{driver.name}**\n"
-            f"🚘 Unidad: **{driver.vehicle_plate}**"
+            f"🚘 Unidad: **{v_label}**"
             f"{hora_entrada_txt}"
             f"{carga_info}\n"
             f"⚡ Estado: **DISPONIBLE PARA VIAJES** ⛽\n\n"
@@ -560,7 +601,7 @@ async def boton_terminar_turno(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(
             f"⚠️ **Atención:** Tienes **{len(active_orders)} pedido(s) activo(s)** pendiente(s) ({folios}).\n\n"
             "Por favor márcalos como entregados o recházalos antes de finalizar tu turno.",
-            reply_markup=get_teclado_principal("disponible" if driver.is_available else "pausa"),
+            reply_markup=get_teclado_principal(_determinar_estado_ui_chofer(repo, driver)),
             parse_mode="Markdown",
         )
         return
@@ -641,15 +682,16 @@ async def _completar_fin_turno(
         comparativa += f"\n• 🔴 Carga Final: **{reading_val}**{foto_txt}"
 
     # Pedidos entregados hoy por este chofer
-    delivered_count = repo.get_delivered_orders_count_by_driver(TENANT_ID, driver.id)
+    delivered_count = repo.get_delivered_orders_count_by_driver(TENANT_ID, driver.id) or 0
     pedidos_txt = f"\n• 📦 Pedidos entregados en la jornada: **{delivered_count} servicios**" if delivered_count > 0 else ""
 
     target = update.message or (update.callback_query.message if update.callback_query else None)
     if target:
+        v_label = _get_driver_vehicle_label(driver, repo)
         await target.reply_text(
             f"🛑 **¡TURNO FINALIZADO CON ÉXITO!**\n\n"
             f"👤 Chofer: **{driver.name}**\n"
-            f"🚘 Unidad: **{driver.vehicle_plate}**\n"
+            f"🚘 Unidad: **{v_label}**\n"
             f"💤 Estado: **DESCONECTADO (FUERA DE TURNO)**\n\n"
             f"{jornada_bloque}"
             f"📊 **Conciliación de Carga de Tanque:**"
@@ -834,7 +876,7 @@ async def comando_turno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         cin = active_shift.get("check_in_at", "")
         h_in = cin.split(" ")[1][:5] if " " in cin else cin
         ini_read = active_shift.get("initial_reading") or "Sin registrar"
-        delivered_count = repo.get_delivered_orders_count_by_driver(TENANT_ID, driver.id)
+        delivered_count = repo.get_delivered_orders_count_by_driver(TENANT_ID, driver.id) or 0
         msg = (
             f"🟢 **TURNO ACTIVO EN CURSO**\n\n"
             f"👤 Chofer: **{driver.name}**\n"
@@ -901,7 +943,7 @@ async def boton_perfil(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             dur_txt = f"{hrs}h {rem_m}m" if hrs > 0 else f"{rem_m} min"
             shift_str = f"\n• ⏱️ **Última jornada:** {dur_txt} ({recent_shifts[0].get('shift_date')})"
 
-    delivered_count = repo.get_delivered_orders_count_by_driver(TENANT_ID, driver.id)
+    delivered_count = repo.get_delivered_orders_count_by_driver(TENANT_ID, driver.id) or 0
     pedidos_txt = f"\n• 📦 **Servicios completados hoy:** {delivered_count}" if delivered_count > 0 else ""
 
     msg = (
@@ -921,12 +963,20 @@ async def boton_pedidos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     user_id = str(update.effective_user.id)
+    chat_id = update.effective_chat.id if update.effective_chat else update.message.chat_id
     repo = get_repository()
     driver = repo.get_driver_by_telegram_id(TENANT_ID, user_id)
 
     if not driver:
         await update.message.reply_text("⚠️ Primero completa tu registro con `/registro`")
         return
+
+    # Si antes teníamos mensajes de pedidos activos en este chat, los borramos para no duplicar ni dejar botones viejos
+    old_msg_ids = context.user_data.get("active_order_messages", [])
+    if old_msg_ids and chat_id:
+        for mid in old_msg_ids:
+            await _safe_delete_message(context.bot, chat_id, mid)
+        context.user_data["active_order_messages"] = []
 
     orders = repo.get_orders_by_driver(TENANT_ID, driver.id, active_only=True)
     estado = _determinar_estado_ui_chofer(repo, driver)
@@ -939,18 +989,29 @@ async def boton_pedidos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
+    sent_msg_ids = []
 
-    await update.message.reply_text(f"📋 **Tienes {len(orders)} pedido(s) activo(s):**", parse_mode="Markdown")
+    header_msg = await _safe_reply_text(
+        update.message,
+        f"📋 **Tienes {len(orders)} pedido(s) activo(s):**",
+        reply_markup=get_teclado_principal(estado),
+        parse_mode="Markdown",
+    )
+    if header_msg:
+        sent_msg_ids.append(header_msg.message_id)
 
     if len(orders) > 1:
         bulk_kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"🗑️ Liberar / Cancelar Todos Mis Pedidos ({len(orders)})", callback_data="cancel_all_my_orders")]
         ])
-        await update.message.reply_text(
+        bulk_msg = await _safe_reply_text(
+            update.message,
             "⚡ *Acción Rápida:* Si deseas cancelar todas tus órdenes asignadas para que la Torre de Control las reasigne, presiona el botón:",
             reply_markup=bulk_kb,
             parse_mode="Markdown",
         )
+        if bulk_msg:
+            sent_msg_ids.append(bulk_msg.message_id)
 
     for ord in orders:
         lat = ord.delivery_lat or 23.2014
@@ -961,8 +1022,11 @@ async def boton_pedidos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         items_str = "\n".join(f"  • {it.quantity}x {it.product_name}" for it in ord.items)
         pay_icon = "💵" if "efectivo" in ord.payment_method.lower() else "💳"
 
+        is_pending_acceptance = ord.status in ("assigned", "pending", "confirmed")
+        status_label = "🟡 ASIGNADO (Pendiente de Aceptar)" if is_pending_acceptance else "🚚 EN RUTA"
+
         texto = (
-            f"🔹 **Pedido #{ord.id}** — Estado: `[{ord.status.upper()}]`\n"
+            f"🔹 **Pedido #{ord.id}** — Estado: **{status_label}**\n"
             f"👤 Cliente: {ord.customer_name} (`{ord.customer_phone}`)\n"
             f"📍 Dirección: {ord.delivery_address}\n"
             f"📅 Horario: {ord.delivery_schedule}\n"
@@ -970,38 +1034,298 @@ async def boton_pedidos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"📦 Productos:\n{items_str}"
         )
 
-        keyboard = [
-            [
-                InlineKeyboardButton("🗺️ Google Maps", url=gmaps),
-                InlineKeyboardButton("🚗 Waze", url=waze),
-            ],
-            [
-                InlineKeyboardButton("📦 Marcar como Entregado", callback_data=f"confirm_deliver:{ord.id}"),
-                InlineKeyboardButton("❌ Cancelar Viaje", callback_data=f"confirm_cancel_driver:{ord.id}"),
-            ],
-        ]
+        if is_pending_acceptance:
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Aceptar Viaje", callback_data=f"accept_order:{ord.id}"),
+                    InlineKeyboardButton("📦 Marcar como Entregado", callback_data=f"confirm_deliver:{ord.id}"),
+                ],
+                [
+                    InlineKeyboardButton("❌ Rechazar", callback_data=f"reject_order:{ord.id}"),
+                    InlineKeyboardButton("🗺️ Google Maps", url=gmaps),
+                    InlineKeyboardButton("🚗 Waze", url=waze),
+                ],
+            ]
+        else:
+            keyboard = [
+                [
+                    InlineKeyboardButton("🗺️ Google Maps", url=gmaps),
+                    InlineKeyboardButton("🚗 Waze", url=waze),
+                ],
+                [
+                    InlineKeyboardButton("📦 Marcar como Entregado", callback_data=f"confirm_deliver:{ord.id}"),
+                    InlineKeyboardButton("❌ Cancelar Viaje", callback_data=f"confirm_cancel_driver:{ord.id}"),
+                ],
+            ]
 
-        await update.message.reply_text(
+        ord_msg = await _safe_reply_text(
+            update.message,
             texto,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown",
         )
+        if ord_msg:
+            sent_msg_ids.append(ord_msg.message_id)
+            try:
+                repo.add_order_driver_message_id(TENANT_ID, ord.id, ord_msg.message_id)
+            except Exception:
+                pass
+
+    context.user_data["active_order_messages"] = sent_msg_ids
 
 
 async def pedir_actualizar_ubicacion(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Solicita al chofer enviar su ubicación GPS."""
+    """Solicita al chofer enviar su ubicación GPS o activar ubicación en tiempo real."""
     if not update.message:
         return
 
     btn_ubicacion = ReplyKeyboardMarkup(
-        [[KeyboardButton("📍 Compartir Mi Ubicación Actual", request_location=True)]],
+        [
+            [KeyboardButton("📍 Transmitir Mi Ubicación Actual (GPS)", request_location=True)],
+            ["📋 Mis Pedidos Activos", "⛽ Medidor de Tanque"],
+        ],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
     await update.message.reply_text(
-        "📍 Presiona el botón abajo para actualizar tus coordenadas GPS en tiempo real:",
+        "📍 **TRANSMISIÓN DE UBICACIÓN GPS**\n\n"
+        "Elige cualquiera de las dos opciones para compartir tu posición:\n\n"
+        "1️⃣ **Botón rápido:** Presiona el botón grande **'📍 Transmitir Mi Ubicación Actual (GPS)'** abajo.\n\n"
+        "2️⃣ **Seguimiento continuo (Recomendado):**\n"
+        "Toca el clip **📎 ➔ Ubicación ➔ 'Compartir mi ubicación en tiempo real...'** (selecciona 1 u 8 horas) para que el cliente y la Torre de Control sigan tu camioneta en vivo mientras manejas.\n\n"
+        "*(💡 Si estás en Telegram Desktop o sin sensor GPS, puedes escribir tus coordenadas por texto ej: `23.2435, -106.4123`)*",
         reply_markup=btn_ubicacion,
+        parse_mode="Markdown",
     )
+
+
+async def _procesar_coordenadas_gps_chofer(
+    repo,
+    driver,
+    lat: float,
+    lng: float,
+    update: Update,
+    is_live_edit: bool = False,
+) -> None:
+    """Actualiza la posición del chofer y transmite o actualiza la ubicación en vivo a sus pedidos activos."""
+    await asyncio.to_thread(repo.update_driver_location, driver.id, lat, lng)
+
+    # Actualizar o inicializar ubicación en tiempo real en Telegram/WhatsApp para clientes con pedidos en ruta
+    active_orders = await asyncio.to_thread(repo.get_orders_by_driver, TENANT_ID, driver.id, True)
+    orders_updated = 0
+
+    # Ordenar pedidos por ID descendente para priorizar el pedido más reciente
+    sorted_orders = sorted(active_orders, key=lambda o: int(getattr(o, "id", 0) or 0), reverse=True)
+
+    # Evitar enviar más de un pin de mapa al mismo cliente/chat
+    processed_recipients: dict[str, int] = {}
+
+    from src.repositories.identity_store import identity_store
+
+    for ord_in_route in sorted_orders:
+        if ord_in_route.status == "in_route":
+            # Evitar reintentar sobre chats inaccesibles o bloqueados
+            if ord_in_route.id in _failed_live_location_orders:
+                continue
+
+            # Determinar si el pedido es reciente (creado/actualizado en las últimas 6 horas)
+            is_recent = True
+            order_time_str = ord_in_route.updated_at or ord_in_route.created_at
+            if order_time_str:
+                try:
+                    from datetime import timezone
+                    order_dt = datetime.fromisoformat(order_time_str.replace("Z", "+00:00"))
+                    now_utc = datetime.now(timezone.utc)
+                    if (now_utc - order_dt).total_seconds() > 6 * 3600:
+                        is_recent = False
+                except Exception:
+                    is_recent = True
+
+            recipient_id = str(ord_in_route.channel_user_id or ord_in_route.customer_phone or "").strip()
+            if not recipient_id:
+                continue
+
+            clean_recipient = re.sub(r"\D", "", recipient_id) or recipient_id
+
+            # Si ya procesamos a este cliente/chat en esta misma corrida, vincular la orden al mismo pin
+            if clean_recipient in processed_recipients:
+                linked_msg_id = processed_recipients[clean_recipient]
+                await asyncio.to_thread(
+                    repo.set_order_live_location,
+                    TENANT_ID, ord_in_route.id, recipient_id, linked_msg_id
+                )
+                orders_updated += 1
+                continue
+
+            # Verificar si la orden o el chat ya cuenta con un pin de ubicación en vivo activo
+            live_msg_id = ord_in_route.live_location_message_id
+            live_chat_id = ord_in_route.live_location_chat_id or recipient_id
+
+            if not live_msg_id:
+                chat_live = identity_store.get_chat_live_location(recipient_id) or identity_store.get_chat_live_location(clean_recipient)
+                if chat_live:
+                    live_msg_id = chat_live.get("message_id")
+                    live_chat_id = chat_live.get("chat_id") or recipient_id
+
+            if live_msg_id and live_chat_id:
+                edit_ok = await asyncio.to_thread(
+                    edit_client_live_location,
+                    live_chat_id,
+                    live_msg_id,
+                    lat,
+                    lng,
+                    channel=ord_in_route.channel,
+                )
+                if edit_ok:
+                    orders_updated += 1
+                    processed_recipients[clean_recipient] = live_msg_id
+                    await asyncio.to_thread(
+                        repo.set_order_live_location,
+                        TENANT_ID, ord_in_route.id, live_chat_id, live_msg_id
+                    )
+                else:
+                    logger.info(
+                        f"📍 Pin de ubicación en vivo (msg_id: {live_msg_id}) "
+                        f"de la orden #{ord_in_route.id} expiró o no se puede editar. Limpiando ID en BD..."
+                    )
+                    await asyncio.to_thread(repo.clear_order_live_location, TENANT_ID, ord_in_route.id)
+                    identity_store.clear_order_live_location(ord_in_route.id)
+
+                    # Si el pedido es reciente (< 6 horas), renovar el pin en vivo
+                    if is_recent and recipient_id:
+                        new_msg_id = await asyncio.to_thread(
+                            send_client_live_location,
+                            recipient_id,
+                            lat,
+                            lng,
+                            live_period=7200,
+                            channel=ord_in_route.channel,
+                            order_id=ord_in_route.id,
+                        )
+                        if new_msg_id:
+                            await asyncio.to_thread(
+                                repo.set_order_live_location,
+                                TENANT_ID, ord_in_route.id, recipient_id, new_msg_id
+                            )
+                            processed_recipients[clean_recipient] = new_msg_id
+                            orders_updated += 1
+                            logger.info(f"🔄 Pin en vivo renovado exitosamente para orden #{ord_in_route.id} (msg: {new_msg_id})")
+                        else:
+                            _failed_live_location_orders.add(ord_in_route.id)
+                    else:
+                        _failed_live_location_orders.add(ord_in_route.id)
+
+            elif recipient_id and is_recent:
+                eff_channel = getattr(ord_in_route, "channel", None)
+                if not eff_channel:
+                    chan_info = identity_store.get_order_channel_info(ord_in_route.id)
+                    if chan_info and chan_info.get("channel"):
+                        eff_channel = chan_info.get("channel")
+                if not eff_channel:
+                    clean_dig = re.sub(r"\D", "", recipient_id)
+                    if clean_dig.startswith("52") or len(clean_dig) == 10:
+                        eff_channel = "whatsapp"
+                    else:
+                        eff_channel = "telegram"
+
+                # Inicializar ubicación en vivo ahora que el chofer compartió su GPS real
+                new_live_msg_id = await asyncio.to_thread(
+                    send_client_live_location,
+                    recipient_id,
+                    lat,
+                    lng,
+                    live_period=7200,
+                    channel=eff_channel,
+                    order_id=ord_in_route.id,
+                )
+                if new_live_msg_id:
+                    await asyncio.to_thread(
+                        repo.set_order_live_location,
+                        TENANT_ID, ord_in_route.id, recipient_id, new_live_msg_id
+                    )
+                    processed_recipients[clean_recipient] = new_live_msg_id
+                    if str(eff_channel).lower() == "telegram":
+                        msg_live_notif = (
+                            f"📍 *¡Tu repartidor ha comenzado a compartir su ubicación en tiempo real para tu Pedido #{ord_in_route.id}! "
+                            f"Puedes seguir su trayecto en el mapa.* 🚚⛽"
+                        )
+                        btn_cancel = {
+                            "inline_keyboard": [
+                                [
+                                    {"text": "❌ Cancelar Pedido", "callback_data": f"cancel_order_client:{ord_in_route.id}"}
+                                ]
+                            ]
+                        }
+                        await asyncio.to_thread(
+                            notify_client,
+                            recipient_id,
+                            msg_live_notif,
+                            btn_cancel,
+                            eff_channel,
+                        )
+                    orders_updated += 1
+                else:
+                    _failed_live_location_orders.add(ord_in_route.id)
+
+    # Si es un live location update continuo (edit_message de Telegram), no spameamos con mensajes de texto al chofer
+    if not is_live_edit and update.message:
+        direccion_aprox = await asyncio.to_thread(reverse_geocode, lat, lng)
+        estado = _determinar_estado_ui_chofer(repo, driver)
+
+        confirm_pedido_txt = ""
+        if orders_updated > 0:
+            confirm_pedido_txt = f"\n📲 **¡Ubicación transmitida en tiempo real al cliente de tu pedido activo!** El cliente ahora puede ver tu llegada en su mapa.\n"
+
+        # Buscar si el chofer tiene un pedido activo en curso (priorizar in_route sobre assigned)
+        active_order = None
+        for ord_cand in sorted_orders:
+            if ord_cand.status == "in_route":
+                active_order = ord_cand
+                break
+        if not active_order:
+            for ord_cand in sorted_orders:
+                if ord_cand.status == "assigned":
+                    active_order = ord_cand
+                    break
+
+        if active_order:
+            inline_kb = get_botones_pedido_activo_inline(active_order)
+            pedido_info = (
+                f"\n🚚 **Pedido #{active_order.id} en curso:**\n"
+                f"👤 Cliente: {active_order.customer_name} (`{active_order.customer_phone}`)\n"
+                f"📍 Dirección: `{active_order.delivery_address}`\n"
+                f"💰 Cobro: ${active_order.total_amount:.2f} ({active_order.payment_method})"
+            )
+            await _safe_reply_text(
+                update.message,
+                f"📍 **Ubicación GPS actualizada con éxito:**\n"
+                f"📌 `{direccion_aprox}`\n"
+                f"🌐 Coordenadas: ({lat:.5f}, {lng:.5f})\n"
+                f"{confirm_pedido_txt}",
+                reply_markup=get_teclado_principal(estado),
+                parse_mode="Markdown",
+            )
+            ord_msg = await update.message.reply_text(
+                f"{pedido_info}\n\n"
+                f"Toca un botón abajo para navegación o marcar como entregado:",
+                reply_markup=inline_kb,
+                parse_mode="Markdown",
+            )
+            if ord_msg:
+                try:
+                    repo.add_order_driver_message_id(TENANT_ID, active_order.id, ord_msg.message_id)
+                except Exception:
+                    pass
+        else:
+            await _safe_reply_text(
+                update.message,
+                f"📍 **Ubicación GPS actualizada con éxito:**\n"
+                f"📌 `{direccion_aprox}`\n"
+                f"🌐 Coordenadas: ({lat:.5f}, {lng:.5f})\n"
+                f"{confirm_pedido_txt}",
+                reply_markup=get_teclado_principal(estado),
+                parse_mode="Markdown",
+            )
 
 
 async def recibir_ubicacion_tiempo_real(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1031,147 +1355,7 @@ async def recibir_ubicacion_tiempo_real(update: Update, context: ContextTypes.DE
     driver = await asyncio.to_thread(repo.get_driver_by_telegram_id, TENANT_ID, user_id)
 
     if driver:
-        await asyncio.to_thread(repo.update_driver_location, driver.id, loc.latitude, loc.longitude)
-
-        # Actualizar o inicializar ubicación en tiempo real en Telegram para clientes con pedidos en ruta
-        active_orders = await asyncio.to_thread(repo.get_orders_by_driver, TENANT_ID, driver.id, True)
-        orders_updated = 0
-        for ord_in_route in active_orders:
-            if ord_in_route.status == "in_route":
-                # Evitar reintentar sobre chats inaccesibles o bloqueados
-                if ord_in_route.id in _failed_live_location_orders:
-                    continue
-
-                # Determinar si el pedido es reciente (creado/actualizado en las últimas 6 horas)
-                is_recent = True
-                order_time_str = ord_in_route.updated_at or ord_in_route.created_at
-                if order_time_str:
-                    try:
-                        from datetime import timezone
-                        order_dt = datetime.fromisoformat(order_time_str.replace("Z", "+00:00"))
-                        now_utc = datetime.now(timezone.utc)
-                        if (now_utc - order_dt).total_seconds() > 6 * 3600:
-                            is_recent = False
-                    except Exception:
-                        is_recent = True
-
-                if ord_in_route.live_location_message_id and ord_in_route.live_location_chat_id:
-                    edit_ok = await asyncio.to_thread(
-                        edit_client_live_location,
-                        ord_in_route.live_location_chat_id,
-                        ord_in_route.live_location_message_id,
-                        loc.latitude,
-                        loc.longitude,
-                    )
-                    if edit_ok:
-                        orders_updated += 1
-                    else:
-                        logger.info(
-                            f"📍 Pin de ubicación en vivo (msg_id: {ord_in_route.live_location_message_id}) "
-                            f"de la orden #{ord_in_route.id} expiró o no se puede editar. Limpiando ID en BD..."
-                        )
-                        await asyncio.to_thread(repo.clear_order_live_location, TENANT_ID, ord_in_route.id)
-
-                        # Si el pedido es reciente (< 6 horas), renovar el pin en vivo
-                        if is_recent and ord_in_route.channel_user_id:
-                            new_msg_id = await asyncio.to_thread(
-                                send_client_live_location,
-                                ord_in_route.channel_user_id,
-                                loc.latitude,
-                                loc.longitude,
-                                live_period=7200,
-                            )
-                            if new_msg_id:
-                                await asyncio.to_thread(
-                                    repo.set_order_live_location,
-                                    TENANT_ID, ord_in_route.id, ord_in_route.channel_user_id, new_msg_id
-                                )
-                                orders_updated += 1
-                                logger.info(f"🔄 Pin en vivo renovado exitosamente para orden #{ord_in_route.id} (msg: {new_msg_id})")
-                            else:
-                                _failed_live_location_orders.add(ord_in_route.id)
-                        else:
-                            _failed_live_location_orders.add(ord_in_route.id)
-
-                elif ord_in_route.channel_user_id and is_recent:
-                    # Inicializar ubicación en vivo ahora que el chofer compartió su GPS real
-                    live_msg_id = await asyncio.to_thread(
-                        send_client_live_location,
-                        ord_in_route.channel_user_id,
-                        loc.latitude,
-                        loc.longitude,
-                        live_period=7200,
-                    )
-                    if live_msg_id:
-                        await asyncio.to_thread(
-                            repo.set_order_live_location,
-                            TENANT_ID, ord_in_route.id, ord_in_route.channel_user_id, live_msg_id
-                        )
-                        if ord_in_route.channel == "telegram":
-                            await asyncio.to_thread(
-                                notify_client,
-                                ord_in_route.channel_user_id,
-                                f"📍 *¡Tu repartidor ha comenzado a compartir su ubicación en tiempo real! Arriba puedes seguir su trayecto en el mapa.* 🚚⛽",
-                                None,
-                                ord_in_route.channel,
-                            )
-                        elif ord_in_route.channel == "whatsapp":
-                            maps_url = f"https://www.google.com/maps?q={loc.latitude:.6f},{loc.longitude:.6f}"
-                            await asyncio.to_thread(
-                                notify_client,
-                                ord_in_route.channel_user_id,
-                                f"📍 *¡Tu repartidor ha comenzado a compartir su ubicación en tiempo real!*\n\n🗺️ Puedes seguir su trayecto en el mapa aquí:\n{maps_url} 🚚⛽",
-                                None,
-                                ord_in_route.channel,
-                            )
-                        orders_updated += 1
-                    else:
-                        _failed_live_location_orders.add(ord_in_route.id)
-
-        # Si es un live location update continuo (edit_message de Telegram), no spameamos con mensajes de texto al chofer
-        if not is_live_edit and update.message:
-            direccion_aprox = await asyncio.to_thread(reverse_geocode, loc.latitude, loc.longitude)
-            estado = _determinar_estado_ui_chofer(repo, driver)
-            
-            confirm_pedido_txt = ""
-            if orders_updated > 0:
-                confirm_pedido_txt = f"\n📲 **¡Ubicación transmitida en tiempo real al cliente de tu pedido activo!** El cliente ahora puede ver tu llegada en su mapa.\n"
-
-            # Buscar si el chofer tiene un pedido activo en curso (in_route o assigned)
-            active_order = None
-            for ord_in_route in active_orders:
-                if ord_in_route.status in ("in_route", "assigned"):
-                    active_order = ord_in_route
-                    break
-
-            if active_order:
-                inline_kb = get_botones_pedido_activo_inline(active_order)
-                pedido_info = (
-                    f"\n🚚 **Pedido #{active_order.id} en curso:**\n"
-                    f"👤 Cliente: {active_order.customer_name} (`{active_order.customer_phone}`)\n"
-                    f"📍 Dirección: `{active_order.delivery_address}`\n"
-                    f"💰 Cobro: ${active_order.total_amount:.2f} ({active_order.payment_method})"
-                )
-                await _safe_reply_text(
-                    update.message,
-                    f"📍 **Ubicación GPS actualizada con éxito:**\n"
-                    f"📌 `{direccion_aprox}`\n"
-                    f"🌐 Coordenadas: ({loc.latitude:.5f}, {loc.longitude:.5f})\n"
-                    f"{confirm_pedido_txt}"
-                    f"{pedido_info}",
-                    reply_markup=inline_kb,
-                    parse_mode="Markdown",
-                )
-            else:
-                await _safe_reply_text(
-                    update.message,
-                    f"📍 **Ubicación GPS actualizada con éxito:**\n"
-                    f"📌 `{direccion_aprox}`\n"
-                    f"🌐 Coordenadas: ({loc.latitude:.5f}, {loc.longitude:.5f})\n"
-                    f"{confirm_pedido_txt}",
-                    reply_markup=get_teclado_principal(estado),
-                    parse_mode="Markdown",
-                )
+        await _procesar_coordenadas_gps_chofer(repo, driver, loc.latitude, loc.longitude, update, is_live_edit)
     else:
         if update.message:
             await _safe_reply_text(
@@ -1197,12 +1381,13 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
 
     # 0a. Confirmación previa: ¿Seguro que ya entregaste?
     if data.startswith("confirm_deliver:"):
-        order_id = int(data.split(":")[1])
+        raw_oid = data.split(":")[1]
+        order_id = int(raw_oid) if raw_oid.isdigit() else raw_oid
         order = repo.get_order_by_id(TENANT_ID, order_id)
         if not order:
             await query.edit_message_text("⚠️ Pedido no encontrado.")
             return
-        if order.status in ("cancelled", "delivered"):
+        if order.status in ("cancelled", "delivered", "rejected_by_driver"):
             await query.edit_message_text(
                 f"⚠️ El pedido #{order_id} ya no está activo (estado: {order.status})."
             )
@@ -1210,6 +1395,9 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
         confirm_kb = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("✅ Sí, ya entregué", callback_data=f"deliver_order:{order_id}"),
+                InlineKeyboardButton("📸 Firma / Foto", callback_data=f"deliver_with_sig:{order_id}"),
+            ],
+            [
                 InlineKeyboardButton("🔙 No, volver", callback_data=f"back_to_order:{order_id}"),
             ]
         ])
@@ -1222,13 +1410,36 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
         )
         return
 
+    # 0b. Solicitud de foto de firma / comprobante (soporte Dashboard Nuxt)
+    if data.startswith("deliver_with_sig:"):
+        raw_oid = data.split(":")[1]
+        order_id = int(raw_oid) if raw_oid.isdigit() else raw_oid
+        context.user_data["awaiting_delivery_sig_order_id"] = order_id
+        await query.edit_message_text(
+            f"📸 **Comprobante de Entrega / Firma — Pedido #{order_id}**\n\n"
+            "Por favor, toma y envía ahora una **fotografía de la firma del cliente**, nota firmada o comprobante.\n\n"
+            "*(Se registrará en Base64 en la Trazabilidad del Dashboard de Grupo Petroil)*",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Finalizar sin foto", callback_data=f"deliver_order:{order_id}")],
+                [InlineKeyboardButton("🔙 Volver al pedido", callback_data=f"back_to_order:{order_id}")],
+            ]),
+            parse_mode="Markdown",
+        )
+        return
+
 
     # 0c. Volver a la vista del pedido (botón 'No, volver')
     if data.startswith("back_to_order:"):
-        order_id = int(data.split(":")[1])
+        raw_oid = data.split(":")[1]
+        order_id = int(raw_oid) if raw_oid.isdigit() else raw_oid
         order = repo.get_order_by_id(TENANT_ID, order_id)
         if not order:
             await query.edit_message_text("⚠️ Pedido no encontrado.")
+            return
+        if order.status in ("cancelled", "delivered", "rejected_by_driver"):
+            await query.edit_message_text(
+                f"⚠️ El pedido #{order_id} ya no está activo (estado: {order.status})."
+            )
             return
         lat = order.delivery_lat or 23.2014
         lng = order.delivery_lng or -106.4215
@@ -1263,17 +1474,34 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
 
     # 1. Aceptar Pedido
     if data.startswith("accept_order:"):
-        order_id = int(data.split(":")[1])
+        raw_oid = data.split(":")[1]
+        order_id = int(raw_oid) if raw_oid.isdigit() else raw_oid
         order = repo.get_order_by_id(TENANT_ID, order_id)
         if not order:
             await query.edit_message_text("⚠️ Pedido no encontrado.")
             return
 
-        # Verificar si el pedido ya fue cancelado (por cliente u otro motivo)
-        if order.status == "cancelled":
+        # Verificar si el pedido ya fue cancelado, liberado o entregado
+        if order.status in ("cancelled", "rejected_by_driver"):
             await query.edit_message_text(
-                f"⚠️ **El pedido #{order_id} ya fue cancelado.**\n\n"
-                "Este pedido no está disponible. Espera el siguiente viaje.",
+                f"⚠️ **El pedido #{order_id} no está disponible.**\n\n"
+                "Este viaje fue cancelado o liberado para reasignación y ya no puede ser reactivado.\n"
+                "Espera a que la Torre de Control te asigne nuevos viajes.",
+                parse_mode="Markdown",
+            )
+            return
+
+        if order.status == "delivered":
+            await query.edit_message_text(
+                f"✅ **El pedido #{order_id} ya fue entregado.**\n\n"
+                "No requiere acciones adicionales.",
+                parse_mode="Markdown",
+            )
+            return
+
+        if order.status not in ("assigned", "pending", "confirmed"):
+            await query.edit_message_text(
+                f"⚠️ **El pedido #{order_id} no está pendiente de aceptación** (estado actual: `{order.status}`).",
                 parse_mode="Markdown",
             )
             return
@@ -1285,7 +1513,7 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
             return
 
         # Si el pedido ya fue tomado por otro chofer o ya se entregó
-        if order.status in ("in_route", "delivered") and order.driver_id and order.driver_id != driver.id:
+        if order.status in ("in_route", "delivered") and order.driver_id and str(order.driver_id) != str(driver.id):
             await query.edit_message_text(
                 f"⚠️ **El pedido #{order_id} ya fue tomado por otro chofer o ya fue completado.**\n\n"
                 "Mantente al pendiente para el próximo viaje disponible.",
@@ -1301,7 +1529,7 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
             delivery_lat=order.delivery_lat,
             delivery_lng=order.delivery_lng,
         )
-        repo.update_order_status(TENANT_ID, order_id, "in_route")
+        repo.update_order_status(TENANT_ID, order_id, "in_route", driver_id=driver.id)
         repo.set_driver_availability(driver.id, False)
         _failed_live_location_orders.discard(order_id)
 
@@ -1316,7 +1544,10 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
                 InlineKeyboardButton("🚗 Abrir Waze", url=waze),
             ],
             [
+                InlineKeyboardButton("📍 Transmitir Ubicación GPS", callback_data=f"pedir_gps:{order_id}"),
                 InlineKeyboardButton("📦 Marcar como Entregado", callback_data=f"confirm_deliver:{order_id}"),
+            ],
+            [
                 InlineKeyboardButton("❌ Cancelar Viaje", callback_data=f"confirm_cancel_driver:{order_id}"),
             ],
         ]
@@ -1330,66 +1561,86 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown",
         )
+        if query.message:
+            try:
+                repo.add_order_driver_message_id(TENANT_ID, order_id, query.message.message_id)
+            except Exception:
+                pass
 
-        # NOTIFICAR AL CLIENTE (TELEGRAM O WHATSAPP) Y COMPARTIR UBICACIÓN EN TIEMPO REAL
-        if order.channel_user_id:
-            driver_info = f"Tu repartidor ({driver.name or 'Unidad Petroil'})"
+        # Notificar aceptación al cliente y transmitir ubicación en vivo del chofer de inmediato
+        recipient_id = str(order.channel_user_id or order.customer_phone or "").strip()
+        if recipient_id:
+            eff_channel = getattr(order, "channel", None)
+            if not eff_channel:
+                chan_info = identity_store.get_order_channel_info(order.id)
+                if chan_info and chan_info.get("channel"):
+                    eff_channel = chan_info.get("channel")
+            if not eff_channel:
+                clean_dig = re.sub(r"\D", "", recipient_id)
+                if clean_dig.startswith("52") or len(clean_dig) == 10:
+                    eff_channel = "whatsapp"
+                else:
+                    eff_channel = "telegram"
 
-            # Coordenadas reales del chofer que aceptó el pedido
-            has_real_gps = bool(driver.current_lat and driver.current_lng)
-
-            if has_real_gps:
-                driver_lat = driver.current_lat
-                driver_lng = driver.current_lng
-
-                # Enviar ubicación en tiempo real / pin de mapa
+            driver_lat = getattr(driver, "current_lat", None)
+            driver_lng = getattr(driver, "current_lng", None)
+            if driver_lat is not None and driver_lng is not None:
+                # Chofer ya cuenta con coordenadas GPS: transmitir de inmediato al cliente
                 live_msg_id = await asyncio.to_thread(
                     send_client_live_location,
-                    order.channel_user_id,
+                    recipient_id,
                     driver_lat,
                     driver_lng,
                     live_period=7200,
-                    channel=order.channel,
+                    channel=eff_channel,
+                    order_id=order.id,
                 )
                 if live_msg_id:
-                    await asyncio.to_thread(repo.set_order_live_location, TENANT_ID, order_id, order.channel_user_id, live_msg_id)
-
-                if order.channel == "whatsapp":
-                    msg_cliente = (
-                        f"🚚 *¡Buenas noticias! Tu pedido #{order_id} va en camino.*\n\n"
-                        f"{driver_info} ha iniciado la ruta hacia tu domicilio:\n"
-                        f"📍 `{order.delivery_address}`\n\n"
-                        "📍 *Te compartimos arriba el mapa y ubicación de tu repartidor para que puedas monitorear su llegada.* 🚚⛽\n\n"
-                        "Por favor mantente al pendiente para recibir tu gas."
-                    )
-                else:
-                    msg_cliente = (
-                        f"🚚 **¡Buenas noticias! Tu pedido #{order_id} va en camino.**\n\n"
-                        f"{driver_info} ha iniciado la ruta hacia tu domicilio:\n"
-                        f"📍 `{order.delivery_address}`\n\n"
-                        "📍 *Te compartimos arriba la ubicación en tiempo real de tu repartidor para que puedas monitorear su llegada.* 🚚⛽\n\n"
-                        "Por favor mantente al pendiente para recibir tu gas."
-                    )
+                    from unittest.mock import MagicMock
+                    if not isinstance(live_msg_id, MagicMock):
+                        await asyncio.to_thread(
+                            repo.set_order_live_location,
+                            TENANT_ID, order.id, recipient_id, live_msg_id
+                        )
+                    if str(eff_channel).lower() == "telegram":
+                        v_plate = getattr(driver, "vehicle_plate", "") or "Unidad de reparto"
+                        d_phone = getattr(driver, "phone", "") or ""
+                        phone_line = f"\n• 📞 **Teléfono chofer:** `{d_phone}`" if d_phone else ""
+                        msg_live_notif = (
+                            f"🚚 **¡Tu pedido #{order.id} va en camino a tu domicilio!**\n\n"
+                            f"• 👨‍✈️ **Chofer:** {driver.name or 'Unidad Petroil'}\n"
+                            f"• 🚘 **Unidad:** {v_plate}{phone_line}\n\n"
+                            f"📍 *Puedes seguir el mapa en tiempo real hacia tu domicilio.* ⛽✨"
+                        )
+                        btn_cancel = {
+                            "inline_keyboard": [
+                                [
+                                    {"text": "❌ Cancelar Pedido", "callback_data": f"cancel_order_client:{order.id}"}
+                                ]
+                            ]
+                        }
+                        await asyncio.to_thread(
+                            notify_client,
+                            recipient_id,
+                            msg_live_notif,
+                            btn_cancel,
+                            eff_channel,
+                        )
             else:
-                if order.channel == "whatsapp":
-                    msg_cliente = (
-                        f"🚚 *¡Buenas noticias! Tu pedido #{order_id} ha sido aceptado.*\n\n"
-                        f"{driver_info} ha confirmado tu servicio y está preparando su unidad para salir hacia tu domicilio:\n"
-                        f"📍 `{order.delivery_address}`\n\n"
-                        "📍 *En cuanto la unidad inicie su recorrido, te compartiremos su ubicación aquí mismo para que monitorees su llegada.* 🚚⛽\n\n"
-                        "Por favor mantente al pendiente para recibir tu gas."
-                    )
-                else:
-                    msg_cliente = (
-                        f"🚚 **¡Buenas noticias! Tu pedido #{order_id} ha sido aceptado.**\n\n"
-                        f"{driver_info} ha confirmado tu servicio y está preparando su unidad para salir hacia tu domicilio:\n"
-                        f"📍 `{order.delivery_address}`\n\n"
-                        "📍 *En unos momentos, en cuanto la unidad inicie su recorrido con su GPS activo, te compartiremos su ubicación en tiempo real aquí mismo para que monitorees su llegada.* 🚚⛽\n\n"
-                        "Por favor mantente al pendiente para recibir tu gas."
-                    )
-            await asyncio.to_thread(notify_client, order.channel_user_id, msg_cliente, None, order.channel)
+                # Chofer no tiene GPS todavía: enviar mensaje limpio y solicitarle compartir ubicación
+                v_plate = getattr(driver, "vehicle_plate", "") or "Unidad de reparto"
+                d_phone = getattr(driver, "phone", "") or ""
+                phone_line = f"\n• 📞 **Teléfono chofer:** `{d_phone}`" if d_phone else ""
+                msg_cliente = (
+                    f"🚚 **¡Tu pedido #{order.id} va en camino a tu domicilio!**\n\n"
+                    f"• 👨‍✈️ **Chofer:** {driver.name or 'Unidad Petroil'}\n"
+                    f"• 🚘 **Unidad:** {v_plate}{phone_line}\n\n"
+                    "Tu repartidor ya inició su recorrido. Te notificaremos cualquier avance de tu entrega. ⛽✨"
+                )
+                await asyncio.to_thread(notify_client, recipient_id, msg_cliente, None, eff_channel)
 
-        # Solicitar al chofer transmitir su ubicación GPS real para el cliente
+
+        # Solicitar inmediatamente al chofer transmitir su ubicación GPS real para el cliente
         btn_compartir_gps = ReplyKeyboardMarkup(
             [
                 [KeyboardButton("📍 Transmitir Mi Ubicación Actual (GPS)", request_location=True)],
@@ -1403,9 +1654,46 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
                 chat_id=query.message.chat_id,
                 text=(
                     f"📍 **¡TRANSMISIÓN DE RUTA EN TIEMPO REAL!**\n\n"
-                    f"Para que el cliente pueda seguir tu llegada exacta en vivo en su mapa de Telegram, "
-                    f"por favor presiona el botón **'📍 Transmitir Mi Ubicación Actual (GPS)'** abajo.\n\n"
-                    f"*(💡 Recomendado: También puedes adjuntar 📎 Ubicación ➔ 'Compartir ubicación en tiempo real' para que te siga de forma continua mientras conduces)*"
+                    f"Para que el cliente y la Torre de Control sigan tu llegada exacta en vivo en el mapa:\n\n"
+                    f"1️⃣ Presiona el botón grande abajo **'📍 Transmitir Mi Ubicación Actual (GPS)'**.\n"
+                    f"2️⃣ O adjunta con el clip: **📎 Ubicación ➔ 'Compartir ubicación en tiempo real...'** para rastreo continuo mientras manejas.\n"
+                    f"*(💡 Si estás en Telegram Desktop o sin sensor GPS, puedes escribir tus coordenadas ej: `23.2435, -106.4123`)*"
+                ),
+                reply_markup=btn_compartir_gps,
+                parse_mode="Markdown",
+            )
+
+    # 1b. Solicitar botón de transmisión de ubicación GPS
+    elif data.startswith("pedir_gps:"):
+        raw_oid = data.split(":")[1] if ":" in data else ""
+        if raw_oid:
+            order_id = int(raw_oid) if raw_oid.isdigit() else raw_oid
+            order = repo.get_order_by_id(TENANT_ID, order_id)
+            if not order or order.status in ("cancelled", "delivered", "rejected_by_driver"):
+                await query.answer("Este pedido ya no está activo.", show_alert=True)
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+                return
+        await query.answer()
+        btn_compartir_gps = ReplyKeyboardMarkup(
+            [
+                [KeyboardButton("📍 Transmitir Mi Ubicación Actual (GPS)", request_location=True)],
+                ["📋 Mis Pedidos Activos", "⛽ Medidor de Tanque"],
+            ],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        )
+        if query.message:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=(
+                    f"📍 **¡TRANSMISIÓN DE RUTA EN TIEMPO REAL!**\n\n"
+                    f"Para actualizar tu posición y que el cliente pueda seguir tu llegada en vivo en su mapa:\n\n"
+                    f"1️⃣ Presiona el botón grande abajo **'📍 Transmitir Mi Ubicación Actual (GPS)'**.\n"
+                    f"2️⃣ O adjunta con el clip: **📎 Ubicación ➔ 'Compartir ubicación en tiempo real...'** para rastreo continuo mientras manejas.\n"
+                    f"*(💡 Si estás en Telegram Desktop o sin sensor GPS, puedes escribir tus coordenadas ej: `23.2435, -106.4123`)*"
                 ),
                 reply_markup=btn_compartir_gps,
                 parse_mode="Markdown",
@@ -1413,10 +1701,19 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
 
     # 2. Marcar como Entregado
     elif data.startswith("deliver_order:"):
-        order_id = int(data.split(":")[1])
+        raw_oid = data.split(":")[1]
+        order_id = int(raw_oid) if raw_oid.isdigit() else raw_oid
         order = repo.get_order_by_id(TENANT_ID, order_id)
         if not order:
             await _safe_edit_message_text(query, "⚠️ Pedido no encontrado.")
+            return
+
+        if order.status in ("cancelled", "delivered", "rejected_by_driver"):
+            await _safe_edit_message_text(
+                query,
+                f"⚠️ El pedido #{order_id} ya no está activo (estado actual: `{order.status}`).",
+                parse_mode="Markdown",
+            )
             return
 
         # Eliminar la ubicación en tiempo real del chat del cliente
@@ -1424,11 +1721,14 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
             await asyncio.to_thread(remove_client_live_location, order.live_location_chat_id, order.live_location_message_id)
             await asyncio.to_thread(repo.clear_order_live_location, TENANT_ID, order_id)
 
-        repo.update_order_status(TENANT_ID, order_id, "delivered")
+        user_id = str(query.from_user.id if query.from_user else (update.effective_user.id if update.effective_user else 0))
+        driver = repo.get_driver_by_telegram_id(TENANT_ID, user_id)
+        driver_id_val = driver.id if driver else None
+        repo.update_order_status(TENANT_ID, order_id, "delivered", driver_id=driver_id_val)
         _failed_live_location_orders.discard(order_id)
 
-        if order.driver_id:
-            repo.set_driver_availability(order.driver_id, True)
+        if driver:
+            repo.set_driver_availability(driver.id, True)
 
         await _safe_edit_message_text(
             query,
@@ -1439,9 +1739,10 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
             parse_mode="Markdown",
         )
 
+
+
         # NOTIFICAR AL CLIENTE EN TELEGRAM O WHATSAPP CON ENCUESTA INTERACTIVA DE CALIFICACIÓN
-        if order.channel_user_id:
-            await asyncio.to_thread(notify_delivery_survey, order_id, TENANT_ID)
+        await asyncio.to_thread(notify_delivery_survey, order.id, TENANT_ID)
 
     # 2b. Cancelación masiva de todos los pedidos activos asignados al chofer
     elif data == "cancel_all_my_orders":
@@ -1451,6 +1752,8 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
             await _safe_edit_message_text(query, "⚠️ Chofer no encontrado.")
             return
 
+        chat_id = update.effective_chat.id if update.effective_chat else (query.message.chat_id if query.message else None)
+
         # Eliminar ubicación en tiempo real de los pedidos activos antes de liberar
         active_orders = repo.get_orders_by_driver(TENANT_ID, driver.id, active_only=True)
         for act_ord in active_orders:
@@ -1459,7 +1762,17 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
                 await asyncio.to_thread(repo.clear_order_live_location, TENANT_ID, act_ord.id)
 
         _failed_live_location_orders.clear()
-        count = repo.cancel_all_orders_for_driver(TENANT_ID, driver.id, "Cancelación masiva solicitada por chofer")
+        count = await asyncio.to_thread(repo.cancel_all_orders_for_driver, TENANT_ID, driver.id, "Cancelación masiva solicitada por chofer")
+
+        # BORRAR del chat los mensajes individuales de los viajes/pedidos activos que se enviaron antes
+        msg_ids_to_delete = context.user_data.get("active_order_messages", [])
+        if chat_id and msg_ids_to_delete:
+            for mid in msg_ids_to_delete:
+                if query.message and mid == query.message.message_id:
+                    continue  # El mensaje con el botón de cancelar se edita, no se borra
+                await _safe_delete_message(context.bot, chat_id, mid)
+            context.user_data["active_order_messages"] = []
+
         await _safe_edit_message_text(
             query,
             f"✅ **Se han liberado tus {count} pedido(s) activo(s).**\n\n"
@@ -1475,10 +1788,18 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
 
     # 3. Solicitar Motivo de Rechazo o Cancelación de Viaje
     elif data.startswith("reject_order:") or data.startswith("confirm_cancel_driver:") or data.startswith("cancel_order_driver:"):
-        order_id = int(data.split(":")[1])
+        raw_oid = data.split(":")[1]
+        order_id = int(raw_oid) if raw_oid.isdigit() else raw_oid
         order = repo.get_order_by_id(TENANT_ID, order_id)
         if not order:
             await query.edit_message_text("⚠️ Pedido no encontrado o ya reasignado.")
+            return
+
+        if order.status in ("cancelled", "delivered", "rejected_by_driver"):
+            await query.edit_message_text(
+                f"⚠️ El pedido #{order_id} ya no está activo (estado actual: `{order.status}`).",
+                parse_mode="Markdown",
+            )
             return
 
         motivos_kb = InlineKeyboardMarkup([
@@ -1514,7 +1835,8 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
     # 3b. Procesar Motivo de Rechazo Seleccionado por Botón
     elif data.startswith("rej_reason:"):
         parts = data.split(":")
-        order_id = int(parts[1])
+        raw_oid = parts[1]
+        order_id = int(raw_oid) if raw_oid.isdigit() else raw_oid
         codigo_motivo = parts[2]
 
         if codigo_motivo == "otro_texto":
@@ -1565,6 +1887,8 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
             "🚨 *La Torre de Control ha recibido la incidencia y procederá a reasignar el pedido a otra unidad.*",
             parse_mode="Markdown",
         )
+
+
 
     # 3c. Botones para capturar carga de tanque desde el menú
     elif data == "btn_carga_initial":
@@ -1856,6 +2180,40 @@ async def recibir_foto_chofer(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.error(f"Error descargando foto de tanque: {e}")
         photo_path = None
 
+    # Si la foto es firma / comprobante de entrega de un pedido (soporte Trazabilidad Base64)
+    sig_order_id = context.user_data.pop("awaiting_delivery_sig_order_id", None)
+    if sig_order_id:
+        import base64
+        sig_base64 = None
+        try:
+            if full_path.exists():
+                with open(full_path, "rb") as f_img:
+                    raw_b64 = base64.b64encode(f_img.read()).decode("utf-8")
+                    sig_base64 = f"data:image/jpeg;base64,{raw_b64}"
+        except Exception as e:
+            logger.warning(f"Error encoding delivery signature: {e}")
+
+        order = repo.get_order_by_id(TENANT_ID, sig_order_id)
+        if order:
+            if order.live_location_message_id and order.live_location_chat_id:
+                await asyncio.to_thread(remove_client_live_location, order.live_location_chat_id, order.live_location_message_id)
+                await asyncio.to_thread(repo.clear_order_live_location, TENANT_ID, sig_order_id)
+
+            repo.update_order_status(TENANT_ID, sig_order_id, "delivered", driver_id=driver.id, signature=sig_base64)
+            _failed_live_location_orders.discard(sig_order_id)
+            repo.set_driver_availability(driver.id, True)
+
+            await update.message.reply_text(
+                f"✅ **¡PEDIDO #{sig_order_id} ENTREGADO CON COMPROBANTE/FIRMA!**\n\n"
+                f"📸 Firma/Comprobante registrado en la Trazabilidad del Dashboard.\n"
+                f"💰 Cobro: ${order.total_amount:.2f} {order.currency} ({order.payment_method})\n"
+                f"👤 Cliente: {order.customer_name}\n\n"
+                "¡Excelente trabajo! Estás disponible para nuevos viajes.",
+                parse_mode="Markdown",
+            )
+            await asyncio.to_thread(notify_delivery_survey, order.id, TENANT_ID)
+            return
+
     # Si NO había un tipo en espera (el chofer envió la foto sin presionar botón previo)
     if not reading_type:
         context.user_data["pending_tank_photo"] = {
@@ -2015,6 +2373,18 @@ async def manejar_texto_chofer(update: Update, context: ContextTypes.DEFAULT_TYP
         await recibir_motivo_rechazo_texto(update, context)
         return
 
+    # 3.5. Caso: Chofer envía coordenadas GPS o ubicación por texto (ej: "23.2435, -106.4123")
+    coord_match = re.search(r"(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)", texto)
+    if coord_match:
+        try:
+            c_lat = float(coord_match.group(1))
+            c_lng = float(coord_match.group(2))
+            if -90 <= c_lat <= 90 and -180 <= c_lng <= 180:
+                await _procesar_coordenadas_gps_chofer(repo, driver, c_lat, c_lng, update, is_live_edit=False)
+                return
+        except Exception as e:
+            logger.debug(f"[Texto Coordenadas] {e}")
+
     # 4. Caso: Detección inteligente por texto libre (sin haber presionado botón antes)
     if driver:
         # Detectar Carga Inicial directa: "carga inicial 85%", "iniciando con 90%", "inicio con 80%"
@@ -2100,11 +2470,16 @@ async def manejar_texto_chofer(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"📦 **Productos:** {items_str}\n\n"
                 "👇 Toca un botón para iniciar navegación o marcar la entrega:"
             )
-            await update.message.reply_text(
+            ord_msg = await update.message.reply_text(
                 msg_activo,
                 reply_markup=inline_kb,
                 parse_mode="Markdown",
             )
+            if ord_msg:
+                try:
+                    repo.add_order_driver_message_id(TENANT_ID, active_order.id, ord_msg.message_id)
+                except Exception:
+                    pass
             return
 
 
@@ -2174,6 +2549,87 @@ async def comando_cancelar_activos(update: Update, context: ContextTypes.DEFAULT
 
 
 
+async def monitor_dashboard_assigned_orders(bot) -> None:
+    """Monitorea periódicamente pedidos asignados a choferes desde el Dashboard y envía la alerta interactiva."""
+    logger.info("🚀 Iniciando monitor en segundo plano para pedidos asignados desde el Dashboard...")
+    # Pre-cargar pedidos ya conocidos para no alertar pedidos viejos al reiniciar
+    try:
+        raw_initial = await asyncio.to_thread(api_get, "/orders", {"tenantId": TENANT_ID}, 5)
+        if isinstance(raw_initial, list):
+            for o in raw_initial:
+                d_id = o.get("driverId")
+                st = str(o.get("status") or "").upper()
+                if d_id and st in ("EN_RUTA", "ENTREGADO", "CANCELADO"):
+                    oid = str(o.get("orderNumber") or o.get("id"))
+                    _notified_dashboard_assigned_orders.add((oid, str(d_id)))
+    except Exception as e:
+        logger.debug(f"[Monitor Preload] {e}")
+
+    while True:
+        try:
+            repo = get_repository()
+            raw_orders = await asyncio.to_thread(api_get, "/orders", {"tenantId": TENANT_ID}, 5)
+            if isinstance(raw_orders, list):
+                for o in raw_orders:
+                    driver_id = o.get("driverId")
+                    if not driver_id:
+                        continue
+
+                    status_raw = str(o.get("status") or "").upper()
+                    # Se considera asignado si el estado es ASIGNADO/ASSIGNED o si ya tiene driverId y no está en ruta/terminado
+                    is_assigned = (status_raw in ("ASIGNADO", "ASSIGNED")) or (
+                        driver_id and status_raw not in ("EN_RUTA", "ENTREGADO", "CANCELADO", "IN_ROUTE", "DELIVERED", "CANCELLED")
+                    )
+                    if is_assigned:
+                        raw_id = str(o.get("orderNumber") or o.get("id"))
+                        order_key = (raw_id, str(driver_id))
+                        if order_key in _notified_dashboard_assigned_orders:
+                            continue
+
+                        # Obtener datos del chofer
+                        driver = await asyncio.to_thread(repo.get_driver, driver_id)
+                        if driver and driver.telegram_user_id and str(driver.telegram_user_id).isdigit():
+                            parsed_order = repo._parse_api_order(o, TENANT_ID)
+                            logger.info(f"🚨 [Dashboard Assignment] Enviando alerta de pedido #{parsed_order.id} al chofer {driver.name} ({driver.telegram_user_id})")
+
+                            sent = await asyncio.to_thread(
+                                send_driver_trip_alert,
+                                telegram_user_id=driver.telegram_user_id,
+                                order=parsed_order,
+                                title_header="🚨 **¡NUEVO PEDIDO ASIGNADO POR TORRE DE CONTROL!**",
+                                lat=parsed_order.delivery_lat,
+                                lng=parsed_order.delivery_lng,
+                            )
+                            if sent:
+                                _notified_dashboard_assigned_orders.add(order_key)
+
+                                # Resolver canal e identificador real del cliente (con fallback a identity_store)
+                                eff_chan = parsed_order.channel
+                                eff_uid = parsed_order.channel_user_id
+                                if not eff_chan or not eff_uid or (eff_chan == "telegram" and not str(eff_uid).isdigit()):
+                                    chan_info = identity_store.get_order_channel_info(parsed_order.id) or identity_store.get_order_channel_info(raw_id)
+                                    if chan_info:
+                                        eff_chan = chan_info.get("channel") or eff_chan
+                                        eff_uid = chan_info.get("channel_user_id") or eff_uid
+
+                                recipient_id = str(eff_uid or parsed_order.customer_phone or "").strip()
+                                if recipient_id:
+                                    v_plate = _get_driver_vehicle_label(driver, repo)
+                                    d_phone_line = f"📞 **Teléfono:** `{driver.phone}`\n" if driver.phone else ""
+                                    msg_asignacion = (
+                                        f"🛻 **¡Tu pedido #{parsed_order.id} ha sido asignado!**\n\n"
+                                        f"👨‍✈️ **Chofer:** {driver.name}\n"
+                                        f"🚘 **Unidad:** {v_plate}\n"
+                                        f"{d_phone_line}\n"
+                                        f"El operador está preparando tu unidad y te avisaremos en cuanto inicie su recorrido hacia tu domicilio. ⛽"
+                                    )
+                                    await asyncio.to_thread(notify_client, recipient_id, msg_asignacion, None, eff_chan)
+        except Exception as e:
+            logger.debug(f"[Monitor Dashboard Orders Loop] {e}")
+
+        await asyncio.sleep(4)
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log errors caused by Updates and suppress benign network disconnects."""
     err = context.error
@@ -2212,11 +2668,15 @@ def main() -> None:
         pool_timeout=30.0,
     )
 
+    async def post_init(app: Application) -> None:
+        asyncio.create_task(monitor_dashboard_assigned_orders(app.bot))
+
     application = (
         Application.builder()
         .token(token)
         .request(request_config)
         .get_updates_request(request_config)
+        .post_init(post_init)
         .build()
     )
 

@@ -764,26 +764,36 @@ code {
   white-space: nowrap;
 }
 
-.badge-confirmed { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
-.badge-assigned { background: rgba(139, 92, 246, 0.15); color: #c084fc; border: 1px solid rgba(139, 92, 246, 0.3); }
-.badge-in_route { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
-.badge-delivered { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
-.badge-cancelled { background: rgba(244, 63, 94, 0.15); color: #fb7185; border: 1px solid rgba(244, 63, 94, 0.3); }
-.badge-scheduled { background: rgba(6, 182, 212, 0.15); color: #22d3ee; border: 1px solid rgba(6, 182, 212, 0.3); }
-.badge-rejected_by_driver { background: rgba(244, 63, 94, 0.2); color: #fda4af; border: 1px solid rgba(244, 63, 94, 0.45); }
+.badge-confirmed, .badge-pendiente, .badge-pending { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.35); }
+.badge-assigned, .badge-asignado { background: rgba(139, 92, 246, 0.15); color: #c084fc; border: 1px solid rgba(139, 92, 246, 0.35); }
+.badge-in_route, .badge-en_ruta, .badge-en_reparto, .badge-en_camino { 
+  background: rgba(245, 158, 11, 0.18); 
+  color: #fbbf24; 
+  border: 1px solid rgba(245, 158, 11, 0.4); 
+  animation: pulseRoute 2.2s infinite ease-in-out;
+}
+.badge-delivered, .badge-entregado { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.35); }
+.badge-cancelled, .badge-cancelado { background: rgba(244, 63, 94, 0.15); color: #fb7185; border: 1px solid rgba(244, 63, 94, 0.35); }
+.badge-scheduled, .badge-programado { background: rgba(6, 182, 212, 0.15); color: #22d3ee; border: 1px solid rgba(6, 182, 212, 0.35); }
+.badge-rejected_by_driver, .badge-rechazado { background: rgba(244, 63, 94, 0.2); color: #fda4af; border: 1px solid rgba(244, 63, 94, 0.45); }
 
 .badge-available, .badge-op-disponible { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
 .badge-busy, .badge-op-en_entrega { background: rgba(245, 158, 11, 0.18); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); }
 .badge-op-fuera_servicio { background: rgba(148, 163, 184, 0.12); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.25); }
 
+@keyframes pulseRoute {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.35); }
+  50% { box-shadow: 0 0 8px 2px rgba(245, 158, 11, 0.45); }
+}
+
 /* Light mode overrides for high-contrast crisp text */
-[data-theme="light"] .badge-confirmed { background: rgba(37, 99, 235, 0.12); color: #1d4ed8; border-color: rgba(37, 99, 235, 0.25); }
-[data-theme="light"] .badge-assigned { background: rgba(124, 58, 237, 0.12); color: #6d28d9; border-color: rgba(124, 58, 237, 0.25); }
-[data-theme="light"] .badge-in_route { background: rgba(217, 119, 6, 0.12); color: #b45309; border-color: rgba(217, 119, 6, 0.25); }
-[data-theme="light"] .badge-delivered { background: rgba(5, 150, 105, 0.12); color: #047857; border-color: rgba(5, 150, 105, 0.25); }
-[data-theme="light"] .badge-cancelled { background: rgba(225, 29, 72, 0.12); color: #be123c; border-color: rgba(225, 29, 72, 0.25); }
-[data-theme="light"] .badge-scheduled { background: rgba(2, 132, 199, 0.12); color: #0369a1; border-color: rgba(2, 132, 199, 0.25); }
-[data-theme="light"] .badge-rejected_by_driver { background: rgba(225, 29, 72, 0.14); color: #9f1239; border-color: rgba(225, 29, 72, 0.3); }
+[data-theme="light"] .badge-confirmed, [data-theme="light"] .badge-pendiente, [data-theme="light"] .badge-pending { background: rgba(37, 99, 235, 0.12); color: #1d4ed8; border-color: rgba(37, 99, 235, 0.25); }
+[data-theme="light"] .badge-assigned, [data-theme="light"] .badge-asignado { background: rgba(124, 58, 237, 0.12); color: #6d28d9; border-color: rgba(124, 58, 237, 0.25); }
+[data-theme="light"] .badge-in_route, [data-theme="light"] .badge-en_ruta, [data-theme="light"] .badge-en_reparto, [data-theme="light"] .badge-en_camino { background: rgba(217, 119, 6, 0.14); color: #b45309; border-color: rgba(217, 119, 6, 0.3); }
+[data-theme="light"] .badge-delivered, [data-theme="light"] .badge-entregado { background: rgba(5, 150, 105, 0.12); color: #047857; border-color: rgba(5, 150, 105, 0.25); }
+[data-theme="light"] .badge-cancelled, [data-theme="light"] .badge-cancelado { background: rgba(225, 29, 72, 0.12); color: #be123c; border-color: rgba(225, 29, 72, 0.25); }
+[data-theme="light"] .badge-scheduled, [data-theme="light"] .badge-programado { background: rgba(2, 132, 199, 0.12); color: #0369a1; border-color: rgba(2, 132, 199, 0.25); }
+[data-theme="light"] .badge-rejected_by_driver, [data-theme="light"] .badge-rechazado { background: rgba(225, 29, 72, 0.14); color: #9f1239; border-color: rgba(225, 29, 72, 0.3); }
 
 [data-theme="light"] .badge-available, [data-theme="light"] .badge-op-disponible { background: rgba(5, 150, 105, 0.12); color: #047857; border-color: rgba(5, 150, 105, 0.25); }
 [data-theme="light"] .badge-busy, [data-theme="light"] .badge-op-en_entrega { background: rgba(217, 119, 6, 0.14); color: #b45309; border-color: rgba(217, 119, 6, 0.3); }

@@ -16,16 +16,20 @@ logger = logging.getLogger(__name__)
 def delete_customer_address(
     address_identifier: str,
     phone: str = "",
+    confirm: bool = False,
     config: RunnableConfig = None,
 ) -> str:
     """Delete a saved delivery address from the customer's account in SQLite.
 
     Use this tool when the customer asks to delete, remove or borrar a saved delivery address
     (e.g., "elimina la dirección 2", "borra mi dirección de Misión San Javier", "eliminar dirección").
+    Always require explicit confirmation before deleting. If the customer has not explicitly
+    said "sí, elimínala", "confirmo", or similar, do not set confirm=True.
 
     Args:
         address_identifier: The address number/index (e.g. "1", "2", "7") or text matching the address/alias to delete.
         phone: Optional customer phone number. If omitted, it will use the conversation channel context.
+        confirm: Set to True only when the customer has explicitly confirmed they want to delete this specific address.
     """
     configurable = config.get("configurable", {}) if config else {}
     tenant_id = configurable.get("tenant_id", "petroil")
@@ -82,7 +86,14 @@ def delete_customer_address(
             f"Cuentas con {len(addresses)} dirección(es) guardada(s)."
         )
 
-    # Proceder a eliminar la dirección
+    # Validar confirmación explícita antes de borrar
+    if not confirm:
+        return (
+            f"⚠️ ¿Estás seguro de que deseas eliminar la dirección '{target_addr.address}' de tu cuenta?\n\n"
+            "Esta acción no se puede deshacer. Por favor confírmame respondiendo 'Sí, confirmar' para proceder a borrarla o indícame si deseas conservar tu dirección."
+        )
+
+    # Proceder a eliminar la dirección tras confirmación
     success = repo.delete_customer_address(cust.id, target_addr.id)
     if not success:
         return f"⚠️ Ocurrió un error al intentar eliminar la dirección '{target_addr.address}'."

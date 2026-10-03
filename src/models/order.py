@@ -44,6 +44,7 @@ class Order(BaseModel):
     delivery_lng: float | None = None
     live_location_message_id: int | None = None
     live_location_chat_id: str | None = None
+    driver_message_ids: str | None = None
     assigned_at: str | None = None
     delivered_at: str | None = None
     scheduled_for: str | None = None

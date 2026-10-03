@@ -20,7 +20,7 @@ class InboundMessage(BaseModel):
     The channel adapter translates the platform-specific webhook
     payload into this channel-agnostic format.
     """
-    channel: Literal["whatsapp", "instagram", "telegram", "web"]
+    channel: Literal["whatsapp", "instagram", "telegram", "web", "messenger"]
     channel_message_id: str
     channel_user_id: str
     tenant_id: str
