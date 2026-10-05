@@ -1312,6 +1312,13 @@ class ApiRepository:
                         "rating_comment": rating_comment_val,
                         "rejection_reason": rejection_reason_val,
                         "rejection_driver_name": driver_name_val if local_status == "rejected_by_driver" else None,
+                        "cancelled_by": (
+                            o.get("cancelledBy")
+                            or o.get("cancelled_by")
+                            or (identity_store.get_order_cancellation(raw_id) or {}).get("cancelled_by")
+                            or (identity_store.get_order_cancellation(o.get("id")) or {}).get("cancelled_by")
+                            or None
+                        ),
                         "items": items,
                         "created_at": o.get("createdAt") or datetime.now(timezone.utc).isoformat(),
                     })
@@ -2877,6 +2884,11 @@ class ApiRepository:
         for key in (order_id, str(order_id), target_uuid):
             if key and key in self._order_id_map:
                 self._order_id_map[key]["status"] = api_status
+                if cancelled_by:
+                    self._order_id_map[key]["cancelledBy"] = cancelled_by
+                    self._order_id_map[key]["cancelled_by"] = cancelled_by
+                if reason:
+                    self._order_id_map[key]["rejectionReason"] = reason
                 if api_status in ("RECHAZADO", "CANCELADO"):
                     self._order_id_map[key]["driverId"] = None
                     self._order_id_map[key]["driverName"] = None
@@ -2947,6 +2959,13 @@ class ApiRepository:
         reason: str = "Cancelado a solicitud del cliente",
     ) -> Order | None:
         """Cancel order via REST API."""
+        identity_store.save_order_cancellation(order_id, cancelled_by=cancelled_by, reason=reason)
+        try:
+            from src.services.order_events import _EVENT_DEDUP_CACHE
+            import time
+            _EVENT_DEDUP_CACHE[f"cancelled:{order_id}"] = time.time()
+        except Exception:
+            pass
         return self.update_order_status(
             tenant_id=tenant_id,
             order_id=order_id,
@@ -3181,6 +3200,23 @@ class ApiRepository:
                 else:
                     eff_channel_user_id = cust_phone_clean
 
+        canc_info = (
+            identity_store.get_order_cancellation(num_id)
+            or identity_store.get_order_cancellation(str(raw_id))
+            or identity_store.get_order_cancellation(str(ord_dict.get("id")))
+            or identity_store.get_order_cancellation(str(ord_dict.get("orderNumber")))
+        )
+        canc_by = (
+            ord_dict.get("cancelledBy")
+            or ord_dict.get("cancelled_by")
+            or (canc_info.get("cancelled_by") if canc_info else None)
+        )
+        canc_reason = (
+            ord_dict.get("rejectionReason")
+            or ord_dict.get("cancellation_reason")
+            or (canc_info.get("reason") if canc_info else None)
+        )
+
         return Order(
             id=num_id,
             tenant_id=tenant_id,
@@ -3201,6 +3237,8 @@ class ApiRepository:
             live_location_message_id=live_msg_id,
             live_location_chat_id=live_chat_id,
             scheduled_for=sched_for,
+            cancelled_by=canc_by,
+            cancellation_reason=canc_reason,
             items=items,
             created_at=ord_dict.get("createdAt") or ord_dict.get("created_at"),
         )

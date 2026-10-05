@@ -1214,6 +1214,13 @@ class SqliteRepository(ProductRepository):
             scheduled_for = row["scheduled_for"] if "scheduled_for" in keys else None
             driver_message_ids = row["driver_message_ids"] if "driver_message_ids" in keys else None
 
+            canc_info = None
+            try:
+                from src.repositories.identity_store import identity_store
+                canc_info = identity_store.get_order_cancellation(row["id"])
+            except Exception:
+                pass
+
             return Order(
                 id=row["id"],
                 tenant_id=row["tenant_id"],
@@ -1239,6 +1246,8 @@ class SqliteRepository(ProductRepository):
                 assigned_at=assigned_at,
                 delivered_at=delivered_at,
                 scheduled_for=scheduled_for,
+                cancelled_by=canc_info.get("cancelled_by") if canc_info else None,
+                cancellation_reason=canc_info.get("reason") if canc_info else None,
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
                 items=items,
@@ -1467,6 +1476,15 @@ class SqliteRepository(ProductRepository):
         self, tenant_id: str, order_id: int, cancelled_by: str = "customer", reason: str = ""
     ) -> Order | None:
         """Cancel an order, release driver if assigned, and update database."""
+        from src.repositories.identity_store import identity_store
+        identity_store.save_order_cancellation(order_id, cancelled_by=cancelled_by, reason=reason)
+        try:
+            from src.services.order_events import _EVENT_DEDUP_CACHE
+            import time
+            _EVENT_DEDUP_CACHE[f"cancelled:{order_id}"] = time.time()
+        except Exception:
+            pass
+
         order = self.get_order_by_id(tenant_id, order_id)
         if not order:
             return None

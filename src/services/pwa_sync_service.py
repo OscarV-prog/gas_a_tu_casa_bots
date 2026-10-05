@@ -118,7 +118,27 @@ async def poll_order_updates_once(tenant_id: str = "petroil") -> int:
             # 4. Cancelled transition
             if prev_st != "cancelled" and curr_st == "cancelled":
                 logger.info(f"[PwaSyncService] Detected Cancellation for #{oid}")
-                await asyncio.to_thread(order_events.notify_order_cancelled, tenant_id, oid, reason=o.get("notes") or "")
+                canc_by = o.get("cancelled_by") or o.get("cancelledBy")
+                if not canc_by:
+                    from src.repositories.identity_store import identity_store
+                    canc_info = identity_store.get_order_cancellation(oid)
+                    if canc_info and canc_info.get("cancelled_by"):
+                        canc_by = canc_info["cancelled_by"]
+                if not canc_by:
+                    actor = str(o.get("actor") or "").lower()
+                    if "chofer" in actor or "driver" in actor or curr_drv:
+                        canc_by = "el chofer"
+                    elif "cliente" in actor or "customer" in actor:
+                        canc_by = "el cliente"
+                    else:
+                        canc_by = "Torre de Control"
+                await asyncio.to_thread(
+                    order_events.notify_order_cancelled,
+                    tenant_id,
+                    oid,
+                    reason=o.get("notes") or o.get("rejectionReason") or "",
+                    cancelled_by=canc_by,
+                )
                 events_fired += 1
         else:
             # Newly created order appearing after service boot

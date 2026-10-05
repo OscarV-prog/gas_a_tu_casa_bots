@@ -753,6 +753,14 @@ async def _process_single_instagram_event(event: dict[str, Any]) -> None:
                 return
 
             repo.cancel_order(TENANT_ID, order_id, cancelled_by="el cliente")
+            from src.repositories.identity_store import identity_store
+            identity_store.save_order_cancellation(order_id, cancelled_by="el cliente", reason="Cancelado por el cliente desde Instagram")
+            try:
+                from src.services.order_events import _EVENT_DEDUP_CACHE
+                import time
+                _EVENT_DEDUP_CACHE[f"cancelled:{order_id}"] = time.time()
+            except Exception:
+                pass
 
             if order.driver_id:
                 driver = repo.get_driver(order.driver_id)

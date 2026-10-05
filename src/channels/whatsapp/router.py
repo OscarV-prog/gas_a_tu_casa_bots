@@ -722,6 +722,13 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
 
             # Cancelar orden en BD y liberar chofer
             repo.cancel_order(TENANT_ID, order_id, cancelled_by="el cliente")
+            identity_store.save_order_cancellation(order_id, cancelled_by="el cliente", reason="Cancelado por el cliente desde WhatsApp")
+            try:
+                from src.services.order_events import _EVENT_DEDUP_CACHE
+                import time
+                _EVENT_DEDUP_CACHE[f"cancelled:{order_id}"] = time.time()
+            except Exception:
+                pass
 
             # Limpiar botones anteriores de cliente y chofer
             from src.services.notifications import cleanup_client_order_buttons

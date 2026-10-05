@@ -337,7 +337,11 @@ def notify_order_cancelled(
     cancelled_by: str = "Torre de Control",
     force: bool = False,
 ) -> bool:
-    """Notify customer of order cancellation with clear explanation and apology."""
+    """Notify customer of order cancellation.
+    
+    If cancelled by the customer themselves, send a clear confirmation without apologies.
+    If cancelled by Torre de Control or the driver, include explanation and sincere apologies.
+    """
     if not force and _is_event_deduped("cancelled", order_id, ttl_seconds=120.0):
         return True
 
@@ -357,15 +361,51 @@ def notify_order_cancelled(
     except Exception:
         pass
 
-    explanation = reason or "Incidencia operativa o solicitud de cancelación en sistema."
-    client_cancel_msg = (
-        f"🚫 **Aviso sobre tu Pedido #{order.id} - Petroil Gas**\n\n"
-        f"Estimado/a **{order.customer_name}**,\n\n"
-        f"Le informamos que lamentablemente su pedido de gas programado para `{order.delivery_address}` **ha sido cancelado**.\n\n"
-        f"📌 **Explicación:** {explanation}\n\n"
-        f"🙏 **Le ofrecemos una sincera disculpa por los inconvenientes y contratiempos ocasionados.**\n\n"
-        f"💡 Si desea reagendar su servicio o necesita asistencia de un asesor, simplemente respóndanos por este medio en cualquier momento y con gusto le atenderemos. ⛽✨"
+    # Resolver quién realizó la cancelación (priorizar memoria persistente y modelo si fue cliente/chofer)
+    from src.repositories.identity_store import identity_store
+    stored_canc = identity_store.get_order_cancellation(order_id)
+    effective_cancelled_by = cancelled_by
+    if stored_canc and stored_canc.get("cancelled_by"):
+        effective_cancelled_by = stored_canc["cancelled_by"]
+    elif getattr(order, "cancelled_by", None):
+        effective_cancelled_by = order.cancelled_by
+
+    is_customer = any(
+        w in str(effective_cancelled_by or "").lower()
+        for w in ("cliente", "customer", "usuario", "user")
     )
+    is_driver = any(
+        w in str(effective_cancelled_by or "").lower()
+        for w in ("chofer", "driver", "repartidor")
+    )
+
+    if is_customer:
+        # El usuario canceló su propio pedido:
+        # NO debe salir mensaje de disculpa ni 'lamentamos'. Se confirma limpiamente su solicitud.
+        client_cancel_msg = (
+            f"🚫 **Confirmación de Cancelación - Pedido #{order.id}**\n\n"
+            f"Estimado/a **{order.customer_name}**,\n\n"
+            f"Confirmamos que tu pedido de gas para `{order.delivery_address}` **ha sido cancelado** conforme a tu solicitud.\n\n"
+            f"💡 Si deseas programar un nuevo pedido en el futuro o requieres asistencia, escríbenos por este medio en cualquier momento y con gusto te atenderemos. ¡Estamos a tus órdenes! ⛽✨"
+        )
+    else:
+        # Se canceló desde Torre de Control o el mismo chofer:
+        # SÍ debe salir el mensaje con explicación formal y disculpa sincera al cliente.
+        actor_label = "el chofer asignado" if is_driver else "Torre de Control"
+        explanation = (
+            reason
+            or (stored_canc.get("reason") if (stored_canc and stored_canc.get("reason")) else "")
+            or getattr(order, "cancellation_reason", None)
+            or "Incidencia operativa o de ruta en el servicio."
+        )
+        client_cancel_msg = (
+            f"🚫 **Aviso sobre tu Pedido #{order.id} - Petroil Gas**\n\n"
+            f"Estimado/a **{order.customer_name}**,\n\n"
+            f"Le informamos que lamentablemente su pedido de gas programado para `{order.delivery_address}` **ha sido cancelado** por {actor_label}.\n\n"
+            f"📌 **Motivo:** {explanation}\n\n"
+            f"🙏 **Le ofrecemos una sincera disculpa por los inconvenientes y contratiempos ocasionados.**\n\n"
+            f"💡 Si desea reagendar su servicio o necesita asistencia de un asesor, simplemente respóndanos por este medio en cualquier momento y con gusto le atenderemos. ⛽✨"
+        )
 
     recipient_id, channel = _resolve_recipient_and_channel(order, order_id)
     if recipient_id:
@@ -380,6 +420,7 @@ def handle_order_transition(
     driver_id: Any = None,
     reason: str = "",
     signature: str | None = None,
+    cancelled_by: str = "",
 ) -> bool:
     """Unified handler for order lifecycle status transitions from PWA or Control Tower."""
     raw_status = str(new_status or "").lower().strip()
@@ -403,6 +444,9 @@ def handle_order_transition(
     elif normalized == "delivered":
         return notify_order_delivered(tenant_id, order_id)
     elif normalized == "cancelled":
-        return notify_order_cancelled(tenant_id, order_id, reason=reason)
+        eff_canc = cancelled_by
+        if not eff_canc:
+            eff_canc = "el chofer" if driver_id else "Torre de Control"
+        return notify_order_cancelled(tenant_id, order_id, reason=reason, cancelled_by=eff_canc)
 
     return True

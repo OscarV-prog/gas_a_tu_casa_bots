@@ -50,6 +50,8 @@ class Order(BaseModel):
     scheduled_for: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
+    cancelled_by: str | None = None
+    cancellation_reason: str | None = None
     items: list[OrderItem] = Field(default_factory=list)
 
     def to_display(self) -> str:

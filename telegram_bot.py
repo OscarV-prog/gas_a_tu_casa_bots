@@ -899,7 +899,6 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     awaiting_order_id = context.user_data.get("awaiting_rating_comment_order_id")
     awaiting_time = context.user_data.get("awaiting_rating_time", 0)
     if awaiting_order_id:
-        from src.services.flow_router import flow_router, FlowState
         curr_session = flow_router.get_session(f"telegram:{TENANT_ID}:{chat_id}")
 
         has_phone_digits = bool(re.search(r"\b\d{7,10}\b", texto_usuario))
@@ -1737,6 +1736,14 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
 
         # Cancelar orden en BD y liberar chofer
         repo.cancel_order(TENANT_ID, order_id, cancelled_by="el cliente")
+        from src.repositories.identity_store import identity_store
+        identity_store.save_order_cancellation(order_id, cancelled_by="el cliente", reason="Cancelado por el cliente desde Telegram")
+        try:
+            from src.services.order_events import _EVENT_DEDUP_CACHE
+            import time
+            _EVENT_DEDUP_CACHE[f"cancelled:{order_id}"] = time.time()
+        except Exception:
+            pass
 
         # Limpiar botones anteriores de cliente y chofer
         from src.services.notifications import cleanup_client_order_buttons

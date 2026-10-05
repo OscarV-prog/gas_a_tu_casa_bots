@@ -409,6 +409,9 @@ async def update_order_status(
 
     # Notificaciones automáticas omnicanal (WhatsApp, Telegram, Messenger, Instagram)
     from src.services.order_events import handle_order_transition
+    if new_status == "cancelled":
+        from src.repositories.identity_store import identity_store
+        identity_store.save_order_cancellation(order_id, cancelled_by="Torre de Control", reason=reason)
     background_tasks.add_task(
         handle_order_transition,
         tenant_id=tenant_id,
@@ -416,6 +419,7 @@ async def update_order_status(
         new_status=new_status,
         driver_id=order.driver_id,
         reason=reason,
+        cancelled_by="Torre de Control" if new_status == "cancelled" else "",
     )
 
     return {"success": True, "order_id": order_id, "status": updated.status}
@@ -767,6 +771,9 @@ async def update_driver_order_status(
     )
 
     from src.services.order_events import handle_order_transition
+    if canonical_status == "cancelled":
+        from src.repositories.identity_store import identity_store
+        identity_store.save_order_cancellation(order_id, cancelled_by="el chofer", reason=reason)
     background_tasks.add_task(
         handle_order_transition,
         tenant_id=tenant_id,
@@ -775,6 +782,7 @@ async def update_driver_order_status(
         driver_id=driver_id,
         reason=reason,
         signature=payload.signature,
+        cancelled_by="el chofer" if canonical_status == "cancelled" else "",
     )
 
     return {

@@ -61,6 +61,14 @@ def cancel_order(
 
     # Cancel order in DB and release driver
     cancelled_order = repo.cancel_order(tenant_id, order_id, cancelled_by="el cliente", reason=reason)
+    from src.repositories.identity_store import identity_store
+    identity_store.save_order_cancellation(order_id, cancelled_by="el cliente", reason=reason)
+    try:
+        from src.services.order_events import _EVENT_DEDUP_CACHE
+        import time
+        _EVENT_DEDUP_CACHE[f"cancelled:{order_id}"] = time.time()
+    except Exception:
+        pass
 
     # Limpiar botones interactivos del cliente
     from src.services.notifications import cleanup_client_order_buttons
