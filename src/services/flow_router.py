@@ -1071,22 +1071,27 @@ class FlowRouter:
             if active_order or session.state == FlowState.COMPLETED:
                 ord_id = active_order.id if active_order else (session.draft_order.created_order_id or "")
                 if ord_id and hasattr(repo, "update_order_delivery_coords"):
-                    repo.update_order_delivery_coords(session.tenant_id, ord_id, lat, lng, resolved_name)
+                    repo.update_order_delivery_coords(session.tenant_id, ord_id, lat, lng, None)
                 session.draft_order.delivery_lat = lat
                 session.draft_order.delivery_lng = lng
-                session.draft_order.delivery_address = resolved_name
-                logger.info(f"📍 GPS de entrega actualizado para pedido #{ord_id}: ({lat}, {lng}) -> {resolved_name}")
+                curr_act_addr = (session.draft_order.delivery_address or "").strip()
+                if not curr_act_addr or curr_act_addr.lower().startswith("ubicaci") or bool(re.match(r"^[-0-9\.\,\s]+$", curr_act_addr)):
+                    session.draft_order.delivery_address = resolved_name
+                logger.info(f"📍 GPS de entrega actualizado para pedido #{ord_id}: ({lat}, {lng})")
 
+                display_addr = session.draft_order.delivery_address or resolved_name
                 resp_text = (
-                    f"📍 **¡Ubicación GPS recibida con éxito!**\n**{resolved_name}**\n\n"
+                    f"📍 **¡Ubicación GPS recibida con éxito!**\n**{display_addr}**\n\n"
                     f"Hemos registrado las coordenadas para tu pedido activo. Tu repartidor podrá guiarse directamente a este punto. 🚚✨"
                 )
                 return FlowResponse(text=resp_text, state=session.state, is_llm=False, action_performed=None)
 
-            # 2.3 Si el cliente está en pasos posteriores de la captura (pago o confirmación)
+            # 2.3 Si el cliente está en pasos posteriores de la captura (pago o confirmación) o nueva dirección
             session.draft_order.delivery_lat = lat
             session.draft_order.delivery_lng = lng
-            session.draft_order.delivery_address = resolved_name
+            curr_addr = (session.draft_order.delivery_address or "").strip()
+            if not curr_addr or curr_addr.lower().startswith("ubicaci") or bool(re.match(r"^[-0-9\.\,\s]+$", curr_addr)):
+                session.draft_order.delivery_address = resolved_name
 
             if session.state == FlowState.WAITING_FOR_PAYMENT_METHOD:
                 logger.info(f"📍 Dirección actualizada en WAITING_FOR_PAYMENT_METHOD: {resolved_name}")
@@ -1482,13 +1487,15 @@ class FlowRouter:
             return await cls._handle_correction_intent(session, CorrectionIntent(target=target, original_text=data), repo)
 
         # 1. Tipo de servicio
+        # 1. Tipo de servicio (Inicia un pedido 100% fresco sin mezclar datos del pedido anterior)
         if data.startswith("client_svc:"):
             svc = data.split(":")[1]
-            draft.customer_phone = ""
+            session.draft_order = DraftOrder()
+            session.cart = {}
+            draft = session.draft_order
             if svc == "cilindro":
                 session.state = FlowState.WAITING_FOR_PRODUCT_OR_QUANTITY
                 draft.service_type = "cilindro"
-                session.cart = {}
                 return FlowResponse(
                     text="🛒 **Selección de Cilindros:**\nSelecciona en los botones de abajo los cilindros que necesitas (o escribe tu pedido):",
                     state=session.state,
@@ -1777,6 +1784,14 @@ class FlowRouter:
         # ESTADO: INITIAL (Saludo / Inicio)
         # ---------------------------------------------------------------------
         if state == FlowState.INITIAL or state == FlowState.COMPLETED or state == FlowState.CANCELLED:
+            # Si el pedido previo estaba completado o cancelado, limpiar para no mezclar datos
+            if state in (FlowState.COMPLETED, FlowState.CANCELLED):
+                session.draft_order = DraftOrder()
+                session.cart = {}
+                session.state = FlowState.INITIAL
+                draft = session.draft_order
+                state = session.state
+
             # Detectar si el usuario especifica directamente un pedido de cilindro con capacidad
             cyl_items = parse_cylinder_request_deterministic(text, session.tenant_id)
             if cyl_items:
@@ -2068,7 +2083,8 @@ class FlowRouter:
                         is_llm=True,
                     )
                 telemetry.record_message(channel=session.channel, is_llm=True)
-                draft.delivery_address = val_res.normalized_address
+                clean_user_addr = re.sub(r"^(?:mi\s+direcci[oó]n\s+es\s+|es\s+en\s+|vivo\s+en\s+)", "", text.strip(), flags=re.IGNORECASE).strip()
+                draft.delivery_address = clean_user_addr or val_res.normalized_address
                 try:
                     geo_lat, geo_lng, _ = geocode_address(draft.delivery_address, city_context="Mazatlán")
                     if geo_lat and geo_lng:
@@ -2201,7 +2217,8 @@ class FlowRouter:
                 )
 
             telemetry.record_message(channel=session.channel, is_llm=True)
-            draft.delivery_address = val_res.normalized_address
+            clean_user_addr = re.sub(r"^(?:mi\s+direcci[oó]n\s+es\s+|es\s+en\s+|vivo\s+en\s+)", "", text.strip(), flags=re.IGNORECASE).strip()
+            draft.delivery_address = clean_user_addr or val_res.normalized_address
             try:
                 geo_lat, geo_lng, _ = geocode_address(draft.delivery_address, city_context="Mazatlán")
                 if geo_lat and geo_lng:

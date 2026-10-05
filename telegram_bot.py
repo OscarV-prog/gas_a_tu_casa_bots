@@ -836,6 +836,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Reiniciar sesión para un pedido nuevo desde cero
     from src.services.flow_router import clear_session
     clear_session(thread_id)
+    context.user_data.pop("awaiting_rating_comment_order_id", None)
+    context.user_data.pop("awaiting_rating_time", None)
+    context.user_data.pop("carrito_cilindros", None)
 
     flow_res = await flow_router.process_event(
         session_id=thread_id,
@@ -895,9 +898,24 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # 1. Si el cliente estaba en proceso de dejar un comentario opcional de calificación
     awaiting_order_id = context.user_data.get("awaiting_rating_comment_order_id")
     awaiting_time = context.user_data.get("awaiting_rating_time", 0)
-    if awaiting_order_id and (datetime.now().timestamp() - awaiting_time) < 600:
-        es_nuevo_pedido = any(k in texto_lower for k in ["quiero", "cilindro", "estacionario", "tanque", "litros", "pedir", "orden"])
-        if not es_nuevo_pedido:
+    if awaiting_order_id:
+        from src.services.flow_router import flow_router, FlowState
+        curr_session = flow_router.get_session(f"telegram:{TENANT_ID}:{chat_id}")
+
+        has_phone_digits = bool(re.search(r"\b\d{7,10}\b", texto_usuario))
+        is_greeting_or_cmd = any(texto_lower.startswith(g) for g in ["hola", "buen", "hey", "/start", "/menu", "inicio", "empezar", "que tal", "buenas", "ayuda"])
+        is_order_intent = any(k in texto_lower for k in [
+            "quiero", "cilindro", "estacionario", "tanque", "litros", "pedir", "orden", "gas",
+            "recarga", "precio", "cuanto", "cuánto", "30", "20", "45", "10", "5", "kilos", "kg", "nuevo"
+        ])
+        is_in_active_order = curr_session.state not in (FlowState.INITIAL, FlowState.COMPLETED, FlowState.CANCELLED)
+
+        # Si el usuario escribe su teléfono, saluda, pide gas o ya está en un flujo de pedido:
+        if has_phone_digits or is_greeting_or_cmd or is_order_intent or is_in_active_order or (datetime.now().timestamp() - awaiting_time) >= 600:
+            context.user_data.pop("awaiting_rating_comment_order_id", None)
+            context.user_data.pop("awaiting_rating_time", None)
+        else:
+            # Es un comentario de retroalimentación válido
             context.user_data.pop("awaiting_rating_comment_order_id", None)
             context.user_data.pop("awaiting_rating_time", None)
             repo.update_order_rating_feedback(TENANT_ID, awaiting_order_id, comment=texto_usuario)
@@ -907,9 +925,6 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Muchas gracias por compartirnos tu opinión detallada. Tus comentarios han sido guardados para el equipo de calidad de Petroil. ¡Que tengas un excelente día! ⛽🌟",
             )
             return
-        else:
-            context.user_data.pop("awaiting_rating_comment_order_id", None)
-            context.user_data.pop("awaiting_rating_time", None)
 
     # 2. Detección temprana de intentos de payload / código / inyección / scraping / consultas a múltiples teléfonos
     found_phones = re.findall(r"\b(?:\+?52\s*)?(\d{10})\b", texto_usuario)
@@ -1133,6 +1148,11 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
     user_id = query.from_user.id if query.from_user else (update.effective_user.id if update.effective_user else 0)
     chat_id = update.effective_chat.id if update.effective_chat else user_id
     thread_id = f"telegram:{TENANT_ID}:{chat_id}"
+
+    # Descartar cualquier comentario de calificación pendiente si se presiona cualquier botón de flujo
+    if not data.startswith("driver_rating:"):
+        context.user_data.pop("awaiting_rating_comment_order_id", None)
+        context.user_data.pop("awaiting_rating_time", None)
 
     if not context.user_data.get("phone") and user_id:
         from src.repositories.identity_store import identity_store
