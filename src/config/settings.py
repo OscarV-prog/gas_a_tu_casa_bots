@@ -33,27 +33,46 @@ load_dynamic_settings()
 
 # Mapeo de atributos de Settings a claves dinámicas del backend central
 _DYNAMIC_ATTR_MAP: dict[str, tuple[str, list[str]]] = {
+    "openai_api_key": ("OPENAI_API_KEY", []),
+    "anthropic_api_key": ("ANTHROPIC_API_KEY", []),
+    "openrouter_api_key": ("OPENROUTER_API_KEY", []),
+    "langchain_api_key": ("LANGCHAIN_API_KEY", []),
     "whatsapp_token": ("WHATSAPP_TOKEN", ["WHATSAPP_ACCESS_TOKEN"]),
     "whatsapp_phone_number_id": ("WHATSAPP_PHONE_NUMBER_ID", []),
     "whatsapp_verify_token": ("WHATSAPP_VERIFY_TOKEN", []),
     "whatsapp_business_account_id": ("WHATSAPP_BUSINESS_ACCOUNT_ID", ["WHATSAPP_WABA_ID"]),
+    "whatsapp_app_secret": ("WHATSAPP_APP_SECRET", []),
+    "whatsapp_api_version": ("WHATSAPP_API_VERSION", []),
     "messenger_page_access_token": ("MESSENGER_PAGE_ACCESS_TOKEN", ["FACEBOOK_PAGE_ACCESS_TOKEN"]),
     "messenger_verify_token": ("MESSENGER_VERIFY_TOKEN", ["WHATSAPP_VERIFY_TOKEN"]),
     "messenger_page_id": ("MESSENGER_PAGE_ID", []),
+    "messenger_app_secret": ("MESSENGER_APP_SECRET", ["FACEBOOK_APP_SECRET"]),
+    "messenger_api_version": ("MESSENGER_API_VERSION", []),
     "instagram_access_token": ("INSTAGRAM_ACCESS_TOKEN", ["MESSENGER_PAGE_ACCESS_TOKEN", "WHATSAPP_TOKEN"]),
     "instagram_verify_token": ("INSTAGRAM_VERIFY_TOKEN", ["MESSENGER_VERIFY_TOKEN"]),
     "instagram_account_id": ("INSTAGRAM_ACCOUNT_ID", []),
+    "instagram_app_secret": ("INSTAGRAM_APP_SECRET", ["MESSENGER_APP_SECRET"]),
+    "instagram_api_version": ("INSTAGRAM_API_VERSION", []),
     "telegram_bot_token": ("TELEGRAM_BOT_TOKEN", []),
     "telegram_driver_bot_token": ("TELEGRAM_DRIVER_BOT_TOKEN", []),
     "maps_api_key": ("GOOGLE_MAPS_API_KEY", ["MAPS_API_KEY"]),
+    "default_city": ("DEFAULT_CITY", []),
+    "cors_origins": ("CORS_ORIGINS", []),
+    "public_base_url": ("PUBLIC_BASE_URL", []),
 }
 
 
 class Settings(BaseModel):
     """Application-level settings (not tenant-specific) with live dynamic synchronization."""
 
+    openai_api_key: str = Field(
+        default_factory=lambda: os.getenv("OPENAI_API_KEY", "")
+    )
     anthropic_api_key: str = Field(
         default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", "")
+    )
+    openrouter_api_key: str = Field(
+        default_factory=lambda: os.getenv("OPENROUTER_API_KEY", "")
     )
     langchain_api_key: str = Field(
         default_factory=lambda: os.getenv("LANGCHAIN_API_KEY", "")
