@@ -1,221 +1,29 @@
-# Arquitectura de Puentes, Webhooks y Guía de Despliegue en Servidor
+# Contexto: Puentes de Bots y Requerimiento de Servidor
 
-Este documento describe la arquitectura técnica de comunicación ("puentes"), el flujo de webhooks entre plataformas de mensajería (Meta Messenger, Telegram, PWA Chofer) y los requerimientos de infraestructura necesarios para alojar el servicio en un servidor productivo con disponibilidad 24/7.
+## 1. ¿Cómo funcionan los "puentes" actualmente?
+Los bots (Messenger y Telegram) y la PWA del chofer no se comunican de forma aislada, dependen de un backend central que procesa los pedidos y eventos:
 
----
+- **Meta Messenger:** Meta envía las interacciones de los usuarios a través de una URL de Webhook (`/webhooks/messenger`).
+- **PWA de Chofer y Tracking:** Cuando el chofer actualiza el pedido o su ubicación en la PWA, se envían eventos para notificar al cliente en tiempo real y mostrar la pantalla de seguimiento (`/tracking`).
+- **Telegram:** Los bots de cliente y chofer consultan y envían eventos a este mismo backend.
 
-## 1. Contexto y Arquitectura Actual de los "Puentes"
-
-El núcleo de los bots opera sobre un servidor backend en **FastAPI (Python 3.11+)** escuchando por defecto en el puerto **`3000`** (`http://localhost:3000`).
-
-```
-                              ┌──────────────────────────────────────────┐
-                              │           PLATAFORMAS EXTERNAS           │
-                              └──────────────────────────────────────────┘
-                                   │                              │
-                     (Mensajes / Webhooks)            (Mensajes / Polling)
-                                   ▼                              ▼
-                        [ Meta Messenger API ]            [ Telegram API ]
-                                   │                              │
-                                   │ HTTPS                        │ HTTPS
-                                   ▼                              ▼
-               ┌──────────────────────────────────────────────────────────────┐
-               │              PUERTO PÚBLICO / PROXY INVERSO                  │
-               │   (Dominio con SSL: https://<dominio>/webhooks/messenger)    │
-               └──────────────────────────────────────────────────────────────┘
-                                              │
-                                              ▼ (Proxy interno HTTP)
-               ┌──────────────────────────────────────────────────────────────┐
-               │           BACKEND FASTAPI (PYTHON) - PUERTO 3000             │
-               │  - Validación de Webhooks (GET /webhooks/messenger)          │
-               │  - Recepción de Mensajes  (POST /webhooks/messenger)         │
-               │  - Motor de Tracking      (GET /tracking/{order_id})         │
-               │  - API Sincronización PWA (POST /api/pwa/sync-order)         │
-               │  - Dispatcher & Estados   (src/app.py)                       │
-               └──────────────────────────────────────────────────────────────┘
-                                       │                      │
-                                       ▼                      ▼
-                           [ PWA Chofer / GPS ]       [ ERP / NestJS API ]
-```
-
-### Endpoints y Canales Expuestos:
-1. **Webhook de Meta Messenger:**
-   - **`GET /webhooks/messenger`**: Endpoint de verificación exigido por Meta. Recibe `hub.mode=subscribe`, `hub.verify_token` y responde con `hub.challenge`.
-   - **`POST /webhooks/messenger`**: Endpoint que recibe en tiempo real los mensajes entrantes de los usuarios y las respuestas de botones/quick replies.
-2. **Servicio de Seguimiento y Tracking Web:**
-   - **`GET /tracking/{order_id}`**: Interfaz web dinámica que muestra al cliente el estatus de su pedido, mapa interactivo con la geolocalización del chofer y calificación final.
-3. **Integración con PWA Chofer:**
-   - Endpoints para notificar asignación de chofer, orden en ruta, actualización de coordenadas GPS y entrega completada con disparo de encuesta de satisfacción.
-4. **Bots de Telegram:**
-   - Servicios auxiliares (`telegram_bot.py` y `driver_bot.py`) para interacción de clientes y conductores.
+Para realizar pruebas, se levantó un puente temporal mediante un túnel que conecta las peticiones de Internet directamente a una computadora local.
 
 ---
 
-## 2. Diagnóstico: Causa de Desconexión en Ambiente Local
-
-- **Mecanismo de prueba local:** Durante el desarrollo local, el puerto `3000` se expuso a Internet mediante un túnel temporal de Cloudflare (`cloudflared tunnel`).
-- **Problema de disponibilidad:** Dicho túnel depende de la estación de trabajo local. Al suspenderse, cerrarse la sesión o apagarse la máquina, el túnel y el proceso mueren inmediatamente, provocando que Meta marque el webhook como inalcanzable (Error de entrega / Timeout) y los bots queden fuera de línea.
-- **Solución requerida:** Alojar el código de los bots directamente en el servidor productivo donde operan los demás sistemas, corriendo bajo un administrador de procesos permanente (systemd, Docker o PM2).
-
----
-
-## 3. Requerimientos de Infraestructura en Servidor
-
-Para que el sistema funcione de manera continua y autónoma, se requiere habilitar en el servidor:
-
-### A. Ejecución del Servicio Backend
-- **Entorno:** Servidor Linux con Python 3.11+.
-- **Código Fuente:** Clonar el repositorio del proyecto:
-  ```bash
-  git clone https://github.com/OscarV-prog/gas_a_tu_casa_bots.git
-  cd gas_a_tu_casa_bots
-  ```
-- **Instalación de dependencias:**
-  ```bash
-  python3 -m venv .venv
-  source .venv/bin/activate
-  pip install -r requirements.txt
-  ```
-- **Comando de arranque (FastAPI):**
-  ```bash
-  uvicorn src.app:app --host 0.0.0.0 --port 3000
-  ```
+## 2. ¿Por qué dejó de funcionar?
+Al estar montado el puente en una laptop de desarrollo:
+- Mientras la computadora está encendida y con el túnel activo, los mensajes entran con normalidad.
+- En cuanto la computadora se apaga, entra en suspensión o se desconecta de la red, el túnel se cierra. Meta y las demás plataformas intentan enviar los eventos, pero al no encontrar el servidor en línea, marcan error y el bot deja de responder.
 
 ---
 
-## 4. Opciones de Enrutamiento de Red (Proxy Inverso)
+## 3. ¿Qué necesitamos del compañero en el servidor?
+Para que el sistema sea estable y funcione las 24 horas sin depender de ninguna computadora personal, se requiere:
 
-Para que Meta Messenger y los clientes externos puedan alcanzar el puerto `3000` con certificado SSL válido (HTTPS requerido obligatoriamente por Meta), se puede implementar cualquiera de las siguientes alternativas:
+1. **Alojar el backend en el servidor:**
+   - Desplegar el proyecto de los bots en el mismo servidor donde ya están productivos los demás servicios de la empresa.
 
-### Opción 1: Subdominio Dedicado (Recomendada)
-Crear un subdominio específico (por ejemplo `bots.petroil.dev` o `api-bots.petroil.dev`) apuntando directamente al servidor, con terminación SSL (Nginx / Caddy / Cloudflare) redirigiendo todo el tráfico al puerto `3000`.
-
-**Configuración Nginx sugerida para subdominio:**
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name bots.petroil.dev;
-
-    ssl_certificate /etc/letsencrypt/live/bots.petroil.dev/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/bots.petroil.dev/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
----
-
-### Opción 2: Enrutamiento por Ruta en el Dominio Existente
-Si se utiliza el dominio principal actual (por ejemplo `https://petrogas.petroil.dev/`), se deben añadir reglas de proxy inverso en Nginx para que las rutas del bot no caigan en la Single Page Application (SPA / Nuxt):
-
-```nginx
-# Enrutamiento de Webhooks hacia el backend de los bots
-location /webhooks/ {
-    proxy_pass http://127.0.0.1:3000/webhooks/;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-}
-
-# Enrutamiento de la pantalla de Tracking y mapa
-location /tracking/ {
-    proxy_pass http://127.0.0.1:3000/tracking/;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-}
-```
-
----
-
-### Opción 3: Cloudflare Tunnel Persistente en Servidor
-Si el servidor ya gestiona túneles de Cloudflare, se puede definir en el archivo `config.yml` del túnel:
-```yaml
-ingress:
-  - hostname: bots.petroil.dev
-    service: http://localhost:3000
-  - service: http_status:404
-```
-
----
-
-## 5. Configuración de Variables de Entorno (`.env`)
-
-En la raíz del proyecto en el servidor, crear el archivo `.env` con las credenciales requeridas:
-
-```env
-# URL Pública Base (URL con HTTPS donde responderá el bot externamente)
-PUBLIC_BASE_URL=https://bots.petroil.dev
-
-# Meta / Messenger API
-MESSENGER_VERIFY_TOKEN=petroil_gas_webhook_secret
-MESSENGER_PAGE_ACCESS_TOKEN=<PAGE_ACCESS_TOKEN>
-MESSENGER_APP_SECRET=<APP_SECRET>
-
-# Telegram API
-TELEGRAM_BOT_TOKEN=<TELEGRAM_CLIENT_BOT_TOKEN>
-DRIVER_BOT_TOKEN=<TELEGRAM_DRIVER_BOT_TOKEN>
-
-# Inteligencia Artificial / LLM
-GEMINI_API_KEY=<GEMINI_API_KEY>
-
-# ERP / Backend API
-NEXT_PUBLIC_API_URL=https://petrogas.petroil.dev
-```
-
----
-
-## 6. Parámetros para Meta for Developers (Webhooks)
-
-Una vez habilitado el enrutamiento público en el servidor, los valores a registrar en el panel de **Meta for Developers > Messenger > Webhooks** son:
-
-| Parámetro | Valor Configurado |
-| :--- | :--- |
-| **URL de devolución de llamada (Callback URL)** | `https://<DOMINIO_PUBLICO>/webhooks/messenger` |
-| **Token de verificación (Verify Token)** | `petroil_gas_webhook_secret` |
-| **Campos de suscripción requeridos** | `messages`, `messaging_postbacks`, `message_deliveries` |
-
----
-
-## 7. Configuración como Servicio Persistente (`systemd`)
-
-Para garantizar que el servicio se reinicie automáticamente ante fallos o reinicios del servidor:
-
-Crear archivo `/etc/systemd/system/gas-bots.service`:
-```ini
-[Unit]
-Description=Servicio de Bots y Webhooks Petroil
-After=network.target
-
-[Service]
-User=www-data
-WorkingDirectory=/var/www/gas_a_tu_casa_bots
-ExecStart=/var/www/gas_a_tu_casa_bots/.venv/bin/uvicorn src.app:app --host 0.0.0.0 --port 3000
-Restart=always
-RestartSec=5
-EnvironmentFile=/var/www/gas_a_tu_casa_bots/.env
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Habilitar y arrancar el servicio:
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable gas-bots
-sudo systemctl start gas-bots
-sudo systemctl status gas-bots
-```
+2. **Habilitar el acceso público (URL / Webhook):**
+   - Proporcionar o configurar una URL pública con HTTPS (ya sea mediante un subdominio o una ruta dentro del dominio existente) que apunte al servicio de los bots.
+   - Con esta URL fija, se configurará Meta for Developers de forma definitiva para que las notificaciones de Messenger, la PWA y el tracking queden enlazados de manera permanente.
