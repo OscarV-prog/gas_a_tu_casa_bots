@@ -4,9 +4,16 @@ __pycache__
 *.pyc
 *.pyo
 *.pyd
+.env
 .env.local
 cloudflared.exe
 scratch/
 backups/
 .tempmediaStorage/
 .user_uploaded/
+data/
+uploads/
+*.db
+*.sqlite
+*.sqlite3
+

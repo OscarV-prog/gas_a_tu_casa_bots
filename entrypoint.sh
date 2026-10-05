@@ -13,21 +13,21 @@ if [ "$1" = "all" ]; then
     API_PID=$!
 
     # 2. Bot de Telegram para Clientes (Ventas / Pedidos)
-    if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+    if [ -n "$TELEGRAM_BOT_TOKEN" ] || [ -n "$API_BASE_URL" ]; then
         echo "[2/3] Iniciando Bot de Telegram para Clientes..."
         python telegram_bot.py &
         TELEGRAM_PID=$!
     else
-        echo "[2/3] TELEGRAM_BOT_TOKEN no configurado en .env (omitido)."
+        echo "[2/3] TELEGRAM_BOT_TOKEN / API_BASE_URL no configurado (omitido)."
     fi
 
     # 3. Bot de Telegram para Choferes (Despacho / GPS)
-    if [ -n "$DRIVER_BOT_TOKEN" ]; then
+    if [ -n "$DRIVER_BOT_TOKEN" ] || [ -n "$TELEGRAM_DRIVER_BOT_TOKEN" ] || [ -n "$API_BASE_URL" ]; then
         echo "[3/3] Iniciando Bot de Telegram para Choferes..."
         python driver_bot.py &
         DRIVER_PID=$!
     else
-        echo "[3/3] DRIVER_BOT_TOKEN no configurado en .env (omitido)."
+        echo "[3/3] DRIVER_BOT_TOKEN / API_BASE_URL no configurado (omitido)."
     fi
 
     # Manejar señales de apagado limpio
