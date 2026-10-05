@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  gas-bots:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gas_a_tu_casa_bots
+    restart: always
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+      - ./petroil.db:/app/petroil.db

@@ -1,0 +1,12 @@
+.git
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env.local
+cloudflared.exe
+scratch/
+backups/
+.tempmediaStorage/
+.user_uploaded/
