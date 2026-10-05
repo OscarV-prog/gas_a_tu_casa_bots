@@ -899,12 +899,13 @@ async def comando_turno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 mins = s.get("duration_minutes") or 0
                 dur = f"{mins // 60}h {mins % 60}m" if mins >= 60 else f"{mins}m"
                 historial_txt += f"\n• 📅 **{d_date}**: 🟢 {h_in} ➔ 🔴 {h_out} (⏱️ {dur})"
+        fallback_historial = "\n(No hay turnos registrados)"
         msg = (
             f"🔴 **Actualmente estás FUERA DE TURNO**\n\n"
             f"👤 Chofer: **{driver.name}**\n"
             f"🚘 Unidad: **{driver.vehicle_plate}**\n\n"
             f"📋 **Últimas Jornadas:**"
-            f"{historial_txt or '\n(No hay turnos registrados)'}\n\n"
+            f"{historial_txt or fallback_historial}\n\n"
             "Presiona **'🟢 Iniciar Turno'** para registrar tu hora de entrada hoy."
         )
 
