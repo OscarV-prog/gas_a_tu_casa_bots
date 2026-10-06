@@ -86,7 +86,7 @@ def get_markup_for_flow_response(flow_res: FlowResponse, phone: str = "", user_i
     elif flow_res.action_performed == "show_address_buttons" or flow_res.state == FlowState.WAITING_FOR_ADDRESS_SELECTION:
         repo = get_repository()
         cust = repo.get_customer_by_phone(TENANT_ID, phone) if phone else None
-        if not cust and user_id:
+        if not cust and not phone and user_id:
             cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
         addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if cust and cust.address else [])
         if addrs:
@@ -504,6 +504,7 @@ def detectar_botones_mensaje(respuesta: str, phone: str = "", channel_user_id: s
     es_pregunta_direccion = not es_explicacion_general_o_seguridad and not es_solicitud_escritura_nueva_direccion and any(k in resp_lower for k in [
         "dirección registrada", "direccion registrada", "direcciones registradas",
         "direcciones guardadas", "dirección guardada", "direccion guardada",
+        "dirección(es) guardadas", "direccion(es) guardadas",
         "domicilio registrado", "domicilios registrados", "domicilio guardado", "domicilios guardados",
         "siguientes direcciones", "direcciones para ti",
         "seleccionar tu dirección", "seleccionar tu direccion",
@@ -513,6 +514,7 @@ def detectar_botones_mensaje(respuesta: str, phone: str = "", channel_user_id: s
         "seleccionar tu domicilio", "seleccionar domicilio", "selecciona tu domicilio",
         "botones interactivos", "botones interactivos de la pantalla", "botones de la pantalla",
         "a cuál de tus direcciones", "cual de tus direcciones",
+        "a cuál de tus", "a cual de tus",
         "a cuál de estas direcciones", "cual de estas direcciones",
         "a cuál de ellas", "a cual de ellas",
         "a cuál de esas direcciones", "a cual de esas direcciones",
@@ -522,6 +524,7 @@ def detectar_botones_mensaje(respuesta: str, phone: str = "", channel_user_id: s
         "deseas recibir tu pedido en", "deseas recibirlo en",
         "prefieres proporcionar una nueva dirección", "prefieres proporcionar una nueva direccion",
         "ingresar una nueva dirección", "ingresar una nueva direccion",
+        "ingresar una nueva", "prefieres ingresar una nueva",
         "proporcionar una nueva dirección", "proporcionar una nueva direccion",
         "cuál de tus domicilios", "cual de tus domicilios",
         "en cuál de tus direcciones", "en cual de tus direcciones",
@@ -532,9 +535,9 @@ def detectar_botones_mensaje(respuesta: str, phone: str = "", channel_user_id: s
         cust = None
         if phone:
             cust = repo.get_customer_by_phone(TENANT_ID, phone)
-        if not cust and channel_user_id:
+        elif channel_user_id:
             cust = repo.get_customer(TENANT_ID, "telegram", str(channel_user_id))
-        if not cust:
+        if not cust and not phone:
             match_resp_phone = re.search(r"\b(\d{10})\b", respuesta)
             if match_resp_phone:
                 cust = repo.get_customer_by_phone(TENANT_ID, match_resp_phone.group(1))
@@ -949,26 +952,27 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     thread_id = f"telegram:{TENANT_ID}:{chat_id}"
 
     # 3. Control de seguridad y vinculación de teléfono con el usuario de Telegram
-    bound_cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
-    if bound_cust and bound_cust.phone:
-        context.user_data["phone"] = bound_cust.phone
-        if hasattr(repo, "bind_telegram_user_phone"):
-            repo.bind_telegram_user_phone(str(user_id), bound_cust.phone)
-    else:
-        if len(found_phones) == 1:
-            digits = re.sub(r"\D", "", found_phones[0])
-            if len(digits) == 10:
-                context.user_data["phone"] = digits
-                if hasattr(repo, "bind_telegram_user_phone"):
-                    repo.bind_telegram_user_phone(str(user_id), digits)
-        elif len(found_phones) > 1:
-            context.user_data.pop("phone", None)
-
-    if not context.user_data.get("phone") and user_id:
-        from src.repositories.identity_store import identity_store
-        mapped_phone = identity_store.get_phone_for_channel_user("telegram", str(user_id))
-        if mapped_phone:
-            context.user_data["phone"] = mapped_phone
+    if len(found_phones) == 1:
+        digits = re.sub(r"\D", "", found_phones[0])
+        if len(digits) == 10:
+            context.user_data["phone"] = digits
+            from src.repositories.identity_store import identity_store
+            identity_store.bind_channel_user_phone("telegram", str(user_id), digits)
+            if hasattr(repo, "bind_telegram_user_phone"):
+                repo.bind_telegram_user_phone(str(user_id), digits)
+    elif len(found_phones) > 1:
+        context.user_data.pop("phone", None)
+    elif not context.user_data.get("phone"):
+        bound_cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
+        if bound_cust and bound_cust.phone:
+            context.user_data["phone"] = bound_cust.phone
+            if hasattr(repo, "bind_telegram_user_phone"):
+                repo.bind_telegram_user_phone(str(user_id), bound_cust.phone)
+        elif user_id:
+            from src.repositories.identity_store import identity_store
+            mapped_phone = identity_store.get_phone_for_channel_user("telegram", str(user_id))
+            if mapped_phone:
+                context.user_data["phone"] = mapped_phone
 
     phone_ctx = context.user_data.get("phone", "")
     if phone_ctx and hasattr(repo, "bind_telegram_user_phone"):
@@ -992,8 +996,19 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             tenant_id=TENANT_ID,
         )
 
-        phone_ctx = context.user_data.get("phone", "")
-        inline_markup = get_markup_for_flow_response(flow_res, phone=phone_ctx, user_id=str(user_id))
+        flow_session = flow_router.get_session(thread_id)
+        active_phone = (
+            (flow_session.draft_order.customer_phone if flow_session and flow_session.draft_order else "")
+            or context.user_data.get("phone", "")
+        )
+        if active_phone:
+            context.user_data["phone"] = active_phone
+            from src.repositories.identity_store import identity_store
+            identity_store.bind_channel_user_phone("telegram", str(user_id), active_phone)
+            if hasattr(repo, "bind_telegram_user_phone"):
+                repo.bind_telegram_user_phone(str(user_id), active_phone)
+
+        inline_markup = get_markup_for_flow_response(flow_res, phone=active_phone, user_id=str(user_id))
         respuesta = optimizar_respuesta_con_botones(flow_res.text, inline_markup)
 
         max_len = 4000
@@ -1056,7 +1071,13 @@ async def recibir_ubicacion_cliente(
             tenant_id=TENANT_ID,
         )
 
-        phone_ctx = context.user_data.get("phone", "")
+        flow_session = flow_router.get_session(thread_id)
+        phone_ctx = (
+            (flow_session.draft_order.customer_phone if flow_session and flow_session.draft_order else "")
+            or context.user_data.get("phone", "")
+        )
+        if phone_ctx:
+            context.user_data["phone"] = phone_ctx
         inline_markup = get_markup_for_flow_response(flow_res, phone=phone_ctx, user_id=str(user_id))
         respuesta = optimizar_respuesta_con_botones(flow_res.text, inline_markup)
         await safe_reply_text(update.message, respuesta, reply_markup=inline_markup)
@@ -1121,7 +1142,13 @@ async def recibir_voz_cliente(
             tenant_id=TENANT_ID,
         )
 
-        phone_ctx = context.user_data.get("phone", "")
+        flow_session = flow_router.get_session(thread_id)
+        phone_ctx = (
+            (flow_session.draft_order.customer_phone if flow_session and flow_session.draft_order else "")
+            or context.user_data.get("phone", "")
+        )
+        if phone_ctx:
+            context.user_data["phone"] = phone_ctx
         inline_markup = get_markup_for_flow_response(flow_res, phone=phone_ctx, user_id=str(user_id))
         respuesta = optimizar_respuesta_con_botones(flow_res.text, inline_markup)
 
@@ -1155,7 +1182,10 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
         context.user_data.pop("awaiting_rating_comment_order_id", None)
         context.user_data.pop("awaiting_rating_time", None)
 
-    if not context.user_data.get("phone") and user_id:
+    flow_session = flow_router.get_session(thread_id)
+    if flow_session and flow_session.draft_order and flow_session.draft_order.customer_phone:
+        context.user_data["phone"] = flow_session.draft_order.customer_phone
+    elif not context.user_data.get("phone") and user_id:
         from src.repositories.identity_store import identity_store
         mapped_phone = identity_store.get_phone_for_channel_user("telegram", str(user_id))
         if mapped_phone:
@@ -1285,7 +1315,7 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
             if phone:
                 context.user_data["phone"] = phone
         cust = repo.get_customer_by_phone(TENANT_ID, phone) if phone else None
-        if not cust and user_id:
+        if not cust and not phone and user_id:
             cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
 
         if not cust or not cust.addresses:
@@ -1323,7 +1353,7 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
             if phone:
                 context.user_data["phone"] = phone
         cust = repo.get_customer_by_phone(TENANT_ID, phone) if phone else None
-        if not cust and user_id:
+        if not cust and not phone and user_id:
             cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
 
         target_addr = None
@@ -1384,7 +1414,7 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
             if phone:
                 context.user_data["phone"] = phone
         cust = repo.get_customer_by_phone(TENANT_ID, phone) if phone else None
-        if not cust and user_id:
+        if not cust and not phone and user_id:
             cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
 
         target_addr = None
@@ -1446,7 +1476,7 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
             if phone:
                 context.user_data["phone"] = phone
         cust = repo.get_customer_by_phone(TENANT_ID, phone) if phone else None
-        if not cust and user_id:
+        if not cust and not phone and user_id:
             cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
 
         addrs = cust.addresses if (cust and cust.addresses) else []

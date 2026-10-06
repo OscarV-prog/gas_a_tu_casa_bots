@@ -322,7 +322,7 @@ def detect_correction_or_backtracking_intent(
     phone_patterns = [
         r"cambiar\s+(?:de\s+|el\s+|mi\s+)?(?:tel[eé]fono|celular|cel|n[uú]mero|num|núm)",
         r"corregir\s+(?:el\s+|mi\s+)?(?:tel[eé]fono|celular|cel|n[uú]mero|num|núm)",
-        r"me\s+equivoqu\w*\s+(?:de\s+|al\s+(?:poner|escribir)\s+(?:mi\s+)?)?(?:tel[eé]fono|celular|cel|n[uú]mero|num|núm)",
+        r"me\s+(?:equivoqu|equivcoqu|equiv)\w*\s+(?:de\s+|al\s+(?:poner|escribir)\s+(?:mi\s+)?)?(?:tel[eé]fono|celular|cel|n[uú]mero|num|núm)",
         r"no\s+es\s+mi\s+(?:tel[eé]fono|celular|cel|n[uú]mero|num|núm)",
         r"puse\s+mal\s+(?:el\s+|mi\s+)?(?:tel[eé]fono|celular|cel|n[uú]mero|num|núm)",
         r"otr[ao]\s+(?:tel[eé]fono|celular|cel|n[uú]mero|num|núm)",
@@ -1682,7 +1682,7 @@ class FlowRouter:
                     or (identity_store.get_phone_for_channel_user(session.channel, session.channel_user_id) if session.channel and session.channel_user_id else None)
                 )
                 cust = repo.get_customer_by_phone(session.tenant_id, phone_val) if phone_val else None
-                if not cust and session.channel_user_id:
+                if not cust and not phone_val and session.channel_user_id:
                     cust = repo.get_customer(session.tenant_id, session.channel, session.channel_user_id)
 
                 addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if (cust and cust.address) else [])
@@ -2157,6 +2157,8 @@ class FlowRouter:
                 or (identity_store.get_phone_for_channel_user(session.channel, session.channel_user_id) if session.channel and session.channel_user_id else None)
             )
             cust = repo.get_customer_by_phone(session.tenant_id, phone_val) if phone_val else None
+            if not cust and not phone_val and session.channel_user_id:
+                cust = repo.get_customer(session.tenant_id, session.channel, session.channel_user_id)
             addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if (cust and cust.address) else [])
             # 1. Opción numerada ("la 1", "opción 1", "1", "la primera")
             m_num = re.search(r"\b([1-9])\b", text) or ("primera" in text.lower() and "1")
@@ -2757,11 +2759,19 @@ class FlowRouter:
         if cust and cust.name:
             draft.is_existing_customer = True
             draft.customer_name = cust.name
-            session.state = FlowState.WAITING_FOR_ADDRESS_SELECTION
 
-            addrs = cust.addresses if cust.addresses else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if cust.address else [])
+            addrs = cust.addresses if cust.addresses else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if cust and cust.address else [])
             num_addrs = len(addrs)
 
+            if num_addrs == 0:
+                session.state = FlowState.WAITING_FOR_NEW_CUSTOMER_ADDRESS
+                return FlowResponse(
+                    text=f"¡Hola de nuevo, **{cust.name}**! 👋 Qué gusto atenderte.\n\n"
+                         "Veo que aún no tienes direcciones guardadas en tu cuenta. Por favor escribe tu **dirección de entrega completa** (calle, número, colonia y referencias) o comparte tu **ubicación GPS** 📍:",
+                    state=session.state,
+                )
+
+            session.state = FlowState.WAITING_FOR_ADDRESS_SELECTION
             return FlowResponse(
                 text=f"¡Hola de nuevo, **{cust.name}**! 👋 Qué gusto atenderte.\n\n"
                      f"¿A cuál de tus {num_addrs} dirección(es) guardadas deseas que enviemos tu pedido o prefieres ingresar una nueva?",

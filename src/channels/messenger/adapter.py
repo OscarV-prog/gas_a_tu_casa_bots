@@ -888,7 +888,7 @@ class MessengerAdapter(ChannelAdapter):
                 pass
 
             cust = repo.get_customer_by_phone(tenant_id, phone_to_search) if phone_to_search else None
-            if not cust:
+            if not cust and not phone_to_search:
                 cust = repo.get_customer(tenant_id, "messenger", psid)
 
             addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if cust and cust.address else [])
