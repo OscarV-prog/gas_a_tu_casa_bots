@@ -19,6 +19,8 @@ class Product(BaseModel):
     in_stock: bool = True
     is_promoted: bool = False
     promotion_text: str = ""
+    original_price: float | None = None
+    promo_discount: float = 0.0
 
     def to_display(self) -> str:
         """Format product for LLM / user display."""
