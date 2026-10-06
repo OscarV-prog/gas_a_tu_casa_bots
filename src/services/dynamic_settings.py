@@ -93,18 +93,31 @@ def fetch_remote_settings(force_refresh: bool = False, timeout: int = 4) -> dict
 
 
 def get_dynamic_setting(key: str, default: str = "", force_refresh: bool = False) -> str:
-    """Retrieve setting dynamically, prioritizing remote settings then environment fallback."""
+    """Retrieve setting, prioritizing local environment (.env) first, then remote backend settings."""
+    # 1. Primero buscar en variables de entorno locales (.env / os.environ)
+    env_val = os.getenv(key)
+    if env_val and env_val.strip():
+        return env_val.strip()
+
+    # Buscar en aliases de variables de entorno locales
+    for primary_key, aliases in _KEY_MAPPINGS.items():
+        if key == primary_key or key in aliases:
+            for alias in [primary_key] + aliases:
+                val = os.getenv(alias)
+                if val and val.strip():
+                    return val.strip()
+
+    # 2. Si no está en el .env local, buscar en el endpoint remoto del backend central
     settings = fetch_remote_settings(force_refresh=force_refresh)
     if key in settings and settings[key]:
         return settings[key]
 
-    # Check aliases
+    # Buscar aliases en configuraciones remotas
     for primary_key, aliases in _KEY_MAPPINGS.items():
         if key in aliases and primary_key in settings and settings[primary_key]:
             return settings[primary_key]
 
-    # Fallback to os.getenv or provided default
-    return os.getenv(key, default)
+    return default
 
 
 def invalidate_dynamic_settings_cache(clear_cache: bool = True) -> None:
