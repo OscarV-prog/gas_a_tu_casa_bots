@@ -46,6 +46,18 @@ def _tokenize(text: str) -> set[str]:
     return {_stem(w) for w in words if len(w) >= 2}
 
 
+try:
+    from zoneinfo import ZoneInfo
+    MAZATLAN_TZ = ZoneInfo("America/Mazatlan")
+except Exception:
+    MAZATLAN_TZ = timezone(timedelta(hours=-7))
+
+
+def get_local_now() -> datetime:
+    """Retorna la fecha y hora local actual de Mazatlán (UTC-7) como datetime naive."""
+    return datetime.now(MAZATLAN_TZ).replace(tzinfo=None)
+
+
 def parse_schedule_deadline(schedule: str, ref_time: datetime | None = None) -> datetime | None:
     """Parse natural language Spanish delivery schedule into a target datetime.
     
@@ -58,11 +70,15 @@ def parse_schedule_deadline(schedule: str, ref_time: datetime | None = None) -> 
     if not schedule:
         return None
     s = schedule.strip().lower()
-    if any(w in s for w in ["lo antes posible", "inmediato", "urgente", "ahorita", "ahora"]):
+    if any(w in s for w in [
+        "lo antes posible", "inmediato", "urgente", "ahorita", "ahora", "asap",
+        "lo mas pronto", "lo más pronto", "ya mismo", "ya", "en cuanto puedan",
+        "cuanto antes", "al momento", "lo antes que se pueda"
+    ]):
         return None
 
     if ref_time is None:
-        ref_time = datetime.now()
+        ref_time = get_local_now()
 
     # 1. Try direct ISO format (including UTC Z and offsets)
     clean_iso = schedule.strip()
@@ -217,20 +233,20 @@ def normalize_schedule_datetime(val: Any, ref_time: datetime | None = None) -> d
     if not val:
         return None
     if ref_time is None:
-        ref_time = datetime.now()
+        ref_time = get_local_now()
     if isinstance(val, datetime):
-        return val.astimezone().replace(tzinfo=None) if val.tzinfo else val
+        return val.astimezone(MAZATLAN_TZ).replace(tzinfo=None) if val.tzinfo else val
     val_str = str(val).strip()
     if not val_str:
         return None
 
     # Si es "lo antes posible" / inmediato:
-    # Si la gasera ya cerró (>= 19:00 hrs), se programa para mañana a las 8:00 AM
-    if any(w in val_str.lower() for w in ["lo antes posible", "inmediato", "urgente", "ahorita", "ahora"]):
-        if ref_time.hour >= 19:
-            return datetime.combine(ref_time.date() + timedelta(days=1), datetime.min.time()).replace(hour=8, minute=0)
-        elif ref_time.hour < 8:
-            return datetime.combine(ref_time.date(), datetime.min.time()).replace(hour=8, minute=0)
+    # NUNCA programar automáticamente un pedido si el cliente no especificó fecha u hora futura.
+    if any(w in val_str.lower() for w in [
+        "lo antes posible", "inmediato", "urgente", "ahorita", "ahora", "asap",
+        "lo mas pronto", "lo más pronto", "ya mismo", "ya", "en cuanto puedan",
+        "cuanto antes", "al momento", "lo antes que se pueda"
+    ]):
         return None
     clean_iso = val_str
     if clean_iso.endswith("Z"):
@@ -238,13 +254,13 @@ def normalize_schedule_datetime(val: Any, ref_time: datetime | None = None) -> d
     try:
         dt = datetime.fromisoformat(clean_iso)
         if dt.tzinfo:
-            return dt.astimezone().replace(tzinfo=None)
+            return dt.astimezone(MAZATLAN_TZ).replace(tzinfo=None)
         return dt
     except Exception:
         pass
     dt = parse_schedule_deadline(val_str, ref_time)
     if dt and dt.tzinfo is not None:
-        dt = dt.astimezone().replace(tzinfo=None)
+        dt = dt.astimezone(MAZATLAN_TZ).replace(tzinfo=None)
     return dt
 
 
@@ -253,8 +269,9 @@ def to_utc_iso(val: Any, ref_time: datetime | None = None) -> str | None:
     dt = normalize_schedule_datetime(val, ref_time)
     if not dt:
         return None
-    dt_aware = dt.astimezone()
-    dt_utc = dt_aware.astimezone(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=MAZATLAN_TZ)
+    dt_utc = dt.astimezone(timezone.utc)
     return dt_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
@@ -263,9 +280,9 @@ def format_schedule_display(dt: datetime | None, ref_time: datetime | None = Non
     if not dt:
         return "Lo antes posible"
     if ref_time is None:
-        ref_time = datetime.now()
+        ref_time = get_local_now()
     if dt.tzinfo is not None:
-        dt = dt.astimezone().replace(tzinfo=None)
+        dt = dt.astimezone(MAZATLAN_TZ).replace(tzinfo=None)
     is_today = dt.date() == ref_time.date()
     is_tomorrow = dt.date() == (ref_time.date() + timedelta(days=1))
     day_label = "Hoy" if is_today else ("Mañana" if is_tomorrow else dt.strftime("%d/%m/%Y"))
@@ -984,7 +1001,7 @@ class SqliteRepository(ProductRepository):
         scheduled_for: str | None = None,
     ) -> Order:
         """Create a new customer order and order items in SQLite."""
-        now_dt = datetime.now()
+        now_dt = get_local_now()
         now_iso = datetime.now(timezone.utc).isoformat()
         clean_address = resolve_gps_address_to_name(delivery_address.strip())
         if (not clean_address or clean_address.lower().startswith("ubicaci")) and delivery_lat is not None and delivery_lng is not None:
@@ -994,22 +1011,27 @@ class SqliteRepository(ProductRepository):
         clean_schedule = delivery_schedule.strip() if delivery_schedule else "Lo antes posible"
         clean_payment = payment_method.strip() if payment_method else "Efectivo"
 
-        # Check deadline and scheduled status
-        deadline_dt = normalize_schedule_datetime(scheduled_for, now_dt)
-        if not deadline_dt and clean_schedule:
-            deadline_dt = normalize_schedule_datetime(clean_schedule, now_dt)
+        sched_text = str(clean_schedule or "").strip().lower()
+        has_asap_text = any(w in sched_text for w in [
+            "lo antes posible", "inmediato", "urgente", "ahorita", "ahora", "asap",
+            "lo mas pronto", "lo más pronto", "ya mismo", "ya", "en cuanto puedan", "cuanto antes"
+        ]) or clean_schedule == "Lo antes posible"
+        deadline_dt = None
+        if not has_asap_text:
+            if scheduled_for and str(scheduled_for).strip():
+                deadline_dt = normalize_schedule_datetime(scheduled_for, now_dt)
+            elif clean_schedule and clean_schedule != "Lo antes posible":
+                deadline_dt = normalize_schedule_datetime(clean_schedule, now_dt)
 
-        scheduled_for_iso = deadline_dt.isoformat() if deadline_dt else None
-        if deadline_dt and (not clean_schedule or clean_schedule == "Lo antes posible"):
-            clean_schedule = format_schedule_display(deadline_dt, now_dt)
-
-        if deadline_dt:
-            # If scheduled delivery is more than 30 minutes in the future, hold in 'scheduled'
-            if now_dt < (deadline_dt - timedelta(minutes=30)):
-                initial_status = "scheduled"
-            else:
-                initial_status = "confirmed"
+        if deadline_dt and deadline_dt > (now_dt + timedelta(minutes=15)):
+            scheduled_for_iso = deadline_dt.isoformat()
+            if not clean_schedule or clean_schedule == "Lo antes posible":
+                clean_schedule = format_schedule_display(deadline_dt, now_dt)
+            initial_status = "scheduled" if now_dt < (deadline_dt - timedelta(minutes=30)) else "confirmed"
         else:
+            deadline_dt = None
+            scheduled_for_iso = None
+            clean_schedule = "Lo antes posible"
             initial_status = "confirmed"
 
         # Find or create customer
@@ -1054,9 +1076,10 @@ class SqliteRepository(ProductRepository):
         for raw_item in items:
             product_id = str(raw_item.get("product_id", "")).strip()
             product_name = str(raw_item.get("product_name", "")).strip()
-            quantity = int(raw_item.get("quantity", 1))
-            if quantity <= 0:
-                quantity = 1
+            try:
+                raw_qty = float(raw_item.get("quantity", 1))
+            except (ValueError, TypeError):
+                raw_qty = 1.0
 
             matched_p = prod_map_by_id.get(product_id.lower())
             if not matched_p and product_name:
@@ -1076,7 +1099,59 @@ class SqliteRepository(ProductRepository):
                 p_name = product_name or product_id or "Producto Gas"
                 unit_price = float(raw_item.get("unit_price", 0.0))
 
-            subtotal = unit_price * quantity
+            is_stationary = (
+                matched_p and (
+                    "estacionario" in matched_p.name.lower()
+                    or "litro" in str(getattr(matched_p, "unit", "")).lower()
+                    or str(getattr(matched_p, "category", "")).upper() == "ESTACIONARIO"
+                )
+            ) or ("estacionario" in product_name.lower() or "litro" in product_name.lower())
+
+            # Para gas estacionario: si la cantidad viene pequeña (<= 5) pero se especificó un monto en pesos
+            # (en unit_price, price, amount, total, subtotal o en el nombre del producto ej. '$500 MXN ~ 37.88 L'),
+            # convertir deterministamente a litros reales usando el precio oficial por litro.
+            if is_stationary and unit_price > 0:
+                try:
+                    incoming_price = float(raw_item.get("unit_price", 0.0))
+                except (ValueError, TypeError):
+                    incoming_price = 0.0
+                amt_found = 0.0
+                for a_k in ("amount_pesos", "amount", "total", "subtotal"):
+                    try:
+                        a_val = float(raw_item.get(a_k) or 0.0)
+                    except (ValueError, TypeError):
+                        a_val = 0.0
+                    if a_val > 0:
+                        amt_found = a_val
+                        break
+                if incoming_price > (unit_price * 1.5) and raw_qty <= 5.0:
+                    raw_qty = round(incoming_price / unit_price, 2)
+                elif amt_found > (unit_price * 1.5) and raw_qty <= 5.0:
+                    raw_qty = round(amt_found / unit_price, 2)
+                elif raw_qty <= 5.0:
+                    combined_text = f"{product_name} {raw_item.get('description', '')}".lower()
+                    m_p = re.search(r"\$\s*([\d,]+(?:\.\d+)?)|([\d,]+(?:\.\d+)?)\s*(?:pesos|mxn)", combined_text)
+                    m_l = re.search(r"(\d+(?:\.\d+)?)\s*(?:litros|lts|lt|l)\b", combined_text)
+                    if m_p:
+                        try:
+                            val_pesos = float((m_p.group(1) or m_p.group(2)).replace(",", ""))
+                            if val_pesos > (unit_price * 1.5):
+                                raw_qty = round(val_pesos / unit_price, 2)
+                        except (ValueError, TypeError):
+                            pass
+                    elif m_l:
+                        try:
+                            val_l = float(m_l.group(1))
+                            if val_l > 5.0:
+                                raw_qty = round(val_l, 2)
+                        except (ValueError, TypeError):
+                            pass
+
+            quantity = int(raw_qty) if raw_qty.is_integer() else round(raw_qty, 2)
+            if quantity <= 0:
+                quantity = 1
+
+            subtotal = round(unit_price * quantity, 2)
             total_amount += subtotal
 
             order_items_to_save.append(
@@ -1214,6 +1289,13 @@ class SqliteRepository(ProductRepository):
             scheduled_for = row["scheduled_for"] if "scheduled_for" in keys else None
             driver_message_ids = row["driver_message_ids"] if "driver_message_ids" in keys else None
 
+            canc_info = None
+            try:
+                from src.repositories.identity_store import identity_store
+                canc_info = identity_store.get_order_cancellation(row["id"])
+            except Exception:
+                pass
+
             return Order(
                 id=row["id"],
                 tenant_id=row["tenant_id"],
@@ -1239,6 +1321,8 @@ class SqliteRepository(ProductRepository):
                 assigned_at=assigned_at,
                 delivered_at=delivered_at,
                 scheduled_for=scheduled_for,
+                cancelled_by=canc_info.get("cancelled_by") if canc_info else None,
+                cancellation_reason=canc_info.get("reason") if canc_info else None,
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
                 items=items,
@@ -1467,6 +1551,15 @@ class SqliteRepository(ProductRepository):
         self, tenant_id: str, order_id: int, cancelled_by: str = "customer", reason: str = ""
     ) -> Order | None:
         """Cancel an order, release driver if assigned, and update database."""
+        from src.repositories.identity_store import identity_store
+        identity_store.save_order_cancellation(order_id, cancelled_by=cancelled_by, reason=reason)
+        try:
+            from src.services.order_events import _EVENT_DEDUP_CACHE
+            import time
+            _EVENT_DEDUP_CACHE[f"cancelled:{order_id}"] = time.time()
+        except Exception:
+            pass
+
         order = self.get_order_by_id(tenant_id, order_id)
         if not order:
             return None

@@ -34,6 +34,7 @@ class IdentityStore:
         self._order_live_locations: dict[str, dict[str, Any]] = {}
         self._chat_live_locations: dict[str, dict[str, Any]] = {}
         self._deleted_addresses: dict[str, list[str]] = {}
+        self._order_cancellations: dict[str, dict[str, Any]] = {}
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self._load()
 
@@ -59,6 +60,7 @@ class IdentityStore:
                     self._order_live_locations = data.get("order_live_locations", {})
                     self._chat_live_locations = data.get("chat_live_locations", {})
                     self._deleted_addresses = data.get("deleted_addresses", {})
+                    self._order_cancellations = data.get("order_cancellations", {})
         except Exception as e:
             logger.debug(f"[IdentityStore] Error loading identity cache: {e}")
 
@@ -75,6 +77,7 @@ class IdentityStore:
                 "order_live_locations": self._order_live_locations,
                 "chat_live_locations": self._chat_live_locations,
                 "deleted_addresses": self._deleted_addresses,
+                "order_cancellations": self._order_cancellations,
             }
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -296,8 +299,10 @@ class IdentityStore:
         unique = []
         for r in self._order_ratings.values():
             oid = str(r.get("order_id", ""))
-            if oid and oid not in seen:
-                seen.add(oid)
+            digits = re.findall(r"\d+", oid)
+            norm_key = str(int(digits[-1])) if digits else oid.strip().lower()
+            if norm_key and norm_key not in seen:
+                seen.add(norm_key)
                 unique.append(r)
         return unique
 
@@ -343,6 +348,43 @@ class IdentityStore:
         digits = re.findall(r"\d+", s_id)
         if digits and digits[-1] in self._order_schedules:
             return self._order_schedules[digits[-1]]
+        return None
+
+    def save_order_cancellation(
+        self,
+        order_id: Any,
+        cancelled_by: str = "el cliente",
+        reason: str = "",
+    ) -> None:
+        """Store cancellation details for an order across processes."""
+        if not order_id:
+            return
+        self._load()
+        keys = [str(order_id)]
+        digits = re.findall(r"\d+", str(order_id))
+        if digits:
+            keys.append(digits[-1])
+
+        info = {
+            "order_id": str(order_id),
+            "cancelled_by": str(cancelled_by or "el cliente"),
+            "reason": str(reason or ""),
+        }
+        for k in keys:
+            self._order_cancellations[k] = info
+        self._save()
+
+    def get_order_cancellation(self, order_id: Any) -> dict[str, Any] | None:
+        """Retrieve stored cancellation details for an order."""
+        if not order_id:
+            return None
+        self._load()
+        s_id = str(order_id).strip()
+        if s_id in self._order_cancellations:
+            return self._order_cancellations[s_id]
+        digits = re.findall(r"\d+", s_id)
+        if digits and digits[-1] in self._order_cancellations:
+            return self._order_cancellations[digits[-1]]
         return None
 
     def add_order_client_message(self, order_id: Any, chat_id: str | int, message_id: int) -> None:

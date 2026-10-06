@@ -555,6 +555,7 @@ class WhatsAppAdapter:
     def get_order_active_buttons(self, order_id: int | str) -> list[dict[str, str]]:
         """Interactive buttons for confirmed / active / in-route orders."""
         return [
+            {"id": f"check_order_status:{order_id}", "title": "📍 Ver Estatus"},
             {"id": f"cancel_order_client:{order_id}", "title": "❌ Cancelar Pedido"},
         ]
 

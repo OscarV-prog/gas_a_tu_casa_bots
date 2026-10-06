@@ -283,21 +283,32 @@ async def _process_single_instagram_event(event: dict[str, Any]) -> None:
 
     # Comentario posterior a la calificación CSAT
     rating_ctx = _AWAITING_RATING_COMMENTS.get(igsid)
-    if rating_ctx and (time.time() - rating_ctx.get("time", 0)) < 600 and texto_usuario:
+    if rating_ctx:
+        curr_session = flow_router.get_session(igsid)
+        awaiting_time = rating_ctx.get("time", 0)
+        awaiting_order_id = rating_ctx.get("order_id")
+
+        has_phone_digits = bool(re.search(r"\b\d{7,10}\b", texto_usuario))
         texto_lower = texto_usuario.lower()
-        es_nuevo_pedido = any(k in texto_lower for k in ["quiero", "cilindro", "estacionario", "tanque", "litros", "pedir", "orden", "hola", "/start"])
-        order_id_rating = rating_ctx.get("order_id")
-        if not es_nuevo_pedido and order_id_rating:
+        is_greeting_or_cmd = any(texto_lower.startswith(g) for g in ["hola", "buen", "hey", "/start", "/menu", "inicio", "empezar", "que tal", "buenas", "ayuda"])
+        is_order_intent = any(k in texto_lower for k in [
+            "quiero", "cilindro", "estacionario", "tanque", "litros", "pedir", "orden", "gas",
+            "recarga", "precio", "cuanto", "cuánto", "30", "20", "45", "10", "5", "kilos", "kg", "nuevo"
+        ])
+        is_in_active_order = curr_session.state not in (FlowState.INITIAL, FlowState.COMPLETED, FlowState.CANCELLED)
+
+        # Si el usuario escribe su teléfono, saluda, pide gas, ya está en un flujo de pedido o pulsó un botón interactivo:
+        if has_phone_digits or is_greeting_or_cmd or is_order_intent or is_in_active_order or (time.time() - awaiting_time) >= 600 or interactive_id:
             _AWAITING_RATING_COMMENTS.pop(igsid, None)
-            repo.update_order_rating_feedback(TENANT_ID, order_id_rating, comment=texto_usuario)
+        elif awaiting_order_id and texto_usuario:
+            _AWAITING_RATING_COMMENTS.pop(igsid, None)
+            repo.update_order_rating_feedback(TENANT_ID, awaiting_order_id, comment=texto_usuario)
             await adapter.send_text_message(
                 igsid,
                 "📝 **¡Comentario registrado!**\n\n"
                 "Muchas gracias por compartirnos tu opinión detallada. Tus comentarios han sido guardados para el equipo de calidad de Petroil. ¡Que tengas un excelente día! ⛽🌟"
             )
             return
-        else:
-            _AWAITING_RATING_COMMENTS.pop(igsid, None)
 
     # -------------------------------------------------------------------------
     # 2. Manejo de Notas de Voz / Audio
@@ -362,6 +373,7 @@ async def _process_single_instagram_event(event: dict[str, Any]) -> None:
     # 5. Mapeo de Acciones Interactivas de Botones y Carrito
     # -------------------------------------------------------------------------
     if interactive_id:
+        _AWAITING_RATING_COMMENTS.pop(igsid, None)
         # Verificación si el pedido consultado ya fue entregado / cerrado
         cust = repo.get_customer(TENANT_ID, "instagram", igsid)
         user_phone = (cust.phone if cust else None) or identity_store.get_phone_for_channel_user("instagram", igsid)
@@ -745,6 +757,40 @@ async def _process_single_instagram_event(event: dict[str, Any]) -> None:
             )
             return
 
+        elif interactive_id.startswith("check_order_status:"):
+            order_id = int(interactive_id.split(":")[1])
+            order = repo.get_order_by_id(TENANT_ID, order_id)
+            if not order:
+                await adapter.send_text_message(igsid, "⚠️ Pedido no encontrado.")
+                return
+
+            from src.tools.get_order_status import format_clean_driver_status
+            status_text = format_clean_driver_status(order, repo=repo)
+            status_raw = str(getattr(order, "status", "")).lower()
+
+            if status_raw in ("confirmed", "confirmado", "in_route", "en_ruta", "scheduled", "programado", "assigned"):
+                buttons = adapter.get_order_active_quick_replies(order_id)
+                await adapter.send_quick_replies(
+                    recipient_igsid=igsid,
+                    text=status_text,
+                    quick_replies=buttons,
+                )
+            else:
+                await adapter.send_text_message(igsid, status_text)
+            return
+
+        elif interactive_id.startswith("client_prod:"):
+            prod_text = interactive_id.split(":", 1)[1]
+            flow_res = await flow_router.process_event(
+                session_id=igsid,
+                text=prod_text,
+                channel="instagram",
+                channel_user_id=igsid,
+                tenant_id=TENANT_ID,
+            )
+            await _dispatch_flow_response_instagram(flow_res, igsid=igsid)
+            return
+
         elif interactive_id.startswith("confirm_cancel_order_client:"):
             order_id = int(interactive_id.split(":")[1])
             order = repo.get_order_by_id(TENANT_ID, order_id)
@@ -752,17 +798,34 @@ async def _process_single_instagram_event(event: dict[str, Any]) -> None:
                 await adapter.send_text_message(igsid, "⚠️ Pedido no encontrado.")
                 return
 
-            repo.cancel_order(TENANT_ID, order_id, cancelled_by="el cliente")
+            identity_store.clear_order_live_location(order_id)
 
+            # Cancelar orden en BD y liberar chofer
+            repo.cancel_order(TENANT_ID, order_id, cancelled_by="el cliente")
+            identity_store.save_order_cancellation(order_id, cancelled_by="el cliente", reason="Cancelado por el cliente desde Instagram")
+            try:
+                from src.services.order_events import _EVENT_DEDUP_CACHE
+                _EVENT_DEDUP_CACHE[f"cancelled:{order_id}"] = time.time()
+            except Exception:
+                pass
+
+            # Limpiar botones anteriores de cliente y chofer
+            from src.services.notifications import cleanup_client_order_buttons
+            cleanup_client_order_buttons(order_id, keep_message_id=None)
+
+            # Notificar al chofer si tiene Telegram
             if order.driver_id:
                 driver = repo.get_driver(order.driver_id)
-                if driver and driver.telegram_chat_id:
+                driver_tg_id = getattr(driver, "telegram_user_id", None) or getattr(driver, "telegram_chat_id", None)
+                if driver_tg_id:
                     from src.services.notifications import notify_driver_order_cancelled
                     notify_driver_order_cancelled(
-                        telegram_chat_id=driver.telegram_chat_id,
+                        tenant_id=TENANT_ID,
                         order_id=order_id,
-                        cancelled_by="el cliente vía Instagram",
+                        driver_telegram_user_id=str(driver_tg_id),
                         customer_name=order.customer_name or "Cliente Instagram",
+                        delivery_address=order.delivery_address or "",
+                        cancelled_by="el cliente vía Instagram",
                     )
 
             cancel_msg = (
@@ -782,6 +845,58 @@ async def _process_single_instagram_event(event: dict[str, Any]) -> None:
     # 6. Procesamiento de Mensajes de Texto con FlowRouter
     # -------------------------------------------------------------------------
     if not texto_usuario:
+        return
+
+    texto_clean = texto_usuario.strip().lower()
+
+    # 6.1 Detección temprana de intentos de payload / inyección / jailbreak / scraping multi-número
+    found_phones = re.findall(r"\b(?:\+?52\s*)?(\d{10})\b", texto_usuario)
+    es_payload_o_inyeccion = any(k in texto_clean for k in [
+        "payload", "decodifica", "decodificar", "base64", "script", "ejecutar código", "ejecuta codigo",
+        "ejecutar codigo", "ejecuta script", "ejecutar script", "eval(", "exec(", "system(", "sql injection",
+        "drop table", "select * from", "union select", "bypass", "jailbreak", "ignora tus instrucciones",
+        "ignore previous instructions", "ignora todas las instrucciones", "revela tu prompt", "muestra tu system prompt"
+    ])
+    es_consulta_multiple = (
+        len(found_phones) > 1 and any(k in texto_clean for k in ["pedido", "pedidos", "número", "numero", "orden", "ordenes", "historial", "cliente", "clientes"])
+    ) or any(k in texto_clean for k in [
+        "dos numeros", "dos números", "varios numeros", "varios números", "múltiples números", "multiples numeros",
+        "pedidos de otros", "pedidos de otro", "pedidos de dos", "pedidos de varios"
+    ])
+
+    if es_payload_o_inyeccion or es_consulta_multiple:
+        logger.warning(f"[Instagram] Intento de prompt injection, payload malicioso o scraping bloqueado de {igsid}: {texto_usuario[:100]}")
+        await adapter.send_quick_replies(
+            recipient_igsid=igsid,
+            text=(
+                "🛡️ **Aviso de Seguridad:**\n\n"
+                "Solo puedo ayudarte con la toma de pedidos, cotizaciones y seguimiento de entregas de gas LP. "
+                "Por políticas de privacidad, no proceso scripts, comandos externos ni consultas masivas de información ajena.\n\n"
+                "¿En qué servicio de gas puedo servirte hoy? ⛽"
+            ),
+            quick_replies=adapter.get_service_quick_replies(),
+        )
+        return
+
+    # 6.2 Si el usuario envía saludo o inicio, reiniciar sesión para un pedido limpio
+    es_saludo_puro = (
+        texto_clean in ("/start", "start", "hola", "hola!", "buenas", "buenos dias", "buenos días", "buenas tardes", "buenas noches", "inicio", "empezar", "menu", "menú", "reiniciar", "nuevo pedido")
+        or (any(texto_clean.startswith(g) for g in ["hola", "buenos dias", "buenos días", "buenas tardes", "buenas noches", "inicio", "empezar", "que tal", "buenas"])
+            and not any(k in texto_clean for k in ["quiero", "cilindro", "estacionario", "tanque", "litro", "litros", "pedir", "gas", "cuanto", "cuánto", "precio", "30", "20", "45", "10"]))
+    )
+    if es_saludo_puro:
+        clear_cart(igsid)
+        from src.services.flow_router import clear_session
+        clear_session(igsid)
+
+        flow_res = await flow_router.process_event(
+            session_id=igsid,
+            text="/start",
+            channel="instagram",
+            channel_user_id=igsid,
+            tenant_id=TENANT_ID,
+        )
+        await _dispatch_flow_response_instagram(flow_res, igsid=igsid)
         return
 
     # Si es un nuevo cliente en Instagram, intentar recuperar su perfil de Meta
@@ -929,9 +1044,7 @@ async def _dispatch_flow_response_instagram(flow_res: FlowResponse, igsid: str) 
             await adapter.send_quick_replies(
                 recipient_igsid=igsid,
                 text=respuesta,
-                quick_replies=[
-                    {"id": f"cancel_order_client:{order_id}", "title": "❌ Cancelar Pedido"}
-                ],
+                quick_replies=adapter.get_order_active_quick_replies(order_id),
             )
             return
         await adapter.send_text_message(igsid, respuesta)

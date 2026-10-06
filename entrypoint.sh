@@ -12,6 +12,10 @@ if [ "$1" = "all" ]; then
     uvicorn src.app:app --host 0.0.0.0 --port 3000 &
     API_PID=$!
 
+    # Intentar sincronizar configuraciones remotas desde el backend central
+    echo "[Info] Verificando configuraciones dinámicas desde el backend central..."
+    python -c "from src.services.dynamic_settings import fetch_remote_settings; fetch_remote_settings(force_refresh=True)" 2>/dev/null || true
+
     # 2. Bot de Telegram para Clientes (Ventas / Pedidos)
     if [ -n "$TELEGRAM_BOT_TOKEN" ] || [ -n "$API_BASE_URL" ]; then
         echo "[2/3] Iniciando Bot de Telegram para Clientes..."
@@ -33,8 +37,8 @@ if [ "$1" = "all" ]; then
     # Manejar señales de apagado limpio
     trap "echo 'Deteniendo servicios...'; kill -TERM $API_PID $TELEGRAM_PID $DRIVER_PID 2>/dev/null; exit 0" SIGTERM SIGINT
 
-    # Mantener el contenedor vivo mientras corran los servicios
-    wait -n
+    # Mantener el contenedor vivo mientras corra la API principal
+    wait "$API_PID"
     exit $?
 fi
 

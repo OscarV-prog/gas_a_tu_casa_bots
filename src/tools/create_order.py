@@ -81,8 +81,6 @@ def create_order(
 
             if qty <= 0:
                 return f"Error de seguridad: La cantidad para '{p_name}' debe ser mayor a 0."
-            if qty > 50:
-                return f"Error: La cantidad máxima permitida por pedido minorista es de 50 unidades. Para pedidos de mayoreo, por favor contacta a un asesor."
 
             # Buscar en catálogo oficial
             matched_prod = prods_by_id.get(p_id) or prods_by_name.get(p_name.lower())
@@ -93,20 +91,74 @@ def create_order(
                         matched_prod = p
                         break
 
+            is_stationary = (
+                "estacionario" in p_name.lower()
+                or "litro" in p_name.lower()
+                or "pipa" in p_name.lower()
+                or (matched_prod and (
+                    "estacionario" in matched_prod.name.lower()
+                    or "litro" in str(getattr(matched_prod, "unit", "")).lower()
+                    or str(getattr(matched_prod, "category", "")).upper() == "ESTACIONARIO"
+                ))
+            )
+
+            max_qty = 5000.0 if is_stationary else 50.0
+            if qty > max_qty:
+                unit_label = "litros" if is_stationary else "unidades"
+                return f"Error: La cantidad máxima permitida por pedido minorista es de {int(max_qty)} {unit_label}. Para pedidos de mayoreo, por favor contacta a un asesor."
+
             if matched_prod:
                 if not matched_prod.in_stock:
                     return f"Aviso: El producto '{matched_prod.name}' se encuentra temporalmente agotado."
+
+                # Si es gas estacionario y la cantidad vino como 1 o pequeña pero el monto en pesos
+                # viene en unit_price (ej. $500), en un campo de monto o dentro del nombre del producto
+                # (ej. "Recarga de Gas Estacionario ($500.00 MXN ~ 37.88 L)"), convertir a litros
+                # con el precio oficial por litro para respetar el monto que eligió el cliente.
+                if is_stationary and qty <= 5.0 and matched_prod.price and matched_prod.price > 0:
+                    try:
+                        incoming_unit_price = float(it.get("unit_price") or 0.0)
+                    except (ValueError, TypeError):
+                        incoming_unit_price = 0.0
+                    amount_pesos = 0.0
+                    for amt_key in ("amount_pesos", "amount", "total", "subtotal"):
+                        try:
+                            amt_val = float(it.get(amt_key) or 0.0)
+                        except (ValueError, TypeError):
+                            amt_val = 0.0
+                        if amt_val > 0:
+                            amount_pesos = amt_val
+                            break
+                    if incoming_unit_price > (matched_prod.price * 1.5):
+                        qty = round(incoming_unit_price / matched_prod.price, 2)
+                    elif amount_pesos > (matched_prod.price * 1.5):
+                        qty = round(amount_pesos / matched_prod.price, 2)
+                    else:
+                        name_lower = p_name.lower()
+                        m_amt = re.search(r"\$\s*([\d,]+(?:\.\d+)?)|([\d,]+(?:\.\d+)?)\s*(?:pesos|mxn)", name_lower)
+                        m_lts = re.search(r"(\d+(?:\.\d+)?)\s*(?:litros|lts|lt|l)\b", name_lower)
+                        amt_from_name = 0.0
+                        if m_amt:
+                            try:
+                                amt_from_name = float((m_amt.group(1) or m_amt.group(2)).replace(",", ""))
+                            except (ValueError, TypeError):
+                                amt_from_name = 0.0
+                        if amt_from_name > (matched_prod.price * 1.5):
+                            qty = round(amt_from_name / matched_prod.price, 2)
+                        elif m_lts and float(m_lts.group(1)) > 5.0:
+                            qty = round(float(m_lts.group(1)), 2)
+
                 validated_items.append({
                     "product_id": matched_prod.id,
                     "product_name": matched_prod.name,
-                    "quantity": int(qty) if qty.is_integer() else qty,
+                    "quantity": int(qty) if qty.is_integer() else round(qty, 2),
                     "unit_price": matched_prod.price,  # PRECIO DETERMINISTA FORZADO DE BD
                 })
             else:
                 validated_items.append({
                     "product_id": p_id or "cilindro-gas",
                     "product_name": p_name or "Cilindro de Gas LP",
-                    "quantity": int(qty) if qty.is_integer() else qty,
+                    "quantity": int(qty) if qty.is_integer() else round(qty, 2),
                 })
 
         clean_addr = resolve_gps_address_to_name(delivery_address.strip())
@@ -126,7 +178,17 @@ def create_order(
         # Asegurar cálculo de scheduled_for si no vino explícito pero el horario no es ASAP
         clean_sched = delivery_schedule.strip() if delivery_schedule else "Lo antes posible"
         clean_sched_for = scheduled_for
-        if (not clean_sched_for or clean_sched_for.strip() == "") and clean_sched and "antes posible" not in clean_sched.lower():
+
+        # Si el cliente solicitó "Lo antes posible" o inmediato, NUNCA autoprogramar
+        is_asap_schedule = any(w in clean_sched.lower() for w in [
+            "lo antes posible", "inmediato", "urgente", "ahorita", "ahora", "asap",
+            "lo mas pronto", "lo más pronto", "ya mismo", "ya", "en cuanto puedan", "cuanto antes"
+        ]) or clean_sched == "Lo antes posible"
+
+        if is_asap_schedule:
+            clean_sched = "Lo antes posible"
+            clean_sched_for = None
+        elif (not clean_sched_for or clean_sched_for.strip() == "") and clean_sched:
             from src.repositories.sqlite_repo import normalize_schedule_datetime, format_schedule_display
             dt_parsed = normalize_schedule_datetime(clean_sched)
             if dt_parsed:
@@ -174,9 +236,12 @@ def create_order(
                 name = getattr(it, "product_name", None) or getattr(it, "name", None) or "Gas LP"
             try:
                 qty_val = float(qty)
-                qty_str = f"{int(qty_val)}" if qty_val.is_integer() else f"{qty_val}"
+                qty_str = f"{int(qty_val)}" if qty_val.is_integer() else f"{qty_val:g}"
             except Exception:
                 qty_str = str(qty)
+            if "estacionario" in name.lower() or "litro" in name.lower():
+                clean_name = re.sub(r"\s*\([^)]*(?:~|L\s*-|\$)[^)]*\)", "", name).strip()
+                return f"{qty_str} L {clean_name}"
             return f"{qty_str}x {name}"
 
         items_summary = ", ".join(_get_item_desc(it) for it in (getattr(updated_order, "items", []) or [])) or "Gas LP"
@@ -186,8 +251,10 @@ def create_order(
         currency_val = getattr(updated_order, "currency", "MXN")
         addr_val = getattr(updated_order, "delivery_address", "")
         sched_val = getattr(updated_order, "delivery_schedule", "")
+        if is_asap_schedule:
+            sched_val = "Lo antes posible"
 
-        if getattr(updated_order, "status", "") == "scheduled":
+        if getattr(updated_order, "status", "") == "scheduled" and not is_asap_schedule:
             return (
                 f"🗓️ *¡Pedido #{order.id} agendado!*\n\n"
                 f"📦 *Detalle:* {items_summary}\n"

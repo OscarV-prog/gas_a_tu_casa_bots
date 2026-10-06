@@ -401,10 +401,11 @@ def send_client_live_location(
 
         ok = _send_instagram_button_template_sync(uid_str, msg_tracking, buttons[:2])
         if ok and order_id:
+            from src.channels.instagram.adapter import InstagramAdapter
             _send_instagram_buttons_sync(
                 uid_str,
-                "💡 Si deseas cancelar este servicio antes de que llegue la unidad, puedes pulsar:",
-                [{"id": f"cancel_order_client:{order_id}", "title": "❌ Cancelar Pedido"}],
+                "💡 Si deseas consultar el estatus o cancelar este servicio, puedes pulsar:",
+                InstagramAdapter().get_order_active_quick_replies(order_id),
             )
         logger.info(f"📍 [send_client_live_location] Instagram live tracking enviado a {uid_str} (order: {order_id}, url: {live_tracker_url or gmaps_nav_url}, ok: {ok})")
         return 777777 if ok else None
@@ -458,11 +459,12 @@ def send_client_live_location(
 
         ok = _send_messenger_button_template_sync(uid_str, msg_tracking, buttons[:2])
         if ok and order_id:
-            # Enviar botón de cancelar como Quick Reply para que desaparezca al entregarse el pedido
+            # Enviar botones como Quick Reply para que desaparezcan al entregarse el pedido
+            from src.channels.messenger.adapter import MessengerAdapter
             _send_messenger_buttons_sync(
                 uid_str,
-                "💡 Si deseas cancelar este servicio antes de que llegue la unidad, puedes pulsar:",
-                [{"id": f"cancel_order_client:{order_id}", "title": "❌ Cancelar Pedido"}],
+                "💡 Si deseas consultar el estatus o cancelar este servicio, puedes pulsar:",
+                MessengerAdapter().get_order_active_quick_replies(order_id),
             )
         logger.info(f"📍 [send_client_live_location] Messenger live tracking enviado a {uid_str} (order: {order_id}, url: {live_tracker_url or gmaps_nav_url}, ok: {ok})")
         return 888888 if ok else None

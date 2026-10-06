@@ -17,7 +17,7 @@ from src.models.vehicle import Vehicle
 from src.models.order import Order, OrderItem
 from src.models.product import Product
 from src.repositories.identity_store import identity_store
-from src.repositories.sqlite_repo import parse_schedule_deadline, normalize_schedule_datetime, format_schedule_display, to_utc_iso
+from src.repositories.sqlite_repo import parse_schedule_deadline, normalize_schedule_datetime, format_schedule_display, to_utc_iso, get_local_now, MAZATLAN_TZ
 from src.services.api_client import api_get, api_post, api_patch, api_put, api_delete
 from src.services.geocoding import geocode_address, resolve_gps_address_to_name
 
@@ -768,7 +768,10 @@ class ApiRepository:
         for it in items:
             p_id = str(it.get("product_id") or it.get("productId") or "")
             p_name = str(it.get("product_name") or it.get("name") or "")
-            qty = int(it.get("quantity") or it.get("qty") or 1)
+            try:
+                raw_qty = float(it.get("quantity") or it.get("qty") or 1)
+            except (ValueError, TypeError):
+                raw_qty = 1.0
 
             # Match against remote product UUID
             matched_prod = prods_by_id.get(p_id) or prods_by_name.get(p_name.lower())
@@ -794,25 +797,90 @@ class ApiRepository:
                 prod_name_clean = p_name or "Cilindro de Gas LP 30 kg"
                 price = float(it.get("unit_price") or 705.0)
 
-            total_calc += price * qty
+            is_stationary = (
+                matched_prod and (
+                    "estacionario" in matched_prod.name.lower()
+                    or "litro" in str(getattr(matched_prod, "unit", "")).lower()
+                    or str(getattr(matched_prod, "category", "")).upper() == "ESTACIONARIO"
+                )
+            ) or ("estacionario" in p_name.lower() or "litro" in p_name.lower())
+
+            # Para gas estacionario: si la cantidad viene pequeña (<= 5) pero se especificó un monto en pesos
+            # (en unit_price, price, amount, total, subtotal o en el nombre del producto ej. '$500 MXN ~ 37.88 L'),
+            # convertir deterministamente a litros reales usando el precio oficial por litro.
+            if is_stationary and price > 0:
+                try:
+                    incoming_price = float(it.get("unit_price") or it.get("price") or 0.0)
+                except (ValueError, TypeError):
+                    incoming_price = 0.0
+                amt_found = 0.0
+                for a_k in ("amount_pesos", "amount", "total", "subtotal"):
+                    try:
+                        a_val = float(it.get(a_k) or 0.0)
+                    except (ValueError, TypeError):
+                        a_val = 0.0
+                    if a_val > 0:
+                        amt_found = a_val
+                        break
+                if incoming_price > (price * 1.5) and raw_qty <= 5.0:
+                    raw_qty = round(incoming_price / price, 2)
+                elif amt_found > (price * 1.5) and raw_qty <= 5.0:
+                    raw_qty = round(amt_found / price, 2)
+                elif raw_qty <= 5.0:
+                    combined_text = f"{p_name} {it.get('description', '')}".lower()
+                    m_p = re.search(r"\$\s*([\d,]+(?:\.\d+)?)|([\d,]+(?:\.\d+)?)\s*(?:pesos|mxn)", combined_text)
+                    m_l = re.search(r"(\d+(?:\.\d+)?)\s*(?:litros|lts|lt|l)\b", combined_text)
+                    if m_p:
+                        try:
+                            val_pesos = float((m_p.group(1) or m_p.group(2)).replace(",", ""))
+                            if val_pesos > (price * 1.5):
+                                raw_qty = round(val_pesos / price, 2)
+                        except (ValueError, TypeError):
+                            pass
+                    elif m_l:
+                        try:
+                            val_l = float(m_l.group(1))
+                            if val_l > 5.0:
+                                raw_qty = round(val_l, 2)
+                        except (ValueError, TypeError):
+                            pass
+
+            qty = int(raw_qty) if raw_qty.is_integer() else round(raw_qty, 2)
+            subtotal = round(price * qty, 2)
+            total_calc += subtotal
             api_items.append({"productId": str(real_p_id), "quantity": qty})
             clean_items_for_local.append({
                 "product_id": real_p_id,
                 "product_name": prod_name_clean,
                 "quantity": qty,
                 "unit_price": price,
-                "subtotal": price * qty,
+                "subtotal": subtotal,
             })
 
-        now_dt = datetime.now()
-        deadline_dt = normalize_schedule_datetime(scheduled_for, now_dt)
-        if not deadline_dt and delivery_schedule:
-            deadline_dt = normalize_schedule_datetime(delivery_schedule, now_dt)
+        now_dt = get_local_now()
+        sched_text = str(delivery_schedule or "").strip().lower()
+        has_asap_text = any(w in sched_text for w in [
+            "lo antes posible", "inmediato", "urgente", "ahorita", "ahora", "asap",
+            "lo mas pronto", "lo más pronto", "ya mismo", "ya", "en cuanto puedan", "cuanto antes"
+        ]) or (not delivery_schedule) or (delivery_schedule.strip() == "Lo antes posible")
 
-        scheduled_for_iso = to_utc_iso(deadline_dt, now_dt) if deadline_dt else None
-        is_scheduled = bool(deadline_dt and now_dt < (deadline_dt - timedelta(minutes=30)))
-        if deadline_dt and (not delivery_schedule or delivery_schedule == "Lo antes posible"):
-            delivery_schedule = format_schedule_display(deadline_dt, now_dt)
+        deadline_dt = None
+        if not has_asap_text:
+            if scheduled_for and str(scheduled_for).strip():
+                deadline_dt = normalize_schedule_datetime(scheduled_for, now_dt)
+            elif delivery_schedule and delivery_schedule.strip() != "Lo antes posible":
+                deadline_dt = normalize_schedule_datetime(delivery_schedule, now_dt)
+
+        if deadline_dt and deadline_dt > (now_dt + timedelta(minutes=15)):
+            is_scheduled = True
+            scheduled_for_iso = to_utc_iso(deadline_dt, now_dt)
+            if not delivery_schedule or delivery_schedule == "Lo antes posible":
+                delivery_schedule = format_schedule_display(deadline_dt, now_dt)
+        else:
+            is_scheduled = False
+            deadline_dt = None
+            scheduled_for_iso = None
+            delivery_schedule = "Lo antes posible"
 
         clean_pay = "EFECTIVO" if "efectivo" in payment_method.lower() else ("TARJETA" if "tarjeta" in payment_method.lower() or "terminal" in payment_method.lower() else "EFECTIVO")
         clean_channel = channel.upper() if channel else "TELEGRAM"
@@ -845,16 +913,38 @@ class ApiRepository:
         if api_items:
             body["productId"] = api_items[0].get("productId")
             body["quantity"] = api_items[0].get("quantity", 1)
+        if total_calc > 0:
+            body["totalAmount"] = round(total_calc, 2)
+            body["total"] = round(total_calc, 2)
 
-        if customer_id and re.match(r"^[0-9a-fA-F-]{36}$", str(customer_id)):
-            body["customerId"] = str(customer_id)
-        else:
-            try:
-                cust_found = self.get_customer_by_phone(tenant_id, customer_phone)
-                if cust_found and cust_found.id and re.match(r"^[0-9a-fA-F-]{36}$", str(cust_found.id)):
-                    body["customerId"] = str(cust_found.id)
-            except Exception:
-                pass
+        # Sincronizar dirección del cliente en NestJS/PostgreSQL para que en PWA no aparezca dirección vieja
+        try:
+            cust_synced = self.save_or_update_customer(
+                tenant_id=tenant_id,
+                channel=channel,
+                channel_user_id=channel_user_id or customer_phone,
+                name=customer_name,
+                phone=customer_phone,
+                address=delivery_address,
+                lat=delivery_lat,
+                lng=delivery_lng,
+                notes=notes,
+            )
+            if cust_synced and cust_synced.id and re.match(r"^[0-9a-fA-F-]{36}$", str(cust_synced.id)):
+                body["customerId"] = str(cust_synced.id)
+        except Exception as e:
+            logger.debug(f"[ApiRepository] Failed to sync customer profile on order create: {e}")
+
+        if "customerId" not in body:
+            if customer_id and re.match(r"^[0-9a-fA-F-]{36}$", str(customer_id)):
+                body["customerId"] = str(customer_id)
+            else:
+                try:
+                    cust_found = self.get_customer_by_phone(tenant_id, customer_phone)
+                    if cust_found and cust_found.id and re.match(r"^[0-9a-fA-F-]{36}$", str(cust_found.id)):
+                        body["customerId"] = str(cust_found.id)
+                except Exception:
+                    pass
         if delivery_lat is not None and delivery_lng is not None:
             body["latitude"] = float(delivery_lat)
             body["longitude"] = float(delivery_lng)
@@ -1263,8 +1353,11 @@ class ApiRepository:
                     driver_phone_val = o.get("driverPhone") or (d_obj.phone if d_obj else None)
                     driver_veh_val = o.get("truckPlate") or (d_obj.vehicle_plate if d_obj else ("Cilindros" if driver_id_val else None))
 
+                    last_trace_desc = ""
                     for tr in (o.get("traceability") or []):
                         desc = str(tr.get("description") or "")
+                        if desc:
+                            last_trace_desc = desc
                         if "Calificación recibida:" in desc or "estrellas" in desc:
                             m_stars = re.search(r"(\d+)/5", desc)
                             if m_stars and rating_val is None:
@@ -1278,6 +1371,15 @@ class ApiRepository:
                                 pass
                         if "rechaz" in desc.lower() or "motivo" in desc.lower():
                             rejection_reason_val = desc
+
+                    # Interceptar error del dashboard externo donde asignación envía ENTREGADO
+                    if api_status in ("ENTREGADO", "DELIVERED") and ("salir a ruta" in last_trace_desc.lower() or "unidad asignada" in last_trace_desc.lower()):
+                        local_status = "assigned"
+                        try:
+                            target_uuid = self._resolve_order_uuid(raw_id)
+                            api_patch(f"/orders/{target_uuid}/status", {"status": "ASIGNADO", "description": "Auto-corrección: Unidad asignada a chofer", "actor": "SISTEMA"}, timeout=3)
+                        except Exception:
+                            pass
 
                     # If rating found, persist it to IdentityStore only if not already saved
                     if rating_val and raw_id and not saved_rating:
@@ -1300,6 +1402,8 @@ class ApiRepository:
                         "total_amount": float(o.get("totalAmount") or 0.0),
                         "currency": "MXN",
                         "status": local_status,
+                        "last_traceability_desc": last_trace_desc,
+                        "traceability": o.get("traceability") or [],
                         "payment_method": o.get("paymentMethod") or "Efectivo",
                         "notes": o.get("notes") or "",
                         "channel": str(o.get("channel") or "TELEGRAM").lower(),
@@ -1307,11 +1411,18 @@ class ApiRepository:
                         "driver_name": driver_name_val,
                         "driver_phone": driver_phone_val,
                         "driver_vehicle": driver_veh_val,
-                        "driver_rating": rating_val or (5.0 if local_status == "delivered" else None),
+                        "driver_rating": rating_val,
                         "rating_tag": rating_tag_val,
                         "rating_comment": rating_comment_val,
                         "rejection_reason": rejection_reason_val,
                         "rejection_driver_name": driver_name_val if local_status == "rejected_by_driver" else None,
+                        "cancelled_by": (
+                            o.get("cancelledBy")
+                            or o.get("cancelled_by")
+                            or (identity_store.get_order_cancellation(raw_id) or {}).get("cancelled_by")
+                            or (identity_store.get_order_cancellation(o.get("id")) or {}).get("cancelled_by")
+                            or None
+                        ),
                         "items": items,
                         "created_at": o.get("createdAt") or datetime.now(timezone.utc).isoformat(),
                     })
@@ -1822,7 +1933,7 @@ class ApiRepository:
         all_stored_ratings = identity_store.get_all_order_ratings()
         ratings_by_driver: dict[str, list[float]] = {}
         for r in all_stored_ratings:
-            drv_id = str(r.get("driver_id") or "").strip()
+            drv_id = str(r.get("driver_id") or "").strip().lower()
             if drv_id and r.get("rating"):
                 try:
                     ratings_by_driver.setdefault(drv_id, []).append(float(r["rating"]))
@@ -1831,7 +1942,7 @@ class ApiRepository:
 
         # Also pull ratings from orders if not already in store
         for o in orders:
-            drv_id = str(o.get("driver_id") or "").strip()
+            drv_id = str(o.get("driver_id") or "").strip().lower()
             r_val = o.get("driver_rating")
             if drv_id and r_val:
                 o_id_str = str(o.get("id"))
@@ -1855,7 +1966,21 @@ class ApiRepository:
             else:
                 op_status = "fuera_servicio"
 
-            d_ratings = ratings_by_driver.get(str(d.id), [])
+            # Match ratings belonging to this driver across any identifier
+            d_keys = {str(d.id).strip().lower()}
+            if d.telegram_user_id:
+                d_keys.add(str(d.telegram_user_id).strip().lower())
+            if d.name:
+                d_keys.add(str(d.name).strip().lower())
+            if d.phone:
+                d_keys.add(re.sub(r"\D", "", str(d.phone)))
+
+            d_ratings: list[float] = []
+            for k in d_keys:
+                if k in ratings_by_driver:
+                    for val in ratings_by_driver[k]:
+                        d_ratings.append(val)
+
             if d_ratings:
                 avg_rating = round(sum(d_ratings) / len(d_ratings), 1)
                 total_ratings = len(d_ratings)
@@ -1880,6 +2005,7 @@ class ApiRepository:
                 "active_delivery_address": active_orders[0].get("delivery_address") if active_orders else None,
                 "active_order_status": active_orders[0].get("status") if active_orders else None,
                 "avg_rating": avg_rating,
+                "rating": avg_rating,
                 "total_ratings": total_ratings,
                 "current_lat": d.current_lat,
                 "current_lng": d.current_lng,
@@ -2709,9 +2835,24 @@ class ApiRepository:
 
     def get_driver_ratings(self, tenant_id: str, driver_id: Any, limit: int = 50) -> list[dict[str, Any]]:
         """Get customer ratings for a specific driver."""
-        d_str = str(driver_id).strip()
-        all_ratings = self.get_all_ratings_admin(tenant_id, limit=200)
-        filtered = [r for r in all_ratings if str(r.get("driver_id") or "").strip() == d_str]
+        driver_obj = self.get_driver(driver_id)
+        d_keys = {str(driver_id).strip().lower()}
+        if driver_obj:
+            d_keys.add(str(driver_obj.id).strip().lower())
+            if driver_obj.telegram_user_id:
+                d_keys.add(str(driver_obj.telegram_user_id).strip().lower())
+            if driver_obj.name:
+                d_keys.add(str(driver_obj.name).strip().lower())
+            if driver_obj.phone:
+                d_keys.add(re.sub(r"\D", "", str(driver_obj.phone)))
+
+        all_ratings = self.get_all_ratings_admin(tenant_id, limit=500)
+        filtered = []
+        for r in all_ratings:
+            r_drv = str(r.get("driver_id") or "").strip().lower()
+            r_name = str(r.get("driver_name") or "").strip().lower()
+            if r_drv in d_keys or r_name in d_keys:
+                filtered.append(r)
         return filtered[:limit]
 
     def get_driver_rating_stats(self, tenant_id: str, driver_id: Any) -> dict[str, Any]:
@@ -2877,6 +3018,11 @@ class ApiRepository:
         for key in (order_id, str(order_id), target_uuid):
             if key and key in self._order_id_map:
                 self._order_id_map[key]["status"] = api_status
+                if cancelled_by:
+                    self._order_id_map[key]["cancelledBy"] = cancelled_by
+                    self._order_id_map[key]["cancelled_by"] = cancelled_by
+                if reason:
+                    self._order_id_map[key]["rejectionReason"] = reason
                 if api_status in ("RECHAZADO", "CANCELADO"):
                     self._order_id_map[key]["driverId"] = None
                     self._order_id_map[key]["driverName"] = None
@@ -2947,6 +3093,13 @@ class ApiRepository:
         reason: str = "Cancelado a solicitud del cliente",
     ) -> Order | None:
         """Cancel order via REST API."""
+        identity_store.save_order_cancellation(order_id, cancelled_by=cancelled_by, reason=reason)
+        try:
+            from src.services.order_events import _EVENT_DEDUP_CACHE
+            import time
+            _EVENT_DEDUP_CACHE[f"cancelled:{order_id}"] = time.time()
+        except Exception:
+            pass
         return self.update_order_status(
             tenant_id=tenant_id,
             order_id=order_id,
@@ -3066,11 +3219,16 @@ class ApiRepository:
         items = []
         for it in ord_dict.get("items", []):
             p_info = it.get("product") or {}
+            try:
+                raw_q = float(it.get("quantity", 1))
+                item_qty = int(raw_q) if raw_q.is_integer() else round(raw_q, 2)
+            except (ValueError, TypeError):
+                item_qty = 1
             items.append(
                 OrderItem(
                     product_id=it.get("productId", ""),
                     product_name=it.get("productName", p_info.get("name", "Gas LP")),
-                    quantity=int(it.get("quantity", 1)),
+                    quantity=item_qty,
                     unit_price=float(it.get("unitPrice", p_info.get("pricePerUnit", 0.0))),
                     subtotal=float(it.get("subtotal", 0.0)),
                 )
@@ -3090,6 +3248,29 @@ class ApiRepository:
 
         cust = ord_dict.get("customer") or {}
         local_status = self._map_api_status_to_local(ord_dict.get("status"))
+
+        # Interceptar error del dashboard externo donde asignación de chofer envía erróneamente ENTREGADO
+        if local_status == "delivered":
+            last_trace_desc = ""
+            is_erroneous_delivery = False
+            for tr in (ord_dict.get("traceability") or []):
+                tr_status = str(tr.get("status") or "").upper()
+                tr_desc = str(tr.get("description") or "").lower()
+                tr_actor = str(tr.get("actor") or "").upper()
+                if tr_desc:
+                    last_trace_desc = tr_desc
+                if tr_status in ("ENTREGADO", "DELIVERED"):
+                    if any(k in tr_desc for k in ["salir a ruta", "unidad asignada", "asignad", "lista para salir"]) or tr_actor in ("OPERADOR_CENTRAL", "CENTRAL"):
+                        if not any(k in tr_desc for k in ["entregado exitosamente", "firma registrada", "foto"]):
+                            is_erroneous_delivery = True
+            if is_erroneous_delivery or any(k in last_trace_desc for k in ["salir a ruta", "unidad asignada", "lista para salir"]):
+                local_status = "assigned"
+                try:
+                    target_uuid = self._resolve_order_uuid(ord_dict.get("id") or raw_id)
+                    api_patch(f"/orders/{target_uuid}/status", {"status": "ASIGNADO", "description": "Auto-corrección: Unidad asignada a chofer", "actor": "SISTEMA"}, timeout=3)
+                except Exception:
+                    pass
+
         sched_for = ord_dict.get("scheduledFor") or ord_dict.get("scheduled_for")
         sched_schedule = ord_dict.get("deliverySchedule") or ord_dict.get("delivery_schedule")
 
@@ -3107,27 +3288,44 @@ class ApiRepository:
             sched_schedule = sched_info.get("delivery_schedule") or sched_schedule
             sched_for = sched_info.get("scheduled_for") or sched_for
 
-        now_dt = datetime.now()
-        deadline_dt = normalize_schedule_datetime(sched_for, now_dt)
-        if not deadline_dt and sched_schedule:
-            deadline_dt = normalize_schedule_datetime(sched_schedule, now_dt)
+        now_dt = get_local_now()
+        is_order_asap = (
+            not sched_schedule
+            or sched_schedule == "Lo antes posible"
+            or any(w in str(sched_schedule).lower() for w in [
+                "lo antes posible", "inmediato", "urgente", "ahorita", "ahora", "asap",
+                "lo mas pronto", "lo más pronto", "ya mismo", "ya", "en cuanto puedan", "cuanto antes"
+            ])
+        )
 
-        if deadline_dt:
-            sched_for = deadline_dt.isoformat()
-            if not sched_schedule or sched_schedule == "Lo antes posible" or ("t" in str(sched_schedule).lower() and len(str(sched_schedule)) >= 19):
-                sched_schedule = format_schedule_display(deadline_dt, now_dt)
-        elif not sched_schedule:
+        if is_order_asap:
             sched_schedule = "Lo antes posible"
+            sched_for = None
+            deadline_dt = None
+            if local_status == "scheduled":
+                api_st = str(ord_dict.get("status", "")).upper()
+                local_status = "confirmed" if api_st in ("CONFIRMADO", "PENDIENTE") else "pending"
+        else:
+            deadline_dt = normalize_schedule_datetime(sched_for, now_dt)
+            if not deadline_dt and sched_schedule:
+                deadline_dt = normalize_schedule_datetime(sched_schedule, now_dt)
 
-        if deadline_dt:
-            activation_time = deadline_dt - timedelta(minutes=30)
-            if now_dt < activation_time:
-                if local_status in ("confirmed", "pending", "draft", "scheduled"):
-                    local_status = "scheduled"
-            elif local_status == "scheduled":
-                local_status = "confirmed"
-        elif str(ord_dict.get("status", "")).upper() in ("PROGRAMADO", "SCHEDULED"):
-            local_status = "scheduled"
+            if deadline_dt:
+                sched_for = deadline_dt.isoformat()
+                if not sched_schedule or ("t" in str(sched_schedule).lower() and len(str(sched_schedule)) >= 19):
+                    sched_schedule = format_schedule_display(deadline_dt, now_dt)
+            elif not sched_schedule:
+                sched_schedule = "Lo antes posible"
+
+            if deadline_dt:
+                activation_time = deadline_dt - timedelta(minutes=30)
+                if now_dt < activation_time:
+                    if local_status in ("confirmed", "pending", "draft", "scheduled"):
+                        local_status = "scheduled"
+                elif local_status == "scheduled":
+                    local_status = "confirmed"
+            elif str(ord_dict.get("status", "")).upper() in ("PROGRAMADO", "SCHEDULED"):
+                local_status = "scheduled"
 
         lat = ord_dict.get("deliveryLat") or ord_dict.get("delivery_lat") or ord_dict.get("latitude")
         lng = ord_dict.get("deliveryLng") or ord_dict.get("delivery_lng") or ord_dict.get("longitude")
@@ -3181,6 +3379,23 @@ class ApiRepository:
                 else:
                     eff_channel_user_id = cust_phone_clean
 
+        canc_info = (
+            identity_store.get_order_cancellation(num_id)
+            or identity_store.get_order_cancellation(str(raw_id))
+            or identity_store.get_order_cancellation(str(ord_dict.get("id")))
+            or identity_store.get_order_cancellation(str(ord_dict.get("orderNumber")))
+        )
+        canc_by = (
+            ord_dict.get("cancelledBy")
+            or ord_dict.get("cancelled_by")
+            or (canc_info.get("cancelled_by") if canc_info else None)
+        )
+        canc_reason = (
+            ord_dict.get("rejectionReason")
+            or ord_dict.get("cancellation_reason")
+            or (canc_info.get("reason") if canc_info else None)
+        )
+
         return Order(
             id=num_id,
             tenant_id=tenant_id,
@@ -3201,6 +3416,8 @@ class ApiRepository:
             live_location_message_id=live_msg_id,
             live_location_chat_id=live_chat_id,
             scheduled_for=sched_for,
+            cancelled_by=canc_by,
+            cancellation_reason=canc_reason,
             items=items,
             created_at=ord_dict.get("createdAt") or ord_dict.get("created_at"),
         )

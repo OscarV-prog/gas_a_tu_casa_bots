@@ -111,14 +111,51 @@ async def poll_order_updates_once(tenant_id: str = "petroil") -> int:
 
             # 3. Delivered transition (PWA driver pressed "Entregado")
             if prev_st != "delivered" and curr_st == "delivered":
-                logger.info(f"[PwaSyncService] Detected Delivery transition for #{oid}")
-                await asyncio.to_thread(order_events.notify_order_delivered, tenant_id, oid)
-                events_fired += 1
+                last_trace_desc = str(o.get("last_traceability_desc") or o.get("notes") or "").lower()
+                is_assignment_leak = (
+                    "salir a ruta" in last_trace_desc
+                    or "unidad asignada" in last_trace_desc
+                    or "asignad" in last_trace_desc
+                    or (prev_st in (None, "", "pending", "confirmed", "scheduled") and curr_drv and not prev_drv)
+                )
+                if is_assignment_leak:
+                    logger.warning(f"[PwaSyncService] Intercepted erroneous delivery for #{oid} ('{last_trace_desc}'). Correcting to ASIGNADO.")
+                    try:
+                        repo.update_order_status(tenant_id, oid, status="assigned", driver_id=curr_drv)
+                    except Exception as e:
+                        logger.error(f"[PwaSyncService] Failed to auto-correct status for #{oid}: {e}")
+                    _KNOWN_ORDER_STATES[oid] = {"status": "assigned", "driver_id": curr_drv}
+                    await asyncio.to_thread(order_events.notify_order_assigned, tenant_id, oid, curr_drv)
+                    events_fired += 1
+                else:
+                    logger.info(f"[PwaSyncService] Detected Delivery transition for #{oid}")
+                    await asyncio.to_thread(order_events.notify_order_delivered, tenant_id, oid)
+                    events_fired += 1
 
             # 4. Cancelled transition
             if prev_st != "cancelled" and curr_st == "cancelled":
                 logger.info(f"[PwaSyncService] Detected Cancellation for #{oid}")
-                await asyncio.to_thread(order_events.notify_order_cancelled, tenant_id, oid, reason=o.get("notes") or "")
+                canc_by = o.get("cancelled_by") or o.get("cancelledBy")
+                if not canc_by:
+                    from src.repositories.identity_store import identity_store
+                    canc_info = identity_store.get_order_cancellation(oid)
+                    if canc_info and canc_info.get("cancelled_by"):
+                        canc_by = canc_info["cancelled_by"]
+                if not canc_by:
+                    actor = str(o.get("actor") or "").lower()
+                    if "chofer" in actor or "driver" in actor or curr_drv:
+                        canc_by = "el chofer"
+                    elif "cliente" in actor or "customer" in actor:
+                        canc_by = "el cliente"
+                    else:
+                        canc_by = "Torre de Control"
+                await asyncio.to_thread(
+                    order_events.notify_order_cancelled,
+                    tenant_id,
+                    oid,
+                    reason=o.get("notes") or o.get("rejectionReason") or "",
+                    cancelled_by=canc_by,
+                )
                 events_fired += 1
         else:
             # Newly created order appearing after service boot

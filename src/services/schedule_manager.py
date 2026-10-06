@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from src.repositories import get_repository
-from src.repositories.sqlite_repo import parse_schedule_deadline
+from src.repositories.sqlite_repo import parse_schedule_deadline, get_local_now
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ def format_slot_display(dt: datetime, ref_time: datetime | None = None) -> str:
 
     e.g. 'Hoy a las 5:00 PM', 'Mañana a las 11:30 AM', 'Lunes 28/09 a las 4:00 PM'
     """
-    ref = ref_time or datetime.now()
+    ref = ref_time or get_local_now()
     is_today = dt.date() == ref.date()
     is_tomorrow = dt.date() == (ref.date() + timedelta(days=1))
 
@@ -238,7 +238,7 @@ def check_schedule_availability(
 
     Returns a comprehensive result dictionary.
     """
-    ref = ref_time or datetime.now()
+    ref = ref_time or get_local_now()
     text = (schedule_text or "").strip()
     text_lower = text.lower()
 
@@ -246,44 +246,8 @@ def check_schedule_availability(
     from src.services.flow_router import parse_schedule_deterministic
     parsed_det = parse_schedule_deterministic(text)
     if parsed_det == "Lo antes posible" or any(k in text_lower for k in [
-        "lo antes posible", "lo mas pronto", "lo más pronto", "ahorita", "ya mismo", "asap", "inmediato"
+        "lo antes posible", "lo mas pronto", "lo más pronto", "ahorita", "ya mismo", "asap", "inmediato", "urgente", "cuanto antes"
     ]):
-        # Si la gasera ya cerró hoy (>= 19:00 hrs), se programa para mañana a primera hora (8:00 AM)
-        if ref.hour >= 19:
-            next_dt = (ref + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
-            next_disp = format_slot_display(next_dt, ref)
-            return {
-                "is_valid_schedule": True,
-                "is_asap": False,
-                "requested_dt": next_dt,
-                "requested_display": next_disp,
-                "time_only_str": "8:00 AM",
-                "is_available": True,
-                "occupied": 0,
-                "capacity": get_slot_capacity(tenant_id),
-                "next_available_dt": None,
-                "next_available_display": "",
-                "next_available_time_str": "",
-                "message": f"La gasera cerró a las 7:00 PM. Tu pedido se programó para entrega a primera hora ({next_disp}).",
-            }
-        elif ref.hour < 8:
-            next_dt = ref.replace(hour=8, minute=0, second=0, microsecond=0)
-            next_disp = format_slot_display(next_dt, ref)
-            return {
-                "is_valid_schedule": True,
-                "is_asap": False,
-                "requested_dt": next_dt,
-                "requested_display": next_disp,
-                "time_only_str": "8:00 AM",
-                "is_available": True,
-                "occupied": 0,
-                "capacity": get_slot_capacity(tenant_id),
-                "next_available_dt": None,
-                "next_available_display": "",
-                "next_available_time_str": "",
-                "message": f"Nuestro horario inicia a las 8:00 AM. Tu pedido se entregará a primera hora ({next_disp}).",
-            }
-
         return {
             "is_valid_schedule": True,
             "is_asap": True,
@@ -297,6 +261,7 @@ def check_schedule_availability(
             "next_available_time_str": "",
             "message": "Horario inmediato (Lo antes posible). Disponible para despacho directo.",
         }
+
 
     # 2. Parsear fecha y hora
     parsed_dt = parse_schedule_deadline(text, ref)
