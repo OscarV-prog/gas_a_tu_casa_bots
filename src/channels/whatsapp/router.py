@@ -479,23 +479,35 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
 
     # 4.0 Comentario posterior a la calificación CSAT
     rating_ctx = _AWAITING_RATING_COMMENTS.get(wa_id)
-    if rating_ctx and (time.time() - rating_ctx.get("time", 0)) < 600 and texto_usuario:
+    if rating_ctx:
+        curr_session = flow_router.get_session(thread_id)
+        awaiting_time = rating_ctx.get("time", 0)
+        awaiting_order_id = rating_ctx.get("order_id")
+
+        has_phone_digits = bool(re.search(r"\b\d{7,10}\b", texto_usuario))
         texto_lower = texto_usuario.lower()
-        es_nuevo_pedido = any(k in texto_lower for k in ["quiero", "cilindro", "estacionario", "tanque", "litros", "pedir", "orden", "hola", "/start"])
-        order_id_rating = rating_ctx.get("order_id")
-        if not es_nuevo_pedido and order_id_rating:
+        is_greeting_or_cmd = any(texto_lower.startswith(g) for g in ["hola", "buen", "hey", "/start", "/menu", "inicio", "empezar", "que tal", "buenas", "ayuda"])
+        is_order_intent = any(k in texto_lower for k in [
+            "quiero", "cilindro", "estacionario", "tanque", "litros", "pedir", "orden", "gas",
+            "recarga", "precio", "cuanto", "cuánto", "30", "20", "45", "10", "5", "kilos", "kg", "nuevo"
+        ])
+        is_in_active_order = curr_session.state not in (FlowState.INITIAL, FlowState.COMPLETED, FlowState.CANCELLED)
+
+        # Si el usuario escribe su teléfono, saluda, pide gas, ya está en un flujo de pedido o pulsó un botón interactivo:
+        if has_phone_digits or is_greeting_or_cmd or is_order_intent or is_in_active_order or (time.time() - awaiting_time) >= 600 or interactive_id:
             _AWAITING_RATING_COMMENTS.pop(wa_id, None)
-            repo.update_order_rating_feedback(TENANT_ID, order_id_rating, comment=texto_usuario)
+        elif awaiting_order_id and texto_usuario:
+            _AWAITING_RATING_COMMENTS.pop(wa_id, None)
+            repo.update_order_rating_feedback(TENANT_ID, awaiting_order_id, comment=texto_usuario)
             await adapter.send_text_message(
                 wa_id,
                 "📝 *¡Comentario registrado!*\n\n"
                 "Muchas gracias por compartirnos tu opinión detallada. Tus comentarios han sido guardados para el equipo de calidad de Petroil. ¡Que tengas un excelente día! ⛽🌟"
             )
             return
-        else:
-            _AWAITING_RATING_COMMENTS.pop(wa_id, None)
 
     if interactive_id:
+        _AWAITING_RATING_COMMENTS.pop(wa_id, None)
         if interactive_id == "client_svc:cilindro":
             clear_cart(wa_id)
             sections = adapter.get_cylinder_catalog_list_sections(TENANT_ID)
@@ -737,14 +749,15 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
             # Notificar al chofer asignado si tiene Telegram y limpiar botones activos de su chat
             if order.driver_id:
                 driver = repo.get_driver(order.driver_id)
-                if driver and driver.telegram_user_id:
+                driver_tg_id = getattr(driver, "telegram_user_id", None) or getattr(driver, "telegram_chat_id", None)
+                if driver_tg_id:
                     from src.services.notifications import notify_driver_order_cancelled
                     notify_driver_order_cancelled(
                         tenant_id=TENANT_ID,
                         order_id=order_id,
-                        driver_telegram_user_id=driver.telegram_user_id,
-                        customer_name=order.customer_name,
-                        delivery_address=order.delivery_address,
+                        driver_telegram_user_id=str(driver_tg_id),
+                        customer_name=order.customer_name or "Cliente WhatsApp",
+                        delivery_address=order.delivery_address or "",
                         cancelled_by="el cliente desde WhatsApp",
                     )
 
@@ -972,7 +985,12 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
         return
 
     # 5.2 Si el usuario envía saludo o inicio, reiniciar sesión para un pedido limpio
-    if texto_clean in ("/start", "start", "hola", "hola!", "buenas", "buenos dias", "buenos días", "buenas tardes", "buenas noches", "inicio", "empezar", "menu", "menú", "reiniciar", "nuevo pedido"):
+    es_saludo_puro = (
+        texto_clean in ("/start", "start", "hola", "hola!", "buenas", "buenos dias", "buenos días", "buenas tardes", "buenas noches", "inicio", "empezar", "menu", "menú", "reiniciar", "nuevo pedido")
+        or (any(texto_clean.startswith(g) for g in ["hola", "buenos dias", "buenos días", "buenas tardes", "buenas noches", "inicio", "empezar", "que tal", "buenas"])
+            and not any(k in texto_clean for k in ["quiero", "cilindro", "estacionario", "tanque", "litro", "litros", "pedir", "gas", "cuanto", "cuánto", "precio", "30", "20", "45", "10"]))
+    )
+    if es_saludo_puro:
         clear_cart(wa_id)
         clear_session(thread_id)
 

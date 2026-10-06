@@ -638,6 +638,7 @@ class MessengerAdapter(ChannelAdapter):
     def get_order_active_quick_replies(self, order_id: int | str) -> list[dict[str, str]]:
         """Quick replies for active/in-route order."""
         return [
+            {"id": f"check_order_status:{order_id}", "title": "📍 Ver Estatus"},
             {"id": f"cancel_order_client:{order_id}", "title": "❌ Cancelar Pedido"},
         ]
 
@@ -735,6 +736,56 @@ class MessengerAdapter(ChannelAdapter):
 
         resp_lower = respuesta.lower()
         resp_clean = re.sub(r"[*_~`#]", "", resp_lower)
+
+        # 0. GUARD: ¿Es mensaje de éxito de pedido confirmado, recibo final, asignación o consulta de historial/estatus de pedidos?
+        es_recibo_confirmado = (
+            bool(re.search(r"pedido\s*#?\d+\s*(confirmado|agendado)", resp_clean))
+            or bool(re.search(r"(confirmado|agendado)!\s*", resp_clean) and "total:" in resp_clean)
+            or any(k in resp_lower for k in [
+                "estamos asignando tu unidad", "el operador está preparando tu unidad",
+                "ha sido asignado", "¡tu pedido está confirmado", "tu pedido ha sido registrado",
+                "pedido confirmado", "registrado con éxito", "registrado exitosamente"
+            ])
+            or (
+                any(k in resp_lower for k in ["folio #", "folio:"])
+                and any(k in resp_lower for k in ["total:", "dirección:", "direccion:", "repartidor", "torre de control"])
+            )
+        )
+        if es_recibo_confirmado:
+            match_order = re.search(r"(?:pedido|folio)\s*#?\s*(\d+)", respuesta, re.IGNORECASE)
+            is_terminal = any(k in resp_lower for k in ["cancelado", "entregado", "finalizado"])
+            if match_order and not is_terminal:
+                order_id = match_order.group(1)
+                return respuesta, {
+                    "type": "quick_replies",
+                    "quick_replies": self.get_order_active_quick_replies(order_id),
+                }
+            return respuesta, None
+
+        es_consulta_o_historial_pedidos = (
+            any(k in resp_lower for k in [
+                "historial de tus pedidos", "encontré", "encontre", "pedidos en tu historial",
+                "información de tu pedido", "informacion de tu pedido", "estatus de tu pedido",
+                "se encontraron", "tus pedidos registrados", "detalles de tu pedido"
+            ])
+            and any(k in resp_lower for k in ["pedido #", "folio #", "pedidos", "pedido(s)"])
+        ) or (
+            "pedido #" in resp_lower and any(k in resp_lower for k in ["estado:", "confirmado", "entregado", "en ruta", "cancelado"])
+            and not any(k in resp_lower for k in ["¿deseas confirmar", "¿confirmamos", "resumen de tu pedido"])
+        )
+
+        if es_consulta_o_historial_pedidos:
+            match_order = re.search(r"(?:pedido|folio)\s*#?\s*(\d+)", respuesta, re.IGNORECASE)
+            if match_order:
+                order_id = match_order.group(1)
+                es_inactivo = any(k in resp_lower for k in ["cancelado", "entregado", "finalizado"])
+                es_activo = any(k in resp_lower for k in ["confirmado", "en camino", "en ruta", "agendado", "programado", "asignado"])
+                if es_activo and not es_inactivo:
+                    return respuesta, {
+                        "type": "quick_replies",
+                        "quick_replies": self.get_order_active_quick_replies(order_id),
+                    }
+            return respuesta, None
 
         # 1. ¿Pregunta por tipo de servicio (cilindro vs estacionario)?
         es_pregunta_servicio = (

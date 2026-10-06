@@ -348,6 +348,7 @@ def get_botones_pedido_activo(order_id: int | str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
+                InlineKeyboardButton("📍 Ver Estatus", callback_data=f"check_order_status:{order_id}"),
                 InlineKeyboardButton("❌ Cancelar Pedido", callback_data=f"cancel_order_client:{order_id}"),
             ]
         ]
@@ -1753,15 +1754,16 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
         # Notificar al chofer asignado si tiene Telegram y limpiar botones activos de su chat
         if order.driver_id:
             driver = repo.get_driver(order.driver_id)
-            if driver and driver.telegram_user_id:
+            driver_tg_id = getattr(driver, "telegram_user_id", None) or getattr(driver, "telegram_chat_id", None)
+            if driver_tg_id:
                 from src.services.notifications import notify_driver_order_cancelled
                 notify_driver_order_cancelled(
                     tenant_id=TENANT_ID,
                     order_id=order_id,
-                    driver_telegram_user_id=driver.telegram_user_id,
-                    customer_name=order.customer_name,
-                    delivery_address=order.delivery_address,
-                    cancelled_by="el cliente",
+                    driver_telegram_user_id=str(driver_tg_id),
+                    customer_name=order.customer_name or "Cliente Telegram",
+                    delivery_address=order.delivery_address or "",
+                    cancelled_by="el cliente vía Telegram",
                 )
 
         await query.edit_message_text(
