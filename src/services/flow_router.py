@@ -980,30 +980,43 @@ def build_order_summary_text(draft: DraftOrder) -> str:
         price = it.get("unit_price", 0.0)
         try:
             qty_num = float(qty)
-            sub = round(qty_num * float(price), 2) if float(price) > 0 else 0.0
-            qty_str = f"{qty_num:g}" if isinstance(qty, float) or (isinstance(qty_num, float) and not qty_num.is_integer()) else str(int(qty_num))
+            price_num = float(price)
+            # Si es estacionario y el precio vino como el total (ej. $500) y qty es 1 o pequeña:
+            if ("estacionario" in name.lower() or "litro" in name.lower()) and price_num > 50 and qty_num <= 5:
+                total_pesos = price_num
+                sub = total_pesos
+                official_price = 13.20
+                qty_num = round(total_pesos / official_price, 2)
+                qty_str = f"{qty_num:g}"
+                clean_name = re.sub(r"\s*\([^)]*(?:~|L\s*-|\$)[^)]*\)", "", name).strip()
+                lines_items.append(f"• **{qty_str} L {clean_name}** (${sub:,.2f} MXN)")
+            else:
+                sub = round(qty_num * price_num, 2) if price_num > 0 else 0.0
+                qty_str = f"{qty_num:g}" if isinstance(qty, float) or (isinstance(qty_num, float) and not qty_num.is_integer()) else str(int(qty_num))
+                if price_num > 0:
+                    if "estacionario" in name.lower() or "litro" in name.lower():
+                        clean_name = re.sub(r"\s*\([^)]*(?:~|L\s*-|\$)[^)]*\)", "", name).strip()
+                        lines_items.append(f"• **{qty_str} L {clean_name}** (${sub:,.2f} MXN)")
+                    else:
+                        lines_items.append(f"• **{qty_str}x {name}** (${sub:,.2f} MXN)")
+                else:
+                    lines_items.append(f"• **{name}** (Aforo y cobro al surtir)")
         except (ValueError, TypeError):
             sub = 0.0
-            qty_str = str(qty)
+            lines_items.append(f"• **{name}**")
         total += sub
-        if price > 0:
-            if "estacionario" in name.lower() or "litro" in name.lower():
-                lines_items.append(f"• **{qty_str} L {name}** (${sub:,.2f} MXN)")
-            else:
-                lines_items.append(f"• **{qty_str}x {name}** (${sub:,.2f} MXN)")
-        else:
-            lines_items.append(f"• **{name}** (Aforo y cobro al surtir)")
 
     items_str = "\n".join(lines_items) if lines_items else "• Gas LP"
     pay_str = "💵 Efectivo" if "efectivo" in draft.payment_method.lower() else f"💳 {draft.payment_method}"
     total_str = f"${total:,.2f} MXN" if total > 0 else "Por confirmar al surtir"
+    sched_label = draft.delivery_schedule or "Lo antes posible"
 
     summary = (
         "📋 **Resumen de tu Pedido:**\n"
         f"• **Cliente:** {draft.customer_name} ({draft.customer_phone})\n"
         f"• **Dirección:** {draft.delivery_address}\n"
         f"• **Productos:**\n{items_str}\n"
-        f"• **Horario:** {draft.delivery_schedule}\n"
+        f"• **Horario:** {sched_label}\n"
         f"• **Método de Pago:** {pay_str}\n"
         f"• **Total:** {total_str}\n\n"
         "¿Todos los datos son correctos? Por favor confírmame para procesar tu orden."
@@ -1886,9 +1899,11 @@ class FlowRouter:
                 draft.service_type = "estacionario"
                 draft.items = est_items
                 session.state = FlowState.WAITING_FOR_PHONE
-                items_str = est_items[0]["product_name"]
+                st_q = est_items[0]["quantity"]
+                st_p = est_items[0]["unit_price"]
+                st_tot = round(float(st_q) * float(st_p), 2)
                 return FlowResponse(
-                    text=f"¡Entendido! 🚛 Servicio: **{items_str}**.\n\nPara continuar, por favor indícame tu **número celular** (10 dígitos) para buscar tu cuenta:",
+                    text=f"¡Entendido! 🚛 Servicio: **{st_q:g} L {est_items[0]['product_name']}** (${st_tot:,.2f} MXN).\n\nPara continuar, por favor indícame tu **número celular** (10 dígitos) para buscar tu cuenta:",
                     state=session.state,
                 )
 
@@ -1990,8 +2005,11 @@ class FlowRouter:
                     return await cls._advance_after_phone(session, draft.customer_phone, repo)
 
                 session.state = FlowState.WAITING_FOR_PHONE
+                st_q = est_items[0]["quantity"]
+                st_p = est_items[0]["unit_price"]
+                st_tot = round(float(st_q) * float(st_p), 2)
                 return FlowResponse(
-                    text=f"¡Anotado! 🚛 **{est_items[0]['product_name']}**.\n\nPor favor compárteme tu **número celular** (10 dígitos) para buscar tu cuenta:",
+                    text=f"¡Anotado! 🚛 **{st_q:g} L {est_items[0]['product_name']}** (${st_tot:,.2f} MXN).\n\nPor favor compárteme tu **número celular** (10 dígitos) para buscar tu cuenta:",
                     state=session.state,
                 )
 
@@ -2590,6 +2608,21 @@ class FlowRouter:
 
             if decision == "confirm":
                 telemetry.record_message(channel=session.channel, is_llm=False)
+                if not draft.items:
+                    if draft.service_type == "estacionario":
+                        prods = repo.get_all_products(session.tenant_id)
+                        est_prod = next((p for p in prods if "estacionario" in p.name.lower() or "litro" in p.name.lower()), None)
+                        u_price = float(est_prod.price) if est_prod and est_prod.price > 0 else 13.20
+                        def_liters = round(500.0 / u_price, 2)
+                        draft.items = [{
+                            "product_id": est_prod.id if est_prod else "gas-estacionario-litro",
+                            "product_name": est_prod.name if est_prod else "Gas LP Estacionario (Litro)",
+                            "quantity": def_liters,
+                            "unit_price": u_price,
+                        }]
+                    else:
+                        draft.items = [{"product_id": "gas-lp-30kg", "product_name": "Cilindro 30 kg", "quantity": 1, "unit_price": 670.0}]
+
                 res_tool = create_order.invoke(
                     {
                         "customer_name": draft.customer_name,

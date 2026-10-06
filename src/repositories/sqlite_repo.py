@@ -1107,9 +1107,45 @@ class SqliteRepository(ProductRepository):
                 )
             ) or ("estacionario" in product_name.lower() or "litro" in product_name.lower())
 
-            incoming_price = float(raw_item.get("unit_price", 0.0))
-            if is_stationary and incoming_price > (unit_price * 1.5) and raw_qty <= 5.0:
-                raw_qty = round(incoming_price / unit_price, 2)
+            # Para gas estacionario: si la cantidad viene pequeña (<= 5) pero se especificó un monto en pesos
+            # (en unit_price, price, amount, total, subtotal o en el nombre del producto ej. '$500 MXN ~ 37.88 L'),
+            # convertir deterministamente a litros reales usando el precio oficial por litro.
+            if is_stationary and unit_price > 0:
+                try:
+                    incoming_price = float(raw_item.get("unit_price", 0.0))
+                except (ValueError, TypeError):
+                    incoming_price = 0.0
+                amt_found = 0.0
+                for a_k in ("amount_pesos", "amount", "total", "subtotal"):
+                    try:
+                        a_val = float(raw_item.get(a_k) or 0.0)
+                    except (ValueError, TypeError):
+                        a_val = 0.0
+                    if a_val > 0:
+                        amt_found = a_val
+                        break
+                if incoming_price > (unit_price * 1.5) and raw_qty <= 5.0:
+                    raw_qty = round(incoming_price / unit_price, 2)
+                elif amt_found > (unit_price * 1.5) and raw_qty <= 5.0:
+                    raw_qty = round(amt_found / unit_price, 2)
+                elif raw_qty <= 5.0:
+                    combined_text = f"{product_name} {raw_item.get('description', '')}".lower()
+                    m_p = re.search(r"\$\s*([\d,]+(?:\.\d+)?)|([\d,]+(?:\.\d+)?)\s*(?:pesos|mxn)", combined_text)
+                    m_l = re.search(r"(\d+(?:\.\d+)?)\s*(?:litros|lts|lt|l)\b", combined_text)
+                    if m_p:
+                        try:
+                            val_pesos = float((m_p.group(1) or m_p.group(2)).replace(",", ""))
+                            if val_pesos > (unit_price * 1.5):
+                                raw_qty = round(val_pesos / unit_price, 2)
+                        except (ValueError, TypeError):
+                            pass
+                    elif m_l:
+                        try:
+                            val_l = float(m_l.group(1))
+                            if val_l > 5.0:
+                                raw_qty = round(val_l, 2)
+                        except (ValueError, TypeError):
+                            pass
 
             quantity = int(raw_qty) if raw_qty.is_integer() else round(raw_qty, 2)
             if quantity <= 0:

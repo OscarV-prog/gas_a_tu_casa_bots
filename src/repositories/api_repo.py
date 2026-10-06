@@ -805,9 +805,45 @@ class ApiRepository:
                 )
             ) or ("estacionario" in p_name.lower() or "litro" in p_name.lower())
 
-            incoming_price = float(it.get("unit_price") or it.get("price") or 0.0)
-            if is_stationary and incoming_price > (price * 1.5) and raw_qty <= 5.0:
-                raw_qty = round(incoming_price / price, 2)
+            # Para gas estacionario: si la cantidad viene pequeña (<= 5) pero se especificó un monto en pesos
+            # (en unit_price, price, amount, total, subtotal o en el nombre del producto ej. '$500 MXN ~ 37.88 L'),
+            # convertir deterministamente a litros reales usando el precio oficial por litro.
+            if is_stationary and price > 0:
+                try:
+                    incoming_price = float(it.get("unit_price") or it.get("price") or 0.0)
+                except (ValueError, TypeError):
+                    incoming_price = 0.0
+                amt_found = 0.0
+                for a_k in ("amount_pesos", "amount", "total", "subtotal"):
+                    try:
+                        a_val = float(it.get(a_k) or 0.0)
+                    except (ValueError, TypeError):
+                        a_val = 0.0
+                    if a_val > 0:
+                        amt_found = a_val
+                        break
+                if incoming_price > (price * 1.5) and raw_qty <= 5.0:
+                    raw_qty = round(incoming_price / price, 2)
+                elif amt_found > (price * 1.5) and raw_qty <= 5.0:
+                    raw_qty = round(amt_found / price, 2)
+                elif raw_qty <= 5.0:
+                    combined_text = f"{p_name} {it.get('description', '')}".lower()
+                    m_p = re.search(r"\$\s*([\d,]+(?:\.\d+)?)|([\d,]+(?:\.\d+)?)\s*(?:pesos|mxn)", combined_text)
+                    m_l = re.search(r"(\d+(?:\.\d+)?)\s*(?:litros|lts|lt|l)\b", combined_text)
+                    if m_p:
+                        try:
+                            val_pesos = float((m_p.group(1) or m_p.group(2)).replace(",", ""))
+                            if val_pesos > (price * 1.5):
+                                raw_qty = round(val_pesos / price, 2)
+                        except (ValueError, TypeError):
+                            pass
+                    elif m_l:
+                        try:
+                            val_l = float(m_l.group(1))
+                            if val_l > 5.0:
+                                raw_qty = round(val_l, 2)
+                        except (ValueError, TypeError):
+                            pass
 
             qty = int(raw_qty) if raw_qty.is_integer() else round(raw_qty, 2)
             subtotal = round(price * qty, 2)
@@ -877,6 +913,9 @@ class ApiRepository:
         if api_items:
             body["productId"] = api_items[0].get("productId")
             body["quantity"] = api_items[0].get("quantity", 1)
+        if total_calc > 0:
+            body["totalAmount"] = round(total_calc, 2)
+            body["total"] = round(total_calc, 2)
 
         # Sincronizar dirección del cliente en NestJS/PostgreSQL para que en PWA no aparezca dirección vieja
         try:
