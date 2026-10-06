@@ -17,7 +17,7 @@ from src.models.vehicle import Vehicle
 from src.models.order import Order, OrderItem
 from src.models.product import Product
 from src.repositories.identity_store import identity_store
-from src.repositories.sqlite_repo import parse_schedule_deadline, normalize_schedule_datetime, format_schedule_display, to_utc_iso
+from src.repositories.sqlite_repo import parse_schedule_deadline, normalize_schedule_datetime, format_schedule_display, to_utc_iso, get_local_now, MAZATLAN_TZ
 from src.services.api_client import api_get, api_post, api_patch, api_put, api_delete
 from src.services.geocoding import geocode_address, resolve_gps_address_to_name
 
@@ -821,12 +821,13 @@ class ApiRepository:
                 "subtotal": subtotal,
             })
 
-        now_dt = datetime.now()
+        now_dt = get_local_now()
         sched_text = str(delivery_schedule or "").strip().lower()
         has_asap_text = any(w in sched_text for w in [
             "lo antes posible", "inmediato", "urgente", "ahorita", "ahora", "asap",
             "lo mas pronto", "lo más pronto", "ya mismo", "ya", "en cuanto puedan", "cuanto antes"
-        ])
+        ]) or (not delivery_schedule) or (delivery_schedule.strip() == "Lo antes posible")
+
         deadline_dt = None
         if not has_asap_text:
             if scheduled_for and str(scheduled_for).strip():
@@ -3248,27 +3249,44 @@ class ApiRepository:
             sched_schedule = sched_info.get("delivery_schedule") or sched_schedule
             sched_for = sched_info.get("scheduled_for") or sched_for
 
-        now_dt = datetime.now()
-        deadline_dt = normalize_schedule_datetime(sched_for, now_dt)
-        if not deadline_dt and sched_schedule:
-            deadline_dt = normalize_schedule_datetime(sched_schedule, now_dt)
+        now_dt = get_local_now()
+        is_order_asap = (
+            not sched_schedule
+            or sched_schedule == "Lo antes posible"
+            or any(w in str(sched_schedule).lower() for w in [
+                "lo antes posible", "inmediato", "urgente", "ahorita", "ahora", "asap",
+                "lo mas pronto", "lo más pronto", "ya mismo", "ya", "en cuanto puedan", "cuanto antes"
+            ])
+        )
 
-        if deadline_dt:
-            sched_for = deadline_dt.isoformat()
-            if not sched_schedule or sched_schedule == "Lo antes posible" or ("t" in str(sched_schedule).lower() and len(str(sched_schedule)) >= 19):
-                sched_schedule = format_schedule_display(deadline_dt, now_dt)
-        elif not sched_schedule:
+        if is_order_asap:
             sched_schedule = "Lo antes posible"
+            sched_for = None
+            deadline_dt = None
+            if local_status == "scheduled":
+                api_st = str(ord_dict.get("status", "")).upper()
+                local_status = "confirmed" if api_st in ("CONFIRMADO", "PENDIENTE") else "pending"
+        else:
+            deadline_dt = normalize_schedule_datetime(sched_for, now_dt)
+            if not deadline_dt and sched_schedule:
+                deadline_dt = normalize_schedule_datetime(sched_schedule, now_dt)
 
-        if deadline_dt:
-            activation_time = deadline_dt - timedelta(minutes=30)
-            if now_dt < activation_time:
-                if local_status in ("confirmed", "pending", "draft", "scheduled"):
-                    local_status = "scheduled"
-            elif local_status == "scheduled":
-                local_status = "confirmed"
-        elif str(ord_dict.get("status", "")).upper() in ("PROGRAMADO", "SCHEDULED"):
-            local_status = "scheduled"
+            if deadline_dt:
+                sched_for = deadline_dt.isoformat()
+                if not sched_schedule or ("t" in str(sched_schedule).lower() and len(str(sched_schedule)) >= 19):
+                    sched_schedule = format_schedule_display(deadline_dt, now_dt)
+            elif not sched_schedule:
+                sched_schedule = "Lo antes posible"
+
+            if deadline_dt:
+                activation_time = deadline_dt - timedelta(minutes=30)
+                if now_dt < activation_time:
+                    if local_status in ("confirmed", "pending", "draft", "scheduled"):
+                        local_status = "scheduled"
+                elif local_status == "scheduled":
+                    local_status = "confirmed"
+            elif str(ord_dict.get("status", "")).upper() in ("PROGRAMADO", "SCHEDULED"):
+                local_status = "scheduled"
 
         lat = ord_dict.get("deliveryLat") or ord_dict.get("delivery_lat") or ord_dict.get("latitude")
         lng = ord_dict.get("deliveryLng") or ord_dict.get("delivery_lng") or ord_dict.get("longitude")

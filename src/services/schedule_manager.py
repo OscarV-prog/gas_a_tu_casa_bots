@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from src.repositories import get_repository
-from src.repositories.sqlite_repo import parse_schedule_deadline
+from src.repositories.sqlite_repo import parse_schedule_deadline, get_local_now
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ def format_slot_display(dt: datetime, ref_time: datetime | None = None) -> str:
 
     e.g. 'Hoy a las 5:00 PM', 'Mañana a las 11:30 AM', 'Lunes 28/09 a las 4:00 PM'
     """
-    ref = ref_time or datetime.now()
+    ref = ref_time or get_local_now()
     is_today = dt.date() == ref.date()
     is_tomorrow = dt.date() == (ref.date() + timedelta(days=1))
 
@@ -238,7 +238,7 @@ def check_schedule_availability(
 
     Returns a comprehensive result dictionary.
     """
-    ref = ref_time or datetime.now()
+    ref = ref_time or get_local_now()
     text = (schedule_text or "").strip()
     text_lower = text.lower()
 

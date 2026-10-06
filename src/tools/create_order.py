@@ -146,7 +146,17 @@ def create_order(
         # Asegurar cálculo de scheduled_for si no vino explícito pero el horario no es ASAP
         clean_sched = delivery_schedule.strip() if delivery_schedule else "Lo antes posible"
         clean_sched_for = scheduled_for
-        if (not clean_sched_for or clean_sched_for.strip() == "") and clean_sched and "antes posible" not in clean_sched.lower():
+
+        # Si el cliente solicitó "Lo antes posible" o inmediato, NUNCA autoprogramar
+        is_asap_schedule = any(w in clean_sched.lower() for w in [
+            "lo antes posible", "inmediato", "urgente", "ahorita", "ahora", "asap",
+            "lo mas pronto", "lo más pronto", "ya mismo", "ya", "en cuanto puedan", "cuanto antes"
+        ]) or clean_sched == "Lo antes posible"
+
+        if is_asap_schedule:
+            clean_sched = "Lo antes posible"
+            clean_sched_for = None
+        elif (not clean_sched_for or clean_sched_for.strip() == "") and clean_sched:
             from src.repositories.sqlite_repo import normalize_schedule_datetime, format_schedule_display
             dt_parsed = normalize_schedule_datetime(clean_sched)
             if dt_parsed:
@@ -194,9 +204,11 @@ def create_order(
                 name = getattr(it, "product_name", None) or getattr(it, "name", None) or "Gas LP"
             try:
                 qty_val = float(qty)
-                qty_str = f"{int(qty_val)}" if qty_val.is_integer() else f"{qty_val}"
+                qty_str = f"{int(qty_val)}" if qty_val.is_integer() else f"{qty_val:g}"
             except Exception:
                 qty_str = str(qty)
+            if "estacionario" in name.lower() or "litro" in name.lower():
+                return f"{qty_str} L {name}"
             return f"{qty_str}x {name}"
 
         items_summary = ", ".join(_get_item_desc(it) for it in (getattr(updated_order, "items", []) or [])) or "Gas LP"

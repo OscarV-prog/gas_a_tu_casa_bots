@@ -46,6 +46,18 @@ def _tokenize(text: str) -> set[str]:
     return {_stem(w) for w in words if len(w) >= 2}
 
 
+try:
+    from zoneinfo import ZoneInfo
+    MAZATLAN_TZ = ZoneInfo("America/Mazatlan")
+except Exception:
+    MAZATLAN_TZ = timezone(timedelta(hours=-7))
+
+
+def get_local_now() -> datetime:
+    """Retorna la fecha y hora local actual de Mazatlán (UTC-7) como datetime naive."""
+    return datetime.now(MAZATLAN_TZ).replace(tzinfo=None)
+
+
 def parse_schedule_deadline(schedule: str, ref_time: datetime | None = None) -> datetime | None:
     """Parse natural language Spanish delivery schedule into a target datetime.
     
@@ -58,11 +70,15 @@ def parse_schedule_deadline(schedule: str, ref_time: datetime | None = None) -> 
     if not schedule:
         return None
     s = schedule.strip().lower()
-    if any(w in s for w in ["lo antes posible", "inmediato", "urgente", "ahorita", "ahora"]):
+    if any(w in s for w in [
+        "lo antes posible", "inmediato", "urgente", "ahorita", "ahora", "asap",
+        "lo mas pronto", "lo más pronto", "ya mismo", "ya", "en cuanto puedan",
+        "cuanto antes", "al momento", "lo antes que se pueda"
+    ]):
         return None
 
     if ref_time is None:
-        ref_time = datetime.now()
+        ref_time = get_local_now()
 
     # 1. Try direct ISO format (including UTC Z and offsets)
     clean_iso = schedule.strip()
@@ -217,9 +233,9 @@ def normalize_schedule_datetime(val: Any, ref_time: datetime | None = None) -> d
     if not val:
         return None
     if ref_time is None:
-        ref_time = datetime.now()
+        ref_time = get_local_now()
     if isinstance(val, datetime):
-        return val.astimezone().replace(tzinfo=None) if val.tzinfo else val
+        return val.astimezone(MAZATLAN_TZ).replace(tzinfo=None) if val.tzinfo else val
     val_str = str(val).strip()
     if not val_str:
         return None
@@ -238,13 +254,13 @@ def normalize_schedule_datetime(val: Any, ref_time: datetime | None = None) -> d
     try:
         dt = datetime.fromisoformat(clean_iso)
         if dt.tzinfo:
-            return dt.astimezone().replace(tzinfo=None)
+            return dt.astimezone(MAZATLAN_TZ).replace(tzinfo=None)
         return dt
     except Exception:
         pass
     dt = parse_schedule_deadline(val_str, ref_time)
     if dt and dt.tzinfo is not None:
-        dt = dt.astimezone().replace(tzinfo=None)
+        dt = dt.astimezone(MAZATLAN_TZ).replace(tzinfo=None)
     return dt
 
 
@@ -253,8 +269,9 @@ def to_utc_iso(val: Any, ref_time: datetime | None = None) -> str | None:
     dt = normalize_schedule_datetime(val, ref_time)
     if not dt:
         return None
-    dt_aware = dt.astimezone()
-    dt_utc = dt_aware.astimezone(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=MAZATLAN_TZ)
+    dt_utc = dt.astimezone(timezone.utc)
     return dt_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
@@ -263,9 +280,9 @@ def format_schedule_display(dt: datetime | None, ref_time: datetime | None = Non
     if not dt:
         return "Lo antes posible"
     if ref_time is None:
-        ref_time = datetime.now()
+        ref_time = get_local_now()
     if dt.tzinfo is not None:
-        dt = dt.astimezone().replace(tzinfo=None)
+        dt = dt.astimezone(MAZATLAN_TZ).replace(tzinfo=None)
     is_today = dt.date() == ref_time.date()
     is_tomorrow = dt.date() == (ref_time.date() + timedelta(days=1))
     day_label = "Hoy" if is_today else ("Mañana" if is_tomorrow else dt.strftime("%d/%m/%Y"))
@@ -984,7 +1001,7 @@ class SqliteRepository(ProductRepository):
         scheduled_for: str | None = None,
     ) -> Order:
         """Create a new customer order and order items in SQLite."""
-        now_dt = datetime.now()
+        now_dt = get_local_now()
         now_iso = datetime.now(timezone.utc).isoformat()
         clean_address = resolve_gps_address_to_name(delivery_address.strip())
         if (not clean_address or clean_address.lower().startswith("ubicaci")) and delivery_lat is not None and delivery_lng is not None:
@@ -994,11 +1011,11 @@ class SqliteRepository(ProductRepository):
         clean_schedule = delivery_schedule.strip() if delivery_schedule else "Lo antes posible"
         clean_payment = payment_method.strip() if payment_method else "Efectivo"
 
-        sched_text = str(delivery_schedule or "").strip().lower()
+        sched_text = str(clean_schedule or "").strip().lower()
         has_asap_text = any(w in sched_text for w in [
             "lo antes posible", "inmediato", "urgente", "ahorita", "ahora", "asap",
             "lo mas pronto", "lo más pronto", "ya mismo", "ya", "en cuanto puedan", "cuanto antes"
-        ])
+        ]) or clean_schedule == "Lo antes posible"
         deadline_dt = None
         if not has_asap_text:
             if scheduled_for and str(scheduled_for).strip():

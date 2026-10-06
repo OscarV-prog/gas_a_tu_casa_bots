@@ -564,14 +564,16 @@ def parse_stationary_request_deterministic(text: str, tenant_id: str = "petroil"
     est_prod = next((p for p in prods if "estacionario" in p.name.lower() or "litro" in p.name.lower()), None)
     unit_price = float(est_prod.price) if est_prod and est_prod.price > 0 else 13.20
 
+    prod_id = est_prod.id if est_prod else "gas-estacionario-litro"
+    prod_name = est_prod.name if est_prod else "Gas LP Estacionario (Litro)"
+
     # 1. Detección de Litros explícitos (ej. "50 litros", "100 lts", "45.5 lt", "80l")
     m_liters = re.search(r"(\d{1,5}(?:\.\d+)?)\s*(?:litros|lts|lt|l\b)", text_lower)
     if m_liters:
         liters = float(m_liters.group(1))
-        approx_amount = round(liters * unit_price, 2)
         return [{
-            "product_id": est_prod.id if est_prod else "gas-estacionario-litro",
-            "product_name": f"Gas LP Estacionario ({liters:g} L - ${approx_amount:,.2f} MXN)",
+            "product_id": prod_id,
+            "product_name": prod_name,
             "quantity": liters,
             "unit_price": unit_price,
         }]
@@ -604,10 +606,9 @@ def parse_stationary_request_deterministic(text: str, tenant_id: str = "petroil"
                 amount = val
             elif val >= 10:
                 liters = val
-                approx_amount = round(liters * unit_price, 2)
                 return [{
-                    "product_id": est_prod.id if est_prod else "gas-estacionario-litro",
-                    "product_name": f"Gas LP Estacionario ({liters:g} L - ${approx_amount:,.2f} MXN)",
+                    "product_id": prod_id,
+                    "product_name": prod_name,
                     "quantity": liters,
                     "unit_price": unit_price,
                 }]
@@ -615,8 +616,8 @@ def parse_stationary_request_deterministic(text: str, tenant_id: str = "petroil"
     if amount and amount > 0:
         approx_liters = round(amount / unit_price, 2)
         return [{
-            "product_id": est_prod.id if est_prod else "gas-estacionario-litro",
-            "product_name": f"Gas LP Estacionario ({approx_liters:g} L - ${amount:,.2f} MXN)",
+            "product_id": prod_id,
+            "product_name": prod_name,
             "quantity": approx_liters,
             "unit_price": unit_price,
         }]
@@ -986,7 +987,10 @@ def build_order_summary_text(draft: DraftOrder) -> str:
             qty_str = str(qty)
         total += sub
         if price > 0:
-            lines_items.append(f"• **{qty_str}x {name}** (${sub:,.2f} MXN)")
+            if "estacionario" in name.lower() or "litro" in name.lower():
+                lines_items.append(f"• **{qty_str} L {name}** (${sub:,.2f} MXN)")
+            else:
+                lines_items.append(f"• **{qty_str}x {name}** (${sub:,.2f} MXN)")
         else:
             lines_items.append(f"• **{name}** (Aforo y cobro al surtir)")
 
@@ -1738,7 +1742,7 @@ class FlowRouter:
                         def_liters = round(500.0 / u_price, 2)
                         draft.items = [{
                             "product_id": est_prod.id if est_prod else "gas-estacionario-litro",
-                            "product_name": f"Gas LP Estacionario ({def_liters:g} L - $500.00 MXN)",
+                            "product_name": est_prod.name if est_prod else "Gas LP Estacionario (Litro)",
                             "quantity": def_liters,
                             "unit_price": u_price,
                         }]
@@ -2015,15 +2019,16 @@ class FlowRouter:
                         liters = float(liters)
                         amt_val = float(amount)
 
+                    st_name = est_prod.name if est_prod else "Gas LP Estacionario (Litro)"
                     draft.items = [{
                         "product_id": est_prod.id if est_prod else "gas-estacionario-litro",
-                        "product_name": f"Gas LP Estacionario ({liters:g} L - ${amt_val:,.2f} MXN)",
+                        "product_name": st_name,
                         "quantity": liters,
                         "unit_price": unit_price,
                     }]
                     session.state = FlowState.WAITING_FOR_PHONE
                     return FlowResponse(
-                        text=f"¡Anotado! 🚛 **{draft.items[0]['product_name']}**.\n\nPor favor indícame tu **número celular** (10 dígitos) para buscar tu cuenta:",
+                        text=f"¡Anotado! 🚛 **{liters:g} L {st_name}** (${amt_val:,.2f} MXN).\n\nPor favor indícame tu **número celular** (10 dígitos) para buscar tu cuenta:",
                         state=session.state,
                         is_llm=True,
                         is_fallback=True,
