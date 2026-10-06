@@ -805,14 +805,28 @@ class ApiRepository:
             })
 
         now_dt = datetime.now()
-        deadline_dt = normalize_schedule_datetime(scheduled_for, now_dt)
-        if not deadline_dt and delivery_schedule:
-            deadline_dt = normalize_schedule_datetime(delivery_schedule, now_dt)
+        sched_text = str(delivery_schedule or "").strip().lower()
+        has_asap_text = any(w in sched_text for w in [
+            "lo antes posible", "inmediato", "urgente", "ahorita", "ahora", "asap",
+            "lo mas pronto", "lo más pronto", "ya mismo", "ya", "en cuanto puedan", "cuanto antes"
+        ])
+        deadline_dt = None
+        if not has_asap_text:
+            if scheduled_for and str(scheduled_for).strip():
+                deadline_dt = normalize_schedule_datetime(scheduled_for, now_dt)
+            elif delivery_schedule and delivery_schedule.strip() != "Lo antes posible":
+                deadline_dt = normalize_schedule_datetime(delivery_schedule, now_dt)
 
-        scheduled_for_iso = to_utc_iso(deadline_dt, now_dt) if deadline_dt else None
-        is_scheduled = bool(deadline_dt and now_dt < (deadline_dt - timedelta(minutes=30)))
-        if deadline_dt and (not delivery_schedule or delivery_schedule == "Lo antes posible"):
-            delivery_schedule = format_schedule_display(deadline_dt, now_dt)
+        if deadline_dt and deadline_dt > (now_dt + timedelta(minutes=15)):
+            is_scheduled = True
+            scheduled_for_iso = to_utc_iso(deadline_dt, now_dt)
+            if not delivery_schedule or delivery_schedule == "Lo antes posible":
+                delivery_schedule = format_schedule_display(deadline_dt, now_dt)
+        else:
+            is_scheduled = False
+            deadline_dt = None
+            scheduled_for_iso = None
+            delivery_schedule = "Lo antes posible"
 
         clean_pay = "EFECTIVO" if "efectivo" in payment_method.lower() else ("TARJETA" if "tarjeta" in payment_method.lower() or "terminal" in payment_method.lower() else "EFECTIVO")
         clean_channel = channel.upper() if channel else "TELEGRAM"
@@ -846,15 +860,34 @@ class ApiRepository:
             body["productId"] = api_items[0].get("productId")
             body["quantity"] = api_items[0].get("quantity", 1)
 
-        if customer_id and re.match(r"^[0-9a-fA-F-]{36}$", str(customer_id)):
-            body["customerId"] = str(customer_id)
-        else:
-            try:
-                cust_found = self.get_customer_by_phone(tenant_id, customer_phone)
-                if cust_found and cust_found.id and re.match(r"^[0-9a-fA-F-]{36}$", str(cust_found.id)):
-                    body["customerId"] = str(cust_found.id)
-            except Exception:
-                pass
+        # Sincronizar dirección del cliente en NestJS/PostgreSQL para que en PWA no aparezca dirección vieja
+        try:
+            cust_synced = self.save_or_update_customer(
+                tenant_id=tenant_id,
+                channel=channel,
+                channel_user_id=channel_user_id or customer_phone,
+                name=customer_name,
+                phone=customer_phone,
+                address=delivery_address,
+                lat=delivery_lat,
+                lng=delivery_lng,
+                notes=notes,
+            )
+            if cust_synced and cust_synced.id and re.match(r"^[0-9a-fA-F-]{36}$", str(cust_synced.id)):
+                body["customerId"] = str(cust_synced.id)
+        except Exception as e:
+            logger.debug(f"[ApiRepository] Failed to sync customer profile on order create: {e}")
+
+        if "customerId" not in body:
+            if customer_id and re.match(r"^[0-9a-fA-F-]{36}$", str(customer_id)):
+                body["customerId"] = str(customer_id)
+            else:
+                try:
+                    cust_found = self.get_customer_by_phone(tenant_id, customer_phone)
+                    if cust_found and cust_found.id and re.match(r"^[0-9a-fA-F-]{36}$", str(cust_found.id)):
+                        body["customerId"] = str(cust_found.id)
+                except Exception:
+                    pass
         if delivery_lat is not None and delivery_lng is not None:
             body["latitude"] = float(delivery_lat)
             body["longitude"] = float(delivery_lng)
@@ -1263,8 +1296,11 @@ class ApiRepository:
                     driver_phone_val = o.get("driverPhone") or (d_obj.phone if d_obj else None)
                     driver_veh_val = o.get("truckPlate") or (d_obj.vehicle_plate if d_obj else ("Cilindros" if driver_id_val else None))
 
+                    last_trace_desc = ""
                     for tr in (o.get("traceability") or []):
                         desc = str(tr.get("description") or "")
+                        if desc:
+                            last_trace_desc = desc
                         if "Calificación recibida:" in desc or "estrellas" in desc:
                             m_stars = re.search(r"(\d+)/5", desc)
                             if m_stars and rating_val is None:
@@ -1278,6 +1314,15 @@ class ApiRepository:
                                 pass
                         if "rechaz" in desc.lower() or "motivo" in desc.lower():
                             rejection_reason_val = desc
+
+                    # Interceptar error del dashboard externo donde asignación envía ENTREGADO
+                    if api_status in ("ENTREGADO", "DELIVERED") and ("salir a ruta" in last_trace_desc.lower() or "unidad asignada" in last_trace_desc.lower()):
+                        local_status = "assigned"
+                        try:
+                            target_uuid = self._resolve_order_uuid(raw_id)
+                            api_patch(f"/orders/{target_uuid}/status", {"status": "ASIGNADO", "description": "Auto-corrección: Unidad asignada a chofer", "actor": "SISTEMA"}, timeout=3)
+                        except Exception:
+                            pass
 
                     # If rating found, persist it to IdentityStore only if not already saved
                     if rating_val and raw_id and not saved_rating:
@@ -1300,6 +1345,8 @@ class ApiRepository:
                         "total_amount": float(o.get("totalAmount") or 0.0),
                         "currency": "MXN",
                         "status": local_status,
+                        "last_traceability_desc": last_trace_desc,
+                        "traceability": o.get("traceability") or [],
                         "payment_method": o.get("paymentMethod") or "Efectivo",
                         "notes": o.get("notes") or "",
                         "channel": str(o.get("channel") or "TELEGRAM").lower(),
@@ -1307,7 +1354,7 @@ class ApiRepository:
                         "driver_name": driver_name_val,
                         "driver_phone": driver_phone_val,
                         "driver_vehicle": driver_veh_val,
-                        "driver_rating": rating_val or (5.0 if local_status == "delivered" else None),
+                        "driver_rating": rating_val,
                         "rating_tag": rating_tag_val,
                         "rating_comment": rating_comment_val,
                         "rejection_reason": rejection_reason_val,
@@ -1829,7 +1876,7 @@ class ApiRepository:
         all_stored_ratings = identity_store.get_all_order_ratings()
         ratings_by_driver: dict[str, list[float]] = {}
         for r in all_stored_ratings:
-            drv_id = str(r.get("driver_id") or "").strip()
+            drv_id = str(r.get("driver_id") or "").strip().lower()
             if drv_id and r.get("rating"):
                 try:
                     ratings_by_driver.setdefault(drv_id, []).append(float(r["rating"]))
@@ -1838,7 +1885,7 @@ class ApiRepository:
 
         # Also pull ratings from orders if not already in store
         for o in orders:
-            drv_id = str(o.get("driver_id") or "").strip()
+            drv_id = str(o.get("driver_id") or "").strip().lower()
             r_val = o.get("driver_rating")
             if drv_id and r_val:
                 o_id_str = str(o.get("id"))
@@ -1862,7 +1909,21 @@ class ApiRepository:
             else:
                 op_status = "fuera_servicio"
 
-            d_ratings = ratings_by_driver.get(str(d.id), [])
+            # Match ratings belonging to this driver across any identifier
+            d_keys = {str(d.id).strip().lower()}
+            if d.telegram_user_id:
+                d_keys.add(str(d.telegram_user_id).strip().lower())
+            if d.name:
+                d_keys.add(str(d.name).strip().lower())
+            if d.phone:
+                d_keys.add(re.sub(r"\D", "", str(d.phone)))
+
+            d_ratings: list[float] = []
+            for k in d_keys:
+                if k in ratings_by_driver:
+                    for val in ratings_by_driver[k]:
+                        d_ratings.append(val)
+
             if d_ratings:
                 avg_rating = round(sum(d_ratings) / len(d_ratings), 1)
                 total_ratings = len(d_ratings)
@@ -1887,6 +1948,7 @@ class ApiRepository:
                 "active_delivery_address": active_orders[0].get("delivery_address") if active_orders else None,
                 "active_order_status": active_orders[0].get("status") if active_orders else None,
                 "avg_rating": avg_rating,
+                "rating": avg_rating,
                 "total_ratings": total_ratings,
                 "current_lat": d.current_lat,
                 "current_lng": d.current_lng,
@@ -2716,9 +2778,24 @@ class ApiRepository:
 
     def get_driver_ratings(self, tenant_id: str, driver_id: Any, limit: int = 50) -> list[dict[str, Any]]:
         """Get customer ratings for a specific driver."""
-        d_str = str(driver_id).strip()
-        all_ratings = self.get_all_ratings_admin(tenant_id, limit=200)
-        filtered = [r for r in all_ratings if str(r.get("driver_id") or "").strip() == d_str]
+        driver_obj = self.get_driver(driver_id)
+        d_keys = {str(driver_id).strip().lower()}
+        if driver_obj:
+            d_keys.add(str(driver_obj.id).strip().lower())
+            if driver_obj.telegram_user_id:
+                d_keys.add(str(driver_obj.telegram_user_id).strip().lower())
+            if driver_obj.name:
+                d_keys.add(str(driver_obj.name).strip().lower())
+            if driver_obj.phone:
+                d_keys.add(re.sub(r"\D", "", str(driver_obj.phone)))
+
+        all_ratings = self.get_all_ratings_admin(tenant_id, limit=500)
+        filtered = []
+        for r in all_ratings:
+            r_drv = str(r.get("driver_id") or "").strip().lower()
+            r_name = str(r.get("driver_name") or "").strip().lower()
+            if r_drv in d_keys or r_name in d_keys:
+                filtered.append(r)
         return filtered[:limit]
 
     def get_driver_rating_stats(self, tenant_id: str, driver_id: Any) -> dict[str, Any]:
@@ -3109,6 +3186,29 @@ class ApiRepository:
 
         cust = ord_dict.get("customer") or {}
         local_status = self._map_api_status_to_local(ord_dict.get("status"))
+
+        # Interceptar error del dashboard externo donde asignación de chofer envía erróneamente ENTREGADO
+        if local_status == "delivered":
+            last_trace_desc = ""
+            is_erroneous_delivery = False
+            for tr in (ord_dict.get("traceability") or []):
+                tr_status = str(tr.get("status") or "").upper()
+                tr_desc = str(tr.get("description") or "").lower()
+                tr_actor = str(tr.get("actor") or "").upper()
+                if tr_desc:
+                    last_trace_desc = tr_desc
+                if tr_status in ("ENTREGADO", "DELIVERED"):
+                    if any(k in tr_desc for k in ["salir a ruta", "unidad asignada", "asignad", "lista para salir"]) or tr_actor in ("OPERADOR_CENTRAL", "CENTRAL"):
+                        if not any(k in tr_desc for k in ["entregado exitosamente", "firma registrada", "foto"]):
+                            is_erroneous_delivery = True
+            if is_erroneous_delivery or any(k in last_trace_desc for k in ["salir a ruta", "unidad asignada", "lista para salir"]):
+                local_status = "assigned"
+                try:
+                    target_uuid = self._resolve_order_uuid(ord_dict.get("id") or raw_id)
+                    api_patch(f"/orders/{target_uuid}/status", {"status": "ASIGNADO", "description": "Auto-corrección: Unidad asignada a chofer", "actor": "SISTEMA"}, timeout=3)
+                except Exception:
+                    pass
+
         sched_for = ord_dict.get("scheduledFor") or ord_dict.get("scheduled_for")
         sched_schedule = ord_dict.get("deliverySchedule") or ord_dict.get("delivery_schedule")
 

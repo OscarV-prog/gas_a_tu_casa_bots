@@ -835,6 +835,12 @@ async def get_driver_orders(
             "customerName": o.customer_name,
             "customerPhone": o.customer_phone,
             "deliveryAddress": o.delivery_address,
+            "address": o.delivery_address,
+            "customer": {
+                "name": o.customer_name,
+                "phone": o.customer_phone,
+                "address": o.delivery_address,
+            },
             "deliverySchedule": o.delivery_schedule,
             "totalAmount": o.total_amount,
             "paymentMethod": o.payment_method,

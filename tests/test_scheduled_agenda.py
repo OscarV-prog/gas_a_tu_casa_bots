@@ -241,13 +241,11 @@ class TestScheduledAgenda(unittest.TestCase):
         self.assertEqual(dt_7pm.date(), ref_day.date() + timedelta(days=1), "7:00 PM closing rolls over to tomorrow")
         self.assertEqual(dt_7pm.hour, 8, "Opens at 8:00 AM next day")
 
-        # 4. Order placed after hours (e.g. 7:15 PM) with 'Lo antes posible'
+        # 4. Order placed after hours (e.g. 7:15 PM) with 'Lo antes posible' must NOT be auto-scheduled
         ref_night = datetime(2026, 10, 2, 19, 15, 0)
         from src.repositories.sqlite_repo import normalize_schedule_datetime
         dt_asap_night = normalize_schedule_datetime("Lo antes posible", ref_night)
-        self.assertIsNotNone(dt_asap_night)
-        self.assertEqual(dt_asap_night.date(), ref_night.date() + timedelta(days=1))
-        self.assertEqual(dt_asap_night.hour, 8)
+        self.assertIsNone(dt_asap_night, "ASAP orders must never be auto-scheduled without explicit future date/time")
 
     def test_scheduled_order_at_5pm_activates_at_430pm_not_at_2pm(self):
         """Test that an order for 5:00 PM activates exactly at 4:30 PM, NOT at 2:00 PM even if driver is assigned."""

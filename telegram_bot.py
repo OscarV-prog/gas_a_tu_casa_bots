@@ -901,7 +901,8 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if awaiting_order_id:
         curr_session = flow_router.get_session(f"telegram:{TENANT_ID}:{chat_id}")
 
-        has_phone_digits = bool(re.search(r"\b\d{7,10}\b", texto_usuario))
+        digits_only = re.sub(r"\D", "", texto_usuario)
+        has_phone_digits = len(digits_only) >= 7 or bool(re.search(r"\b\d{7,10}\b", texto_usuario))
         is_greeting_or_cmd = any(texto_lower.startswith(g) for g in ["hola", "buen", "hey", "/start", "/menu", "inicio", "empezar", "que tal", "buenas", "ayuda"])
         is_order_intent = any(k in texto_lower for k in [
             "quiero", "cilindro", "estacionario", "tanque", "litros", "pedir", "orden", "gas",
@@ -1149,7 +1150,7 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
     thread_id = f"telegram:{TENANT_ID}:{chat_id}"
 
     # Descartar cualquier comentario de calificación pendiente si se presiona cualquier botón de flujo
-    if not data.startswith("driver_rating:"):
+    if not data.startswith("driver_rating:") and not data.startswith("rate_tag:"):
         context.user_data.pop("awaiting_rating_comment_order_id", None)
         context.user_data.pop("awaiting_rating_time", None)
 

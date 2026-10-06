@@ -225,12 +225,12 @@ def normalize_schedule_datetime(val: Any, ref_time: datetime | None = None) -> d
         return None
 
     # Si es "lo antes posible" / inmediato:
-    # Si la gasera ya cerró (>= 19:00 hrs), se programa para mañana a las 8:00 AM
-    if any(w in val_str.lower() for w in ["lo antes posible", "inmediato", "urgente", "ahorita", "ahora"]):
-        if ref_time.hour >= 19:
-            return datetime.combine(ref_time.date() + timedelta(days=1), datetime.min.time()).replace(hour=8, minute=0)
-        elif ref_time.hour < 8:
-            return datetime.combine(ref_time.date(), datetime.min.time()).replace(hour=8, minute=0)
+    # NUNCA programar automáticamente un pedido si el cliente no especificó fecha u hora futura.
+    if any(w in val_str.lower() for w in [
+        "lo antes posible", "inmediato", "urgente", "ahorita", "ahora", "asap",
+        "lo mas pronto", "lo más pronto", "ya mismo", "ya", "en cuanto puedan",
+        "cuanto antes", "al momento", "lo antes que se pueda"
+    ]):
         return None
     clean_iso = val_str
     if clean_iso.endswith("Z"):
@@ -994,22 +994,27 @@ class SqliteRepository(ProductRepository):
         clean_schedule = delivery_schedule.strip() if delivery_schedule else "Lo antes posible"
         clean_payment = payment_method.strip() if payment_method else "Efectivo"
 
-        # Check deadline and scheduled status
-        deadline_dt = normalize_schedule_datetime(scheduled_for, now_dt)
-        if not deadline_dt and clean_schedule:
-            deadline_dt = normalize_schedule_datetime(clean_schedule, now_dt)
+        sched_text = str(delivery_schedule or "").strip().lower()
+        has_asap_text = any(w in sched_text for w in [
+            "lo antes posible", "inmediato", "urgente", "ahorita", "ahora", "asap",
+            "lo mas pronto", "lo más pronto", "ya mismo", "ya", "en cuanto puedan", "cuanto antes"
+        ])
+        deadline_dt = None
+        if not has_asap_text:
+            if scheduled_for and str(scheduled_for).strip():
+                deadline_dt = normalize_schedule_datetime(scheduled_for, now_dt)
+            elif clean_schedule and clean_schedule != "Lo antes posible":
+                deadline_dt = normalize_schedule_datetime(clean_schedule, now_dt)
 
-        scheduled_for_iso = deadline_dt.isoformat() if deadline_dt else None
-        if deadline_dt and (not clean_schedule or clean_schedule == "Lo antes posible"):
-            clean_schedule = format_schedule_display(deadline_dt, now_dt)
-
-        if deadline_dt:
-            # If scheduled delivery is more than 30 minutes in the future, hold in 'scheduled'
-            if now_dt < (deadline_dt - timedelta(minutes=30)):
-                initial_status = "scheduled"
-            else:
-                initial_status = "confirmed"
+        if deadline_dt and deadline_dt > (now_dt + timedelta(minutes=15)):
+            scheduled_for_iso = deadline_dt.isoformat()
+            if not clean_schedule or clean_schedule == "Lo antes posible":
+                clean_schedule = format_schedule_display(deadline_dt, now_dt)
+            initial_status = "scheduled" if now_dt < (deadline_dt - timedelta(minutes=30)) else "confirmed"
         else:
+            deadline_dt = None
+            scheduled_for_iso = None
+            clean_schedule = "Lo antes posible"
             initial_status = "confirmed"
 
         # Find or create customer

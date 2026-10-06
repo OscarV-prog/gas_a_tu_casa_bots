@@ -299,8 +299,10 @@ class IdentityStore:
         unique = []
         for r in self._order_ratings.values():
             oid = str(r.get("order_id", ""))
-            if oid and oid not in seen:
-                seen.add(oid)
+            digits = re.findall(r"\d+", oid)
+            norm_key = str(int(digits[-1])) if digits else oid.strip().lower()
+            if norm_key and norm_key not in seen:
+                seen.add(norm_key)
                 unique.append(r)
         return unique
 
