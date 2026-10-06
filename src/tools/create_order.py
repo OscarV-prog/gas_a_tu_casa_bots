@@ -81,8 +81,6 @@ def create_order(
 
             if qty <= 0:
                 return f"Error de seguridad: La cantidad para '{p_name}' debe ser mayor a 0."
-            if qty > 50:
-                return f"Error: La cantidad máxima permitida por pedido minorista es de 50 unidades. Para pedidos de mayoreo, por favor contacta a un asesor."
 
             # Buscar en catálogo oficial
             matched_prod = prods_by_id.get(p_id) or prods_by_name.get(p_name.lower())
@@ -93,20 +91,42 @@ def create_order(
                         matched_prod = p
                         break
 
+            is_stationary = (
+                "estacionario" in p_name.lower()
+                or "litro" in p_name.lower()
+                or "pipa" in p_name.lower()
+                or (matched_prod and (
+                    "estacionario" in matched_prod.name.lower()
+                    or "litro" in str(getattr(matched_prod, "unit", "")).lower()
+                    or str(getattr(matched_prod, "category", "")).upper() == "ESTACIONARIO"
+                ))
+            )
+
+            max_qty = 5000.0 if is_stationary else 50.0
+            if qty > max_qty:
+                unit_label = "litros" if is_stationary else "unidades"
+                return f"Error: La cantidad máxima permitida por pedido minorista es de {int(max_qty)} {unit_label}. Para pedidos de mayoreo, por favor contacta a un asesor."
+
             if matched_prod:
                 if not matched_prod.in_stock:
                     return f"Aviso: El producto '{matched_prod.name}' se encuentra temporalmente agotado."
+
+                # Si es gas estacionario y la cantidad vino como 1 o pequeña pero unit_price vino con el monto en pesos (ej. $500)
+                incoming_unit_price = float(it.get("unit_price") or 0.0)
+                if is_stationary and incoming_unit_price > (matched_prod.price * 1.5) and qty <= 5.0:
+                    qty = round(incoming_unit_price / matched_prod.price, 2)
+
                 validated_items.append({
                     "product_id": matched_prod.id,
                     "product_name": matched_prod.name,
-                    "quantity": int(qty) if qty.is_integer() else qty,
+                    "quantity": int(qty) if qty.is_integer() else round(qty, 2),
                     "unit_price": matched_prod.price,  # PRECIO DETERMINISTA FORZADO DE BD
                 })
             else:
                 validated_items.append({
                     "product_id": p_id or "cilindro-gas",
                     "product_name": p_name or "Cilindro de Gas LP",
-                    "quantity": int(qty) if qty.is_integer() else qty,
+                    "quantity": int(qty) if qty.is_integer() else round(qty, 2),
                 })
 
         clean_addr = resolve_gps_address_to_name(delivery_address.strip())

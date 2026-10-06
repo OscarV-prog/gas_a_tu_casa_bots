@@ -13,12 +13,13 @@ class OrderItem(BaseModel):
     order_id: int | str | None = None
     product_id: str
     product_name: str
-    quantity: int = 1
+    quantity: float | int = 1
     unit_price: float
     subtotal: float
 
     def to_display(self) -> str:
-        return f"- {self.quantity}x {self.product_name} (${self.unit_price:.2f} c/u) = ${self.subtotal:.2f}"
+        qty_str = f"{self.quantity:g}" if isinstance(self.quantity, float) else str(self.quantity)
+        return f"- {qty_str}x {self.product_name} (${self.unit_price:.2f} c/u) = ${self.subtotal:.2f}"
 
 
 class Order(BaseModel):

@@ -209,13 +209,15 @@ def detect_correction_or_backtracking_intent(
             items = parsed_cyl or parsed_est
             return CorrectionIntent(target="new_order", extracted_value=items, original_text=text)
 
-    # 0.1 Si el usuario escribe directamente un producto durante cualquier estado de dirección, fecha o confirmación
+    # 0.1 Si el usuario escribe directamente un producto durante cualquier estado de dirección, fecha o confirmación (y no es una pregunta de precio/FAQ)
     if session and session.state not in (FlowState.INITIAL, FlowState.WAITING_FOR_PRODUCT_OR_QUANTITY):
-        tenant_id = getattr(session, "tenant_id", "petroil") if session else "petroil"
-        parsed_cyl = parse_cylinder_request_deterministic(text, tenant_id)
-        parsed_est = parse_stationary_request_deterministic(text, tenant_id)
-        if parsed_cyl or parsed_est:
-            return CorrectionIntent(target="new_order", extracted_value=(parsed_cyl or parsed_est), original_text=text)
+        is_faq_question = "?" in t or any(k in t for k in ["cuanto", "cuánto", "precio", "costo", "vale", "cotiz", "a cómo", "a como"])
+        if not is_faq_question:
+            tenant_id = getattr(session, "tenant_id", "petroil") if session else "petroil"
+            parsed_cyl = parse_cylinder_request_deterministic(text, tenant_id)
+            parsed_est = parse_stationary_request_deterministic(text, tenant_id)
+            if parsed_cyl or parsed_est:
+                return CorrectionIntent(target="new_order", extracted_value=(parsed_cyl or parsed_est), original_text=text)
 
     # 1. HORARIO / REPROGRAMAR / REAGENDAR / PROGRAMAR
     schedule_patterns = [
@@ -560,32 +562,64 @@ def parse_stationary_request_deterministic(text: str, tenant_id: str = "petroil"
     repo = get_repository()
     prods = repo.get_all_products(tenant_id)
     est_prod = next((p for p in prods if "estacionario" in p.name.lower() or "litro" in p.name.lower()), None)
-    unit_price = est_prod.price if est_prod else 11.50
+    unit_price = float(est_prod.price) if est_prod and est_prod.price > 0 else 13.20
 
-    # 1. Detección de Litros
-    m_liters = re.search(r"(\d{1,5})\s*(?:litros|lts|lt|l\b)", text_lower)
+    # 1. Detección de Litros explícitos (ej. "50 litros", "100 lts", "45.5 lt", "80l")
+    m_liters = re.search(r"(\d{1,5}(?:\.\d+)?)\s*(?:litros|lts|lt|l\b)", text_lower)
     if m_liters:
         liters = float(m_liters.group(1))
+        approx_amount = round(liters * unit_price, 2)
         return [{
             "product_id": est_prod.id if est_prod else "gas-estacionario-litro",
-            "product_name": f"Gas LP Estacionario ({liters:g} Litros)",
+            "product_name": f"Gas LP Estacionario ({liters:g} L - ${approx_amount:,.2f} MXN)",
             "quantity": liters,
             "unit_price": unit_price,
         }]
 
-    # 2. Detección de Monto en Pesos ($500, 500 pesos, etc.)
-    m_pesos = re.search(r"(?:\$|\bpesos|\bmxn)\s*(\d{2,5})|(\d{2,5})\s*(?:pesos|mxn|\$)", text_lower)
+    # 2. Detección de Monto en Pesos ($500, 500 pesos, 500 mxn, etc.)
+    amount: float | None = None
+    m_pesos = re.search(r"(?:\$|\bpesos|\bmxn)\s*(\d{1,5}(?:\.\d+)?)|(\d{1,5}(?:\.\d+)?)\s*(?:pesos|mxn|\$)", text_lower)
     if m_pesos:
         amount_str = m_pesos.group(1) or m_pesos.group(2)
         if amount_str:
             amount = float(amount_str)
-            approx_liters = round(amount / unit_price, 2)
-            return [{
-                "product_id": est_prod.id if est_prod else "gas-estacionario-litro",
-                "product_name": f"Recarga de Gas Estacionario (${amount:,.2f} MXN ~ {approx_liters} L)",
-                "quantity": 1,
-                "unit_price": amount,
-            }]
+
+    # Detección de palabras numéricas en pesos (ej. "quinientos pesos", "mil pesos")
+    words_map = {
+        "doscientos": 200.0, "trescientos": 300.0, "cuatrocientos": 400.0, "quinientos": 500.0,
+        "seiscientos": 600.0, "setecientos": 700.0, "ochocientos": 800.0, "novecientos": 900.0,
+        "mil": 1000.0, "dos mil": 2000.0, "tres mil": 3000.0
+    }
+    for w, val in words_map.items():
+        if w in text_lower:
+            amount = val
+            break
+
+    # Detección de número directo (ej. usuario responde "500" o "1000" tras preguntar monto/litros)
+    if amount is None:
+        m_plain = re.search(r"^\s*(?:quiero\s+|por\s+favor\s+|de\s+)?(?:\$)?\s*(\d{2,5})\s*$", text_lower)
+        if m_plain:
+            val = float(m_plain.group(1))
+            if val >= 100:
+                amount = val
+            elif val >= 10:
+                liters = val
+                approx_amount = round(liters * unit_price, 2)
+                return [{
+                    "product_id": est_prod.id if est_prod else "gas-estacionario-litro",
+                    "product_name": f"Gas LP Estacionario ({liters:g} L - ${approx_amount:,.2f} MXN)",
+                    "quantity": liters,
+                    "unit_price": unit_price,
+                }]
+
+    if amount and amount > 0:
+        approx_liters = round(amount / unit_price, 2)
+        return [{
+            "product_id": est_prod.id if est_prod else "gas-estacionario-litro",
+            "product_name": f"Gas LP Estacionario ({approx_liters:g} L - ${amount:,.2f} MXN)",
+            "quantity": approx_liters,
+            "unit_price": unit_price,
+        }]
 
     # 3. Detección de Tanque Completo o Porcentaje
     if any(k in text_lower for k in ["lleno", "llenar", "completar", "al 80%", "80%", "al 100%", "tanque lleno"]):
@@ -943,10 +977,16 @@ def build_order_summary_text(draft: DraftOrder) -> str:
         qty = it.get("quantity", 1)
         name = it.get("product_name", "Gas LP")
         price = it.get("unit_price", 0.0)
-        sub = qty * price if price > 0 else 0.0
+        try:
+            qty_num = float(qty)
+            sub = round(qty_num * float(price), 2) if float(price) > 0 else 0.0
+            qty_str = f"{qty_num:g}" if isinstance(qty, float) or (isinstance(qty_num, float) and not qty_num.is_integer()) else str(int(qty_num))
+        except (ValueError, TypeError):
+            sub = 0.0
+            qty_str = str(qty)
         total += sub
         if price > 0:
-            lines_items.append(f"• **{qty}x {name}** (${sub:,.2f} MXN)")
+            lines_items.append(f"• **{qty_str}x {name}** (${sub:,.2f} MXN)")
         else:
             lines_items.append(f"• **{name}** (Aforo y cobro al surtir)")
 
@@ -1692,7 +1732,16 @@ class FlowRouter:
                 # Asegurar que existan items antes de crear el pedido
                 if not draft.items:
                     if draft.service_type == "estacionario":
-                        draft.items = [{"product_id": "gas-estacionario-litro", "product_name": "Gas LP Estacionario", "quantity": 1, "unit_price": 13.50}]
+                        prods = repo.get_all_products(session.tenant_id)
+                        est_prod = next((p for p in prods if "estacionario" in p.name.lower() or "litro" in p.name.lower()), None)
+                        u_price = float(est_prod.price) if est_prod and est_prod.price > 0 else 13.20
+                        def_liters = round(500.0 / u_price, 2)
+                        draft.items = [{
+                            "product_id": est_prod.id if est_prod else "gas-estacionario-litro",
+                            "product_name": f"Gas LP Estacionario ({def_liters:g} L - $500.00 MXN)",
+                            "quantity": def_liters,
+                            "unit_price": u_price,
+                        }]
                     else:
                         draft.items = [{"product_id": "gas-lp-30kg", "product_name": "Cilindro 30 kg", "quantity": 1, "unit_price": 670.0}]
 
@@ -1763,7 +1812,7 @@ class FlowRouter:
             draft.scheduled_for = session.proposed_scheduled_for
             session.proposed_schedule = None
             session.proposed_scheduled_for = None
-            if draft.payment_method and draft.items and draft.delivery_address:
+            if state == FlowState.WAITING_FOR_CONFIRMATION:
                 session.state = FlowState.WAITING_FOR_CONFIRMATION
                 summary_text = build_order_summary_text(draft)
                 return FlowResponse(
@@ -1953,11 +2002,24 @@ class FlowRouter:
                 liters = data_json.get("liters")
                 amount = data_json.get("amount_pesos")
                 if liters or amount:
+                    prods = repo.get_all_products(session.tenant_id)
+                    est_prod = next((p for p in prods if "estacionario" in p.name.lower() or "litro" in p.name.lower()), None)
+                    unit_price = float(est_prod.price) if est_prod and est_prod.price > 0 else 13.20
+                    if amount and not liters:
+                        liters = round(float(amount) / unit_price, 2)
+                        amt_val = float(amount)
+                    elif liters and not amount:
+                        liters = float(liters)
+                        amt_val = round(liters * unit_price, 2)
+                    else:
+                        liters = float(liters)
+                        amt_val = float(amount)
+
                     draft.items = [{
-                        "product_id": "gas-estacionario-litro",
-                        "product_name": f"Gas LP Estacionario ({liters or amount} { 'Litros' if liters else 'Pesos' })",
-                        "quantity": float(liters or 1),
-                        "unit_price": 11.50 if liters else float(amount),
+                        "product_id": est_prod.id if est_prod else "gas-estacionario-litro",
+                        "product_name": f"Gas LP Estacionario ({liters:g} L - ${amt_val:,.2f} MXN)",
+                        "quantity": liters,
+                        "unit_price": unit_price,
                     }]
                     session.state = FlowState.WAITING_FOR_PHONE
                     return FlowResponse(

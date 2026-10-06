@@ -768,7 +768,10 @@ class ApiRepository:
         for it in items:
             p_id = str(it.get("product_id") or it.get("productId") or "")
             p_name = str(it.get("product_name") or it.get("name") or "")
-            qty = int(it.get("quantity") or it.get("qty") or 1)
+            try:
+                raw_qty = float(it.get("quantity") or it.get("qty") or 1)
+            except (ValueError, TypeError):
+                raw_qty = 1.0
 
             # Match against remote product UUID
             matched_prod = prods_by_id.get(p_id) or prods_by_name.get(p_name.lower())
@@ -794,14 +797,28 @@ class ApiRepository:
                 prod_name_clean = p_name or "Cilindro de Gas LP 30 kg"
                 price = float(it.get("unit_price") or 705.0)
 
-            total_calc += price * qty
+            is_stationary = (
+                matched_prod and (
+                    "estacionario" in matched_prod.name.lower()
+                    or "litro" in str(getattr(matched_prod, "unit", "")).lower()
+                    or str(getattr(matched_prod, "category", "")).upper() == "ESTACIONARIO"
+                )
+            ) or ("estacionario" in p_name.lower() or "litro" in p_name.lower())
+
+            incoming_price = float(it.get("unit_price") or it.get("price") or 0.0)
+            if is_stationary and incoming_price > (price * 1.5) and raw_qty <= 5.0:
+                raw_qty = round(incoming_price / price, 2)
+
+            qty = int(raw_qty) if raw_qty.is_integer() else round(raw_qty, 2)
+            subtotal = round(price * qty, 2)
+            total_calc += subtotal
             api_items.append({"productId": str(real_p_id), "quantity": qty})
             clean_items_for_local.append({
                 "product_id": real_p_id,
                 "product_name": prod_name_clean,
                 "quantity": qty,
                 "unit_price": price,
-                "subtotal": price * qty,
+                "subtotal": subtotal,
             })
 
         now_dt = datetime.now()
@@ -3162,11 +3179,16 @@ class ApiRepository:
         items = []
         for it in ord_dict.get("items", []):
             p_info = it.get("product") or {}
+            try:
+                raw_q = float(it.get("quantity", 1))
+                item_qty = int(raw_q) if raw_q.is_integer() else round(raw_q, 2)
+            except (ValueError, TypeError):
+                item_qty = 1
             items.append(
                 OrderItem(
                     product_id=it.get("productId", ""),
                     product_name=it.get("productName", p_info.get("name", "Gas LP")),
-                    quantity=int(it.get("quantity", 1)),
+                    quantity=item_qty,
                     unit_price=float(it.get("unitPrice", p_info.get("pricePerUnit", 0.0))),
                     subtotal=float(it.get("subtotal", 0.0)),
                 )

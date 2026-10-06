@@ -1059,9 +1059,10 @@ class SqliteRepository(ProductRepository):
         for raw_item in items:
             product_id = str(raw_item.get("product_id", "")).strip()
             product_name = str(raw_item.get("product_name", "")).strip()
-            quantity = int(raw_item.get("quantity", 1))
-            if quantity <= 0:
-                quantity = 1
+            try:
+                raw_qty = float(raw_item.get("quantity", 1))
+            except (ValueError, TypeError):
+                raw_qty = 1.0
 
             matched_p = prod_map_by_id.get(product_id.lower())
             if not matched_p and product_name:
@@ -1081,7 +1082,23 @@ class SqliteRepository(ProductRepository):
                 p_name = product_name or product_id or "Producto Gas"
                 unit_price = float(raw_item.get("unit_price", 0.0))
 
-            subtotal = unit_price * quantity
+            is_stationary = (
+                matched_p and (
+                    "estacionario" in matched_p.name.lower()
+                    or "litro" in str(getattr(matched_p, "unit", "")).lower()
+                    or str(getattr(matched_p, "category", "")).upper() == "ESTACIONARIO"
+                )
+            ) or ("estacionario" in product_name.lower() or "litro" in product_name.lower())
+
+            incoming_price = float(raw_item.get("unit_price", 0.0))
+            if is_stationary and incoming_price > (unit_price * 1.5) and raw_qty <= 5.0:
+                raw_qty = round(incoming_price / unit_price, 2)
+
+            quantity = int(raw_qty) if raw_qty.is_integer() else round(raw_qty, 2)
+            if quantity <= 0:
+                quantity = 1
+
+            subtotal = round(unit_price * quantity, 2)
             total_amount += subtotal
 
             order_items_to_save.append(
