@@ -219,13 +219,18 @@ async def _process_single_instagram_event(event: dict[str, Any]) -> None:
         order_id = int(parts[1])
         stars = int(parts[2])
 
+        order = repo.get_order_by_id(TENANT_ID, order_id)
+        driver_id = order.driver_id if order else None
+        customer_id = order.customer_id if order else None
+
         repo.save_order_rating(
             tenant_id=TENANT_ID,
             order_id=order_id,
             rating=stars,
+            driver_id=driver_id,
+            customer_id=customer_id,
         )
 
-        order = repo.get_order_by_id(TENANT_ID, order_id)
         driver_name = "tu repartidor"
         if order and order.driver_id:
             d = repo.get_driver(order.driver_id)
@@ -653,7 +658,7 @@ async def _process_single_instagram_event(event: dict[str, Any]) -> None:
                 await adapter.send_quick_replies(igsid, full_text, adapter.get_customer_addresses_quick_replies(addrs))
             return
 
-        elif interactive_id.startswith("client_addr:") or interactive_id in ("client_addr_new", "client_addr:new"):
+        elif (interactive_id.startswith("client_addr:") or interactive_id in ("client_addr_new", "client_addr:new")) and not any(k in interactive_id for k in ["del_menu", "cancel_del", "client_addr_del"]):
             flow_res = await flow_router.process_event(
                 session_id=igsid,
                 callback_data=interactive_id,
@@ -955,6 +960,39 @@ async def _dispatch_flow_response_instagram(flow_res: FlowResponse, igsid: str) 
             recipient_igsid=igsid,
             elements=elements,
         )
+        return
+
+    elif action_performed == "show_delete_address_buttons":
+        sess = flow_router.get_session(igsid)
+        phone_to_search = (sess.draft_order.customer_phone if (sess and sess.draft_order and sess.draft_order.customer_phone) else None) or identity_store.get_phone_for_channel_user("instagram", igsid)
+        cust = repo.get_customer_by_phone(TENANT_ID, phone_to_search) if phone_to_search else None
+        if not cust and not phone_to_search:
+            cust = repo.get_customer(TENANT_ID, "instagram", igsid)
+
+        addrs = cust.addresses if (cust and cust.addresses) else []
+        if addrs:
+            del_replies = []
+            for i, a in enumerate(addrs[:10], start=1):
+                c_addr = resolve_gps_address_to_name(a.address.strip())
+                c_addr = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", c_addr, flags=re.I).strip()
+                calle = c_addr.split(",")[0].strip() if c_addr else "Domicilio"
+                short = calle[:13] if len(calle) > 13 else calle
+                addr_id = a.id if a.id else i
+                del_replies.append({"id": f"del_addr_prompt:{addr_id}", "title": f"🗑️ {i}. {short}"[:20]})
+            del_replies.append({"id": "client_addr:cancel_del", "title": "🔙 Cancelar"})
+            await adapter.send_quick_replies(igsid, respuesta or "🗑️ Selecciona cuál de tus direcciones deseas borrar:", del_replies)
+        else:
+            await adapter.send_text_message(igsid, "ℹ️ No tienes direcciones registradas para eliminar.")
+        return
+
+    elif action_performed == "show_delete_confirm_buttons":
+        sess = flow_router.get_session(igsid)
+        pending_aid = getattr(sess, "_pending_delete_address_id", "") if sess else ""
+        confirm_replies = [
+            {"id": f"del_addr_confirm:{pending_aid}", "title": "🗑️ Sí, eliminar"},
+            {"id": "client_addr:cancel_del", "title": "❌ Cancelar"},
+        ]
+        await adapter.send_quick_replies(igsid, respuesta, confirm_replies)
         return
 
     elif action_performed in ("show_address_buttons", "select_address") or state == FlowState.WAITING_FOR_ADDRESS_SELECTION:

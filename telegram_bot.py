@@ -83,6 +83,22 @@ def get_markup_for_flow_response(flow_res: FlowResponse, phone: str = "", user_i
         return get_botones_tipo_servicio()
     elif flow_res.action_performed == "show_cylinder_catalog" or flow_res.state == FlowState.WAITING_FOR_PRODUCT_OR_QUANTITY:
         return get_botones_productos_cilindros()
+    elif flow_res.action_performed == "show_delete_address_buttons":
+        repo = get_repository()
+        cust = repo.get_customer_by_phone(TENANT_ID, phone) if phone else None
+        if not cust and not phone and user_id:
+            cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
+        addrs = cust.addresses if (cust and cust.addresses) else []
+        if addrs:
+            return get_botones_eliminar_direcciones(addrs)
+        return None
+    elif flow_res.action_performed == "show_delete_confirm_buttons":
+        sess = flow_router.get_session(f"telegram:{TENANT_ID}:{user_id}") if user_id else None
+        pending_aid = getattr(sess, "_pending_delete_address_id", "") if sess else ""
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗑️ Sí, eliminar dirección", callback_data=f"client_addr_del_confirm:{pending_aid}:1")],
+            [InlineKeyboardButton("❌ No, cancelar", callback_data="client_addr_del_menu")]
+        ])
     elif flow_res.action_performed == "show_address_buttons" or flow_res.state == FlowState.WAITING_FOR_ADDRESS_SELECTION:
         repo = get_repository()
         cust = repo.get_customer_by_phone(TENANT_ID, phone) if phone else None
@@ -1306,7 +1322,7 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
         return
 
     # 3. Menú para eliminar una dirección guardada
-    if data == "client_addr_del_menu":
+    if data in ("client_addr_del_menu", "client_addr:del_menu"):
         user_id = query.from_user.id if query.from_user else (update.effective_user.id if update.effective_user else 0)
         phone = context.user_data.get("phone", "")
         if not phone and user_id:
@@ -1401,7 +1417,7 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
                 logger.error(f"Error editing message plain text: {e2}")
         return
 
-    if data.startswith("client_addr_del_confirm:"):
+    if data.startswith("client_addr_del_confirm:") or data.startswith("del_addr_confirm:"):
         parts = data.split(":")
         raw_aid = parts[1]
         addr_id = int(raw_aid) if raw_aid.isdigit() else raw_aid
@@ -1467,7 +1483,7 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
                 logger.error(f"Error editing message plain text after address deletion: {e2}")
         return
 
-    if data == "client_addr_back":
+    if data in ("client_addr_back", "client_addr:cancel_del", "client_addr_cancel_del", "del_addr_cancel"):
         user_id = query.from_user.id if query.from_user else (update.effective_user.id if update.effective_user else 0)
         phone = context.user_data.get("phone", "")
         if not phone and user_id:
@@ -1505,7 +1521,7 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
         return
 
     # 4. Selección de dirección guardada o nueva
-    if data.startswith("client_addr:"):
+    if data.startswith("client_addr:") and not any(k in data for k in ["del_menu", "cancel_del", "client_addr_del", "_del"]):
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:

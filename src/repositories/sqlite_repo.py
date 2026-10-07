@@ -86,7 +86,9 @@ def parse_schedule_deadline(schedule: str, ref_time: datetime | None = None) -> 
         clean_iso = clean_iso[:-1] + "+00:00"
     try:
         dt = datetime.fromisoformat(clean_iso)
-        return dt.replace(tzinfo=None) if dt.tzinfo else dt
+        if dt.tzinfo:
+            return dt.astimezone(MAZATLAN_TZ).replace(tzinfo=None)
+        return dt
     except Exception:
         pass
 
@@ -545,24 +547,40 @@ class SqliteRepository(ProductRepository):
                 updated_at=now_iso,
             )
 
-    def delete_customer_address(self, customer_id: int, address_id: int) -> bool:
+    def delete_customer_address(self, customer_id: int | str, address_id: int | str, phone: str | None = None, address_text: str | None = None) -> bool:
         """Delete a delivery address for a customer from SQLite."""
         with get_db_connection() as conn:
-            cur = conn.execute(
-                "SELECT * FROM customer_addresses WHERE id = ? AND customer_id = ?",
-                (address_id, customer_id),
-            )
-            row = cur.fetchone()
+            row = None
+            if str(address_id).isdigit():
+                cur = conn.execute(
+                    "SELECT * FROM customer_addresses WHERE id = ? AND customer_id = ?",
+                    (int(address_id), customer_id),
+                )
+                row = cur.fetchone()
+            if not row and address_text:
+                cur = conn.execute(
+                    "SELECT * FROM customer_addresses WHERE customer_id = ? AND address = ?",
+                    (customer_id, address_text.strip()),
+                )
+                row = cur.fetchone()
+            if not row and str(address_id).isdigit():
+                cur = conn.execute(
+                    "SELECT * FROM customer_addresses WHERE id = ?",
+                    (int(address_id),),
+                )
+                row = cur.fetchone()
             if not row:
                 return False
 
+            aid = row["id"]
+            cid = row["customer_id"]
             was_default = bool(row["is_default"])
-            conn.execute("DELETE FROM customer_addresses WHERE id = ?", (address_id,))
+            conn.execute("DELETE FROM customer_addresses WHERE id = ?", (aid,))
 
             # Si era la default, asignar default a la primera dirección restante si existe
             remaining = conn.execute(
                 "SELECT * FROM customer_addresses WHERE customer_id = ? ORDER BY id ASC LIMIT 1",
-                (customer_id,),
+                (cid,),
             ).fetchone()
 
             if remaining:
@@ -573,12 +591,12 @@ class SqliteRepository(ProductRepository):
                     )
                 conn.execute(
                     "UPDATE customers SET address = ? WHERE id = ?",
-                    (remaining["address"], customer_id),
+                    (remaining["address"], cid),
                 )
             else:
                 conn.execute(
                     "UPDATE customers SET address = '' WHERE id = ?",
-                    (customer_id,),
+                    (cid,),
                 )
             return True
 
@@ -1599,8 +1617,9 @@ class SqliteRepository(ProductRepository):
         - If unassigned: becomes 'confirmed' and triggers smart dispatch
         Returns list of activated order IDs.
         """
-        now = datetime.now()
+        now = get_local_now()
         activated_ids = []
+        to_dispatch = []
 
         with get_db_connection() as conn:
             cur = conn.execute(
@@ -1639,24 +1658,26 @@ class SqliteRepository(ProductRepository):
                             (new_status, now.isoformat(), oid),
                         )
                         activated_ids.append(oid)
+                        to_dispatch.append(oid)
                         logger.info(
                             f"[Scheduled Engine] Order #{oid} reached 30m window before deadline "
                             f"({deadline_dt.strftime('%Y-%m-%d %H:%M')}). Activated to '{new_status}'."
                         )
-                        
-                        # Trigger dispatch
-                        try:
-                            from src.services.dispatch import dispatch_order
-                            dispatch_order(oid, tenant_id=tenant_id, force_immediate=True)
-                        except Exception as e:
-                            logger.error(f"[Scheduled Engine] Error dispatching activated order #{oid}: {e}")
+
+        # Trigger dispatch outside of DB connection to prevent database is locked
+        for oid in to_dispatch:
+            try:
+                from src.services.dispatch import dispatch_order
+                dispatch_order(oid, tenant_id=tenant_id, force_immediate=True)
+            except Exception as e:
+                logger.error(f"[Scheduled Engine] Error dispatching activated order #{oid}: {e}")
 
         return activated_ids
 
     def get_scheduled_agenda(self, tenant_id: str = "petroil") -> list[dict[str, Any]]:
         """Return all scheduled orders with deadline details, activation status, and countdowns."""
         self.check_and_activate_scheduled_orders(tenant_id)
-        now = datetime.now()
+        now = get_local_now()
 
         with get_db_connection() as conn:
             cur = conn.execute(
@@ -1684,7 +1705,7 @@ class SqliteRepository(ProductRepository):
                         c_clean = str(created_raw).replace("Z", "+00:00")
                         order_ref_dt = datetime.fromisoformat(c_clean)
                         if order_ref_dt.tzinfo:
-                            order_ref_dt = order_ref_dt.astimezone().replace(tzinfo=None)
+                            order_ref_dt = order_ref_dt.astimezone(MAZATLAN_TZ).replace(tzinfo=None)
                     except Exception:
                         order_ref_dt = now
 
@@ -1711,7 +1732,7 @@ class SqliteRepository(ProductRepository):
                 diff_act_mins = int((activation_time - now).total_seconds() / 60)
 
                 deadline_display = format_schedule_display(deadline_dt, now)
-                act_time_label = activation_time.strftime("%I:%M %p").lstrip("0")
+                act_time_label = activation_time.strftime("%I:%M %p").lower().replace("am", "a.m.").replace("pm", "p.m.").lstrip("0")
                 is_today = deadline_dt.date() == now.date()
                 is_tomorrow = deadline_dt.date() == (now.date() + timedelta(days=1))
                 day_label = "Hoy" if is_today else ("Mañana" if is_tomorrow else deadline_dt.strftime("%d/%m/%Y"))
@@ -1737,9 +1758,9 @@ class SqliteRepository(ProductRepository):
                     "customer_phone": r["customer_phone"],
                     "delivery_address": r["delivery_address"],
                     "delivery_schedule": schedule_text,
-                    "scheduled_for": deadline_dt.isoformat(),
+                    "scheduled_for": to_utc_iso(deadline_dt, now) or deadline_dt.isoformat(),
                     "deadline_display": deadline_display,
-                    "activation_at": activation_time.isoformat(),
+                    "activation_at": to_utc_iso(activation_time, now) or activation_time.isoformat(),
                     "activation_display": act_display,
                     "is_activated": is_activated,
                     "minutes_until_deadline": diff_deadline_mins,
@@ -2474,7 +2495,9 @@ class SqliteRepository(ProductRepository):
                     "shift_check_in_at": r["shift_check_in_at"],
                     "last_check_out_at": r["last_check_out_at"],
                     "avg_rating": round(float(r["avg_rating"]), 1) if r["avg_rating"] is not None else 5.0,
+                    "rating": round(float(r["avg_rating"]), 1) if r["avg_rating"] is not None else 5.0,
                     "total_ratings": int(r["total_ratings"] or 0),
+                    "rating_count": int(r["total_ratings"] or 0),
                     "current_lat": r["current_lat"],
                     "current_lng": r["current_lng"],
                     "created_at": r["created_at"],
@@ -2932,20 +2955,34 @@ class SqliteRepository(ProductRepository):
         self,
         tenant_id: str,
         order_id: int,
-        driver_id: int | None,
-        customer_id: int | None,
-        rating: int,
+        driver_id: int | None = None,
+        customer_id: int | None = None,
+        rating: int = 5,
         feedback_tag: str = "",
         comment: str = "",
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Save a new rating and survey response for an order."""
         rating = max(1, min(5, int(rating)))
         with get_db_connection() as conn:
+            if driver_id is None or customer_id is None:
+                try:
+                    ord_row = conn.execute("SELECT driver_id, customer_id FROM orders WHERE id = ?", (order_id,)).fetchone()
+                    if ord_row:
+                        if driver_id is None and ord_row["driver_id"]:
+                            driver_id = ord_row["driver_id"]
+                        if customer_id is None and ord_row["customer_id"]:
+                            customer_id = ord_row["customer_id"]
+                except Exception:
+                    pass
+
             conn.execute(
                 """
                 INSERT INTO order_ratings (tenant_id, order_id, driver_id, customer_id, rating, feedback_tag, comment)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(tenant_id, order_id) DO UPDATE SET
+                    driver_id = COALESCE(excluded.driver_id, order_ratings.driver_id),
+                    customer_id = COALESCE(excluded.customer_id, order_ratings.customer_id),
                     rating = excluded.rating,
                     feedback_tag = CASE WHEN excluded.feedback_tag != '' THEN excluded.feedback_tag ELSE order_ratings.feedback_tag END,
                     comment = CASE WHEN excluded.comment != '' THEN excluded.comment ELSE order_ratings.comment END,
@@ -2953,6 +2990,19 @@ class SqliteRepository(ProductRepository):
                 """,
                 (tenant_id, order_id, driver_id, customer_id, rating, feedback_tag, comment),
             )
+            # Backfill any legacy ratings missing driver_id
+            try:
+                conn.execute(
+                    """
+                    UPDATE order_ratings
+                    SET driver_id = (SELECT driver_id FROM orders WHERE orders.id = order_ratings.order_id)
+                    WHERE driver_id IS NULL AND EXISTS (
+                        SELECT 1 FROM orders WHERE orders.id = order_ratings.order_id AND orders.driver_id IS NOT NULL
+                    )
+                    """
+                )
+            except Exception:
+                pass
             row = conn.execute(
                 "SELECT * FROM order_ratings WHERE tenant_id = ? AND order_id = ?",
                 (tenant_id, order_id),
@@ -3033,10 +3083,20 @@ class SqliteRepository(ProductRepository):
                 (tenant_id, driver_id),
             ).fetchone()
             if not row or not row["total_ratings"]:
-                return {"average": 5.0, "count": 0, "breakdown": {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}}
+                return {
+                    "average": 5.0,
+                    "count": 0,
+                    "average_rating": 5.0,
+                    "total_reviews": 0,
+                    "breakdown": {1: 0, 2: 0, 3: 0, 4: 0, 5: 0},
+                }
+            avg_val = float(row["avg_rating"] or 5.0)
+            cnt_val = int(row["total_ratings"] or 0)
             return {
-                "average": float(row["avg_rating"] or 5.0),
-                "count": int(row["total_ratings"] or 0),
+                "average": avg_val,
+                "count": cnt_val,
+                "average_rating": avg_val,
+                "total_reviews": cnt_val,
                 "breakdown": {
                     5: int(row["stars_5"] or 0),
                     4: int(row["stars_4"] or 0),

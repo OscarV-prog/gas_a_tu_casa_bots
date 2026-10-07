@@ -274,7 +274,11 @@ class TestScheduledAgenda(unittest.TestCase):
         item = next((x for x in agenda if x["id"] == order.id), None)
         self.assertIsNotNone(item)
         expected_act = target_5pm - timedelta(minutes=30)
-        self.assertEqual(datetime.fromisoformat(item["activation_at"]), expected_act)
+        from src.repositories.sqlite_repo import MAZATLAN_TZ
+        act_dt = datetime.fromisoformat(item["activation_at"])
+        if act_dt.tzinfo:
+            act_dt = act_dt.astimezone(MAZATLAN_TZ).replace(tzinfo=None)
+        self.assertEqual(act_dt, expected_act)
 
         # Pre-assign driver (simulating assigning driver at 2:00 PM)
         drivers = self.repo.get_all_drivers(self.tenant_id)
