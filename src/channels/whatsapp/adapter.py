@@ -1193,7 +1193,7 @@ class WhatsAppAdapter:
                     cust = repo.get_customer_by_phone(tenant_id, phone)
 
                 # Estrategia E: channel_user_id (wa_id en customers)
-                if not cust and not addrs and channel_user_id:
+                if not cust and not addrs and not phone and channel_user_id:
                     cust = repo.get_customer(tenant_id, "whatsapp", channel_user_id)
 
                 if cust and not addrs:

@@ -142,6 +142,24 @@ class IdentityStore:
         self._save()
         logger.info(f"🔗 [IdentityStore] Bound Telegram Chat ID {tg_id} <-> Phone {clean_digits}")
 
+    def bind_channel_user_phone(self, channel: str, channel_user_id: str | int, phone: str) -> None:
+        """Bind customer's phone number to their channel user ID across channels."""
+        if not channel_user_id or not phone:
+            return
+        if str(channel).lower() == "telegram":
+            self.bind_telegram_user_phone(channel_user_id, phone)
+        else:
+            clean_digits = re.sub(r"\D", "", str(phone))
+            if clean_digits:
+                c_str = str(channel_user_id).strip()
+                self._load()
+                self._order_channels[c_str] = {
+                    "channel": str(channel).lower(),
+                    "channel_user_id": c_str,
+                    "phone": clean_digits[-10:] if len(clean_digits) >= 10 else clean_digits,
+                }
+                self._save()
+
     def get_telegram_chat_id(self, phone_or_user_id: str | int | None) -> str | None:
         """Resolve a phone number or user ID to a Telegram Chat ID."""
         if not phone_or_user_id:

@@ -322,7 +322,7 @@ def detect_correction_or_backtracking_intent(
     phone_patterns = [
         r"cambiar\s+(?:de\s+|el\s+|mi\s+)?(?:tel[eé]fono|celular|cel|n[uú]mero|num|núm)",
         r"corregir\s+(?:el\s+|mi\s+)?(?:tel[eé]fono|celular|cel|n[uú]mero|num|núm)",
-        r"me\s+equivoqu\w*\s+(?:de\s+|al\s+(?:poner|escribir)\s+(?:mi\s+)?)?(?:tel[eé]fono|celular|cel|n[uú]mero|num|núm)",
+        r"me\s+(?:equivoqu|equivcoqu|equiv)\w*\s+(?:de\s+|al\s+(?:poner|escribir)\s+(?:mi\s+)?)?(?:tel[eé]fono|celular|cel|n[uú]mero|num|núm)",
         r"no\s+es\s+mi\s+(?:tel[eé]fono|celular|cel|n[uú]mero|num|núm)",
         r"puse\s+mal\s+(?:el\s+|mi\s+)?(?:tel[eé]fono|celular|cel|n[uú]mero|num|núm)",
         r"otr[ao]\s+(?:tel[eé]fono|celular|cel|n[uú]mero|num|núm)",
@@ -1062,27 +1062,38 @@ class FlowRouter:
             lng = float(location["longitude"])
             resolved_name = reverse_geocode(lat, lng)
 
-            # 2.1 Verificar si quien envía la ubicación es un CHOFER registrado
-            driver = None
-            if hasattr(repo, "get_driver_by_telegram_id") and channel == "telegram" and channel_user_id:
-                driver = repo.get_driver_by_telegram_id(session.tenant_id, str(channel_user_id))
-            if not driver and hasattr(repo, "get_driver_by_phone"):
-                phone_cand = session.draft_order.customer_phone or ""
-                if not phone_cand and channel_user_id:
-                    clean_dig = re.sub(r"\D", "", str(channel_user_id))
-                    if len(clean_dig) >= 10:
-                        phone_cand = clean_dig[-10:]
-                if phone_cand:
-                    driver = repo.get_driver_by_phone(session.tenant_id, phone_cand)
+            # 2.1 Verificar si quien envía la ubicación es un CHOFER en turno activo
+            # IMPORTANTE: Si el usuario está interactuando como cliente en un flujo de pedido,
+            # selección de productos, registro de cuenta o dirección, NO debe tratarse como chofer en ruta.
+            is_in_order_flow = (
+                session.state not in (FlowState.INITIAL, FlowState.COMPLETED, FlowState.CANCELLED)
+                or bool(session.draft_order.items)
+                or bool(session.draft_order.customer_phone)
+                or bool(session.draft_order.customer_name)
+                or bool(session.cart)
+            )
 
-            if driver:
-                if hasattr(repo, "update_driver_location"):
-                    repo.update_driver_location(driver.id, lat, lng)
-                # Actualizar seguimiento en vivo al cliente si el chofer tiene pedido en ruta
-                if hasattr(repo, "get_orders_by_driver"):
-                    drv_orders = repo.get_orders_by_driver(session.tenant_id, driver.id, active_only=True)
+            driver = None
+            if not is_in_order_flow:
+                if hasattr(repo, "get_driver_by_telegram_id") and channel == "telegram" and channel_user_id:
+                    driver = repo.get_driver_by_telegram_id(session.tenant_id, str(channel_user_id))
+                if not driver and hasattr(repo, "get_driver_by_phone"):
+                    phone_cand = session.draft_order.customer_phone or ""
+                    if not phone_cand and channel_user_id:
+                        clean_dig = re.sub(r"\D", "", str(channel_user_id))
+                        if len(clean_dig) >= 10:
+                            phone_cand = clean_dig[-10:]
+                    if phone_cand:
+                        driver = repo.get_driver_by_phone(session.tenant_id, phone_cand)
+
+            if driver and not is_in_order_flow:
+                drv_orders = repo.get_orders_by_driver(session.tenant_id, driver.id, active_only=True) if hasattr(repo, "get_orders_by_driver") else []
+                if drv_orders and any(getattr(o, "status", "") == "in_route" for o in drv_orders):
+                    if hasattr(repo, "update_driver_location"):
+                        repo.update_driver_location(driver.id, lat, lng)
+                    # Actualizar seguimiento en vivo al cliente si el chofer tiene pedido en ruta
                     for d_ord in drv_orders:
-                        if d_ord.status == "in_route":
+                        if getattr(d_ord, "status", "") == "in_route":
                             try:
                                 from src.services.notifications import edit_client_live_location
                                 live_msg_id = getattr(d_ord, "live_location_message_id", None)
@@ -1091,12 +1102,12 @@ class FlowRouter:
                                     edit_client_live_location(live_chat_id, live_msg_id, lat, lng)
                             except Exception:
                                 pass
-                logger.info(f"📍 GPS de chofer {driver.name} actualizado: ({lat}, {lng}) -> {resolved_name}")
-                resp_text = (
-                    f"📍 **¡Ubicación GPS registrada correctamente!**\n**{resolved_name}**\n\n"
-                    "Tu posición en tiempo real ha sido actualizada para el monitoreo de ruta y despacho. 🛻💨"
-                )
-                return FlowResponse(text=resp_text, state=session.state, is_llm=False, action_performed=None)
+                    logger.info(f"📍 GPS de chofer {driver.name} actualizado: ({lat}, {lng}) -> {resolved_name}")
+                    resp_text = (
+                        f"📍 **¡Ubicación GPS registrada correctamente!**\n**{resolved_name}**\n\n"
+                        "Tu posición en tiempo real ha sido actualizada para el monitoreo de ruta y despacho. 🛻💨"
+                    )
+                    return FlowResponse(text=resp_text, state=session.state, is_llm=False, action_performed=None)
 
             # 2.2 Verificar si el cliente ya tiene un PEDIDO ACTIVO o FINALIZADO
             active_order = None
@@ -1143,12 +1154,32 @@ class FlowRouter:
                 )
                 return FlowResponse(text=resp_text, state=session.state, is_llm=False, action_performed=None)
 
-            # 2.3 Si el cliente está en pasos posteriores de la captura (pago o confirmación) o nueva dirección
+            # 2.3 Captura de dirección de entrega para el pedido del cliente
             session.draft_order.delivery_lat = lat
             session.draft_order.delivery_lng = lng
-            curr_addr = (session.draft_order.delivery_address or "").strip()
-            if not curr_addr or curr_addr.lower().startswith("ubicaci") or bool(re.match(r"^[-0-9\.\,\s]+$", curr_addr)):
-                session.draft_order.delivery_address = resolved_name
+            session.draft_order.delivery_address = resolved_name
+
+            # Guardar o actualizar la dirección en la cuenta del cliente en la BD para pedidos futuros
+            if session.draft_order.customer_name or session.draft_order.customer_phone:
+                try:
+                    cust = repo.save_or_update_customer(
+                        tenant_id=session.tenant_id,
+                        channel=session.channel,
+                        channel_user_id=session.channel_user_id or session.draft_order.customer_phone,
+                        name=session.draft_order.customer_name or "Cliente",
+                        phone=session.draft_order.customer_phone,
+                        address=resolved_name,
+                        latitude=lat,
+                        longitude=lng,
+                    )
+                    if cust and hasattr(repo, "add_customer_address"):
+                        repo.add_customer_address(
+                            customer_id=cust.id,
+                            address=resolved_name,
+                            notes=session.draft_order.notes or "",
+                        )
+                except Exception as e:
+                    logger.debug(f"[FlowRouter] Error guardando cliente con GPS en repo: {e}")
 
             if session.state == FlowState.WAITING_FOR_PAYMENT_METHOD:
                 logger.info(f"📍 Dirección actualizada en WAITING_FOR_PAYMENT_METHOD: {resolved_name}")
@@ -1651,7 +1682,7 @@ class FlowRouter:
                     or (identity_store.get_phone_for_channel_user(session.channel, session.channel_user_id) if session.channel and session.channel_user_id else None)
                 )
                 cust = repo.get_customer_by_phone(session.tenant_id, phone_val) if phone_val else None
-                if not cust and session.channel_user_id:
+                if not cust and not phone_val and session.channel_user_id:
                     cust = repo.get_customer(session.tenant_id, session.channel, session.channel_user_id)
 
                 addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if (cust and cust.address) else [])
@@ -2126,6 +2157,8 @@ class FlowRouter:
                 or (identity_store.get_phone_for_channel_user(session.channel, session.channel_user_id) if session.channel and session.channel_user_id else None)
             )
             cust = repo.get_customer_by_phone(session.tenant_id, phone_val) if phone_val else None
+            if not cust and not phone_val and session.channel_user_id:
+                cust = repo.get_customer(session.tenant_id, session.channel, session.channel_user_id)
             addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if (cust and cust.address) else [])
             # 1. Opción numerada ("la 1", "opción 1", "1", "la primera")
             m_num = re.search(r"\b([1-9])\b", text) or ("primera" in text.lower() and "1")
@@ -2291,6 +2324,30 @@ class FlowRouter:
                         action_performed="show_service_buttons",
                     )
 
+            # 1.1 Si la dirección ya fue registrada por GPS (o previamente) y el usuario solo asiente/confirma ("ok", "okey", "listo", "ya")
+            t_clean_addr = text.lower().strip()
+            es_asentimiento = any(re.search(r"^\s*(?:" + re.escape(w) + r")\s*[\.!\?]?$", t_clean_addr) for w in [
+                "ok", "okey", "okay", "listo", "ya", "ya quedo", "ya quedó", "sale", "va", "vale", "bien", "esta bien", "está bien", "perfecto"
+            ])
+            if es_asentimiento:
+                if draft.delivery_address:
+                    session.state = FlowState.WAITING_FOR_SCHEDULE
+                    return FlowResponse(
+                        text=(
+                            f"📍 Tu dirección ya quedó registrada:\n**{draft.delivery_address}**\n\n"
+                            "¿Para **qué día y horario** deseas tu entrega?\n"
+                            "Selecciona una opción en los botones o indícanos tu horario preferido:"
+                        ),
+                        state=session.state,
+                        action_performed="show_schedule_buttons",
+                    )
+                else:
+                    return FlowResponse(
+                        text="Por favor escribe tu **dirección de entrega completa** (calle, número y colonia) o pulsa el clip 📎 para compartir tu **ubicación GPS** 📍 para continuar con tu pedido:",
+                        state=session.state,
+                        is_llm=False,
+                    )
+
             # Validación Semántica con IA y Heurísticas (Filtro Anti-Bromas / Fake Addresses)
             val_res = await validate_address_with_llm(text.strip(), tenant_id=session.tenant_id)
             if not val_res.is_valid:
@@ -2371,6 +2428,22 @@ class FlowRouter:
                 telemetry.record_message(channel=session.channel, is_llm=False)
                 return FlowResponse(
                     text=f"🕒 Horario programado: **{draft.delivery_schedule}** ✅\n\n¿Cuál será tu **método de pago**? (Selecciona una opción en los botones):",
+                    state=session.state,
+                    action_performed="show_payment_buttons",
+                )
+
+            # 1.5 Si el usuario asiente o dice "ok / okey / sale / va / perfecto" cuando se le pregunta el horario:
+            if any(re.search(r"^\s*(?:" + re.escape(w) + r")\s*[\.!\?]?$", t_lower) for w in [
+                "ok", "okey", "okay", "si", "sí", "sale", "va", "vale", "de acuerdo", "esta bien", "está bien", "perfecto", "adelante", "por favor", "porfa", "bien"
+            ]):
+                draft.delivery_schedule = "Lo antes posible"
+                draft.scheduled_for = None
+                session.proposed_schedule = None
+                session.proposed_scheduled_for = None
+                session.state = FlowState.WAITING_FOR_PAYMENT_METHOD
+                telemetry.record_message(channel=session.channel, is_llm=False)
+                return FlowResponse(
+                    text="🕒 Horario programado: **Lo antes posible** ⚡\n\n¿Cuál será tu **método de pago**? (Selecciona una opción en los botones):",
                     state=session.state,
                     action_performed="show_payment_buttons",
                 )
@@ -2686,11 +2759,19 @@ class FlowRouter:
         if cust and cust.name:
             draft.is_existing_customer = True
             draft.customer_name = cust.name
-            session.state = FlowState.WAITING_FOR_ADDRESS_SELECTION
 
-            addrs = cust.addresses if cust.addresses else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if cust.address else [])
+            addrs = cust.addresses if cust.addresses else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if cust and cust.address else [])
             num_addrs = len(addrs)
 
+            if num_addrs == 0:
+                session.state = FlowState.WAITING_FOR_NEW_CUSTOMER_ADDRESS
+                return FlowResponse(
+                    text=f"¡Hola de nuevo, **{cust.name}**! 👋 Qué gusto atenderte.\n\n"
+                         "Veo que aún no tienes direcciones guardadas en tu cuenta. Por favor escribe tu **dirección de entrega completa** (calle, número, colonia y referencias) o comparte tu **ubicación GPS** 📍:",
+                    state=session.state,
+                )
+
+            session.state = FlowState.WAITING_FOR_ADDRESS_SELECTION
             return FlowResponse(
                 text=f"¡Hola de nuevo, **{cust.name}**! 👋 Qué gusto atenderte.\n\n"
                      f"¿A cuál de tus {num_addrs} dirección(es) guardadas deseas que enviemos tu pedido o prefieres ingresar una nueva?",

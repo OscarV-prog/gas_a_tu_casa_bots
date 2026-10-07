@@ -139,6 +139,11 @@ class ApiRepository:
                     in_stock = bool(p.get("isAvailable", p.get("in_stock", True)))
                     is_promo = bool(p.get("isPromotion", False))
                     promo_desc = float(p.get("promoDiscount", 0.0))
+                    original_price = price
+
+                    # Si el producto tiene promoción activa con descuento, el precio real a cobrar es con descuento
+                    if is_promo and promo_desc > 0:
+                        price = max(0.0, round(price - promo_desc, 2))
 
                     products.append(
                         Product(
@@ -151,8 +156,10 @@ class ApiRepository:
                             category=category,
                             unit=unit,
                             in_stock=in_stock,
-                            is_promotion=is_promo,
-                            promo_discount=promo_desc,
+                            is_promoted=is_promo,
+                            promotion_text=f"Descuento de ${promo_desc:.2f} MXN" if (is_promo and promo_desc > 0) else "",
+                            original_price=original_price if (is_promo and promo_desc > 0) else None,
+                            promo_discount=promo_desc if is_promo else 0.0,
                         )
                     )
                 if products:

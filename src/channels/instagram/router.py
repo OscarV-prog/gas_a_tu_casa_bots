@@ -560,7 +560,7 @@ async def _process_single_instagram_event(event: dict[str, Any]) -> None:
             sess = flow_router.get_session(igsid)
             phone_to_search = (sess.draft_order.customer_phone if (sess and sess.draft_order and sess.draft_order.customer_phone) else None) or identity_store.get_phone_for_channel_user("instagram", igsid)
             cust = repo.get_customer_by_phone(TENANT_ID, phone_to_search) if phone_to_search else None
-            if not cust:
+            if not cust and not phone_to_search:
                 cust = repo.get_customer(TENANT_ID, "instagram", igsid)
 
             addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if cust and cust.address else [])
@@ -618,7 +618,7 @@ async def _process_single_instagram_event(event: dict[str, Any]) -> None:
             sess = flow_router.get_session(igsid)
             phone_to_search = (sess.draft_order.customer_phone if (sess and sess.draft_order and sess.draft_order.customer_phone) else None) or identity_store.get_phone_for_channel_user("instagram", igsid)
             cust = repo.get_customer_by_phone(TENANT_ID, phone_to_search) if phone_to_search else None
-            if not cust:
+            if not cust and not phone_to_search:
                 cust = repo.get_customer(TENANT_ID, "instagram", igsid)
 
             if cust and addr_id_str:
@@ -645,7 +645,7 @@ async def _process_single_instagram_event(event: dict[str, Any]) -> None:
             sess = flow_router.get_session(igsid)
             phone_to_search = (sess.draft_order.customer_phone if (sess and sess.draft_order and sess.draft_order.customer_phone) else None) or identity_store.get_phone_for_channel_user("instagram", igsid)
             cust = repo.get_customer_by_phone(TENANT_ID, phone_to_search) if phone_to_search else None
-            if not cust:
+            if not cust and not phone_to_search:
                 cust = repo.get_customer(TENANT_ID, "instagram", igsid)
             addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if cust and cust.address else [])
             if addrs:
@@ -962,7 +962,7 @@ async def _dispatch_flow_response_instagram(flow_res: FlowResponse, igsid: str) 
         phone_to_search = (sess.draft_order.customer_phone if (sess and sess.draft_order and sess.draft_order.customer_phone) else None) or identity_store.get_phone_for_channel_user("instagram", igsid)
 
         cust = repo.get_customer_by_phone(TENANT_ID, phone_to_search) if phone_to_search else None
-        if not cust:
+        if not cust and not phone_to_search:
             cust = repo.get_customer(TENANT_ID, "instagram", igsid)
 
         addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if cust and cust.address else [])

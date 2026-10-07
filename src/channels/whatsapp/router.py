@@ -795,7 +795,7 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
         elif interactive_id == "client_addr:del_menu":
             phone_to_search = phone_10
             cust = repo.get_customer_by_phone(TENANT_ID, phone_to_search) if phone_to_search else None
-            if not cust:
+            if not cust and not phone_to_search:
                 cust = repo.get_customer(TENANT_ID, "whatsapp", wa_id)
 
             addrs = cust.addresses if (cust and cust.addresses) else []
@@ -821,7 +821,7 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
 
         elif interactive_id == "del_addr_cancel":
             cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else None
-            if not cust:
+            if not cust and not phone_10:
                 cust = repo.get_customer(TENANT_ID, "whatsapp", wa_id)
             addrs = cust.addresses if (cust and cust.addresses) else []
             msg = "ℹ️ *Operación cancelada.*\nTu dirección se mantiene guardada en tu cuenta.\n\n¿A cuál de tus direcciones deseas que enviemos tu pedido?"
@@ -840,7 +840,7 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
             if addr_id_str.isdigit():
                 addr_id = int(addr_id_str)
                 cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else None
-                if not cust:
+                if not cust and not phone_10:
                     cust = repo.get_customer(TENANT_ID, "whatsapp", wa_id)
 
                 target_addr = None
@@ -872,7 +872,7 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
             if addr_id_str.isdigit():
                 addr_id = int(addr_id_str)
                 cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else None
-                if not cust:
+                if not cust and not phone_10:
                     cust = repo.get_customer(TENANT_ID, "whatsapp", wa_id)
 
                 customer_id = cust.id if cust else None
@@ -1066,7 +1066,7 @@ async def _dispatch_flow_response_whatsapp(
                     phone_to_search = sess.draft_order.customer_phone
 
             cust = repo.get_customer_by_phone(TENANT_ID, phone_to_search) if phone_to_search else None
-            if not cust and wa_id:
+            if not cust and not phone_to_search and wa_id:
                 cust = repo.get_customer(TENANT_ID, "whatsapp", wa_id)
 
             addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if cust and cust.address else [])
