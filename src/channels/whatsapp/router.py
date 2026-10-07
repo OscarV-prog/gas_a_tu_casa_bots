@@ -837,100 +837,145 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
 
         elif interactive_id.startswith("del_addr:") and not interactive_id.startswith("del_addr_confirm:"):
             addr_id_str = interactive_id.split(":", 1)[1]
-            if addr_id_str.isdigit():
-                addr_id = int(addr_id_str)
-                cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else None
-                if not cust and not phone_10:
-                    cust = repo.get_customer(TENANT_ID, "whatsapp", wa_id)
+            actual_aid = int(addr_id_str) if addr_id_str.isdigit() else addr_id_str
+            cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else None
+            if not cust and not phone_10:
+                cust = repo.get_customer(TENANT_ID, "whatsapp", wa_id)
 
-                target_addr = None
-                if cust and cust.addresses:
-                    target_addr = next((a for a in cust.addresses if a.id == addr_id), None)
+            target_addr = None
+            if cust and cust.addresses:
+                target_addr = next((a for a in cust.addresses if str(a.id) == str(addr_id_str)), None)
 
-                addr_display = target_addr.address if target_addr else f"Dirección #{addr_id}"
-                clean_display = resolve_gps_address_to_name(addr_display.strip())
-                clean_display = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_display, flags=re.I).strip()
+            addr_display = target_addr.address if target_addr else f"Dirección #{addr_id_str}"
+            clean_display = resolve_gps_address_to_name(addr_display.strip())
+            clean_display = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_display, flags=re.I).strip()
 
-                confirm_body = (
-                    "⚠️ *¿Estás seguro de que deseas eliminar esta dirección?*\n\n"
-                    f"📍 *Dirección seleccionada:*\n`{clean_display}`\n\n"
-                    "⚠️ _Esta acción no se puede deshacer. Por favor confirma tu decisión:_"
-                )
-                confirm_buttons = [
-                    {"id": f"del_addr_confirm:{addr_id}", "title": "🗑️ Sí, eliminar"},
-                    {"id": "del_addr_cancel", "title": "❌ No, cancelar"},
-                ]
-                await adapter.send_interactive_buttons(
-                    recipient_wa_id=wa_id,
-                    body_text=confirm_body,
-                    buttons=confirm_buttons,
+            confirm_body = (
+                "⚠️ *¿Estás seguro de que deseas eliminar esta dirección?*\n\n"
+                f"📍 *Dirección seleccionada:*\n`{clean_display}`\n\n"
+                "⚠️ _Esta acción no se puede deshacer. Por favor confirma tu decisión:_"
+            )
+            confirm_buttons = [
+                {"id": f"del_addr_confirm:{addr_id_str}", "title": "🗑️ Sí, eliminar"},
+                {"id": "del_addr_cancel", "title": "❌ No, cancelar"},
+            ]
+            await adapter.send_interactive_buttons(
+                recipient_wa_id=wa_id,
+                body_text=confirm_body,
+                buttons=confirm_buttons,
+            )
+            return
+
+        elif interactive_id.startswith("del_addr_confirm:") or interactive_id == "del_addr_confirm_text":
+            if interactive_id == "del_addr_confirm_text":
+                sess = flow_router.get_session(thread_id)
+                pending_aid = getattr(sess, "_pending_delete_address_id", None) if sess else None
+                addr_id_str = str(pending_aid) if pending_aid else ""
+            else:
+                addr_id_str = interactive_id.split(":", 1)[1]
+            actual_aid = int(addr_id_str) if addr_id_str.isdigit() else addr_id_str
+            cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else None
+            if not cust and not phone_10:
+                cust = repo.get_customer(TENANT_ID, "whatsapp", wa_id)
+
+            target_addr = None
+            if cust and cust.addresses:
+                target_addr = next((a for a in cust.addresses if str(a.id) == str(addr_id_str)), None)
+
+            customer_id = cust.id if cust else None
+            addr_text_deleted = target_addr.address if target_addr else ""
+
+            if not customer_id and addr_id_str.isdigit():
+                try:
+                    with get_db_connection() as conn:
+                        row_addr = conn.execute("SELECT * FROM customer_addresses WHERE id = ?", (int(addr_id_str),)).fetchone()
+                        if row_addr:
+                            addr_text_deleted = row_addr["address"]
+                            if not customer_id:
+                                customer_id = row_addr["customer_id"]
+                except Exception:
+                    pass
+
+            if customer_id:
+                repo.delete_customer_address(customer_id, actual_aid, phone=phone_10, address_text=addr_text_deleted)
+                updated_cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else None
+                remaining = updated_cust.addresses if (updated_cust and updated_cust.addresses) else (repo.get_customer_addresses(customer_id) if hasattr(repo, "get_customer_addresses") else [])
+                clean_deleted = resolve_gps_address_to_name(addr_text_deleted.strip()) if addr_text_deleted else ""
+                clean_deleted = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_deleted, flags=re.I).strip()
+                addr_display = clean_deleted or f"#{addr_id_str}"
+
+                if remaining:
+                    if len(remaining) == 1:
+                        buttons = adapter.get_customer_addresses_buttons(remaining)
+                        body = (
+                            f"✅ *Dirección eliminada con éxito:*\n📍 `{addr_display}`\n\n"
+                            "¿A cuál de tus direcciones restantes deseas que enviemos tu pedido o prefieres ingresar una nueva?"
+                        )
+                        await adapter.send_interactive_buttons(
+                            recipient_wa_id=wa_id,
+                            body_text=body,
+                            buttons=buttons,
+                        )
+                    else:
+                        sections = adapter.get_customer_addresses_list_sections(remaining)
+                        body = (
+                            f"✅ *Dirección eliminada con éxito:*\n📍 `{addr_display}`\n\n"
+                            "¿A cuál de tus direcciones restantes deseas que enviemos tu pedido o prefieres ingresar una nueva?"
+                        )
+                        await adapter.send_interactive_list(
+                            recipient_wa_id=wa_id,
+                            body_text=body,
+                            button_label="Ver Direcciones",
+                            sections=sections,
+                        )
+                else:
+                    msg = (
+                        f"✅ *Dirección eliminada con éxito:*\n📍 `{addr_display}`\n\n"
+                        "Ya no tienes más direcciones guardadas en tu cuenta. Por favor escribe tu nueva dirección de entrega completa o comparte tu ubicación GPS 📍 para continuar con tu pedido:"
+                    )
+                    await adapter.send_text_message(wa_id, msg)
+                return
+            else:
+                await adapter.send_text_message(
+                    wa_id,
+                    "⚠️ No se pudo localizar la dirección a eliminar. Por favor intenta nuevamente."
                 )
                 return
 
-        elif interactive_id.startswith("del_addr_confirm:"):
-            addr_id_str = interactive_id.split(":", 1)[1]
-            if addr_id_str.isdigit():
-                addr_id = int(addr_id_str)
+        elif interactive_id in ("del_addr_cancel", "client_addr:cancel_del"):
+            cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else None
+            if not cust and not phone_10:
+                cust = repo.get_customer(TENANT_ID, "whatsapp", wa_id)
+            addrs = cust.addresses if (cust and cust.addresses) else []
+            body = "ℹ️ *Operación cancelada.* Tu dirección se mantiene guardada.\n\n¿A cuál de tus direcciones deseas que enviemos tu pedido o prefieres registrar una nueva?"
+            if len(addrs) == 1:
+                buttons = adapter.get_customer_addresses_buttons(addrs)
+                await adapter.send_interactive_buttons(recipient_wa_id=wa_id, body_text=body, buttons=buttons)
+            elif len(addrs) > 1:
+                sections = adapter.get_customer_addresses_list_sections(addrs)
+                await adapter.send_interactive_list(recipient_wa_id=wa_id, body_text=body, button_label="Ver Direcciones", sections=sections)
+            else:
+                await adapter.send_text_message(wa_id, body)
+            return
+
+        elif interactive_id.startswith("client_addr:"):
+            if interactive_id in ("client_addr:del_menu", "client_addr_del_menu"):
                 cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else None
                 if not cust and not phone_10:
                     cust = repo.get_customer(TENANT_ID, "whatsapp", wa_id)
-
-                customer_id = cust.id if cust else None
-                addr_text_deleted = ""
-
-                with get_db_connection() as conn:
-                    row_addr = conn.execute("SELECT * FROM customer_addresses WHERE id = ?", (addr_id,)).fetchone()
-                    if row_addr:
-                        addr_text_deleted = row_addr["address"]
-                        if not customer_id:
-                            customer_id = row_addr["customer_id"]
-
-                if customer_id:
-                    repo.delete_customer_address(customer_id, addr_id, phone=phone_10, address_text=addr_text_deleted)
-                    remaining = repo.get_customer_addresses(customer_id)
-                    clean_deleted = resolve_gps_address_to_name(addr_text_deleted.strip()) if addr_text_deleted else ""
-                    clean_deleted = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_deleted, flags=re.I).strip()
-                    addr_display = clean_deleted or f"#{addr_id}"
-
-                    if remaining:
-                        if len(remaining) == 1:
-                            buttons = adapter.get_customer_addresses_buttons(remaining)
-                            body = (
-                                f"✅ *Dirección eliminada con éxito:*\n📍 `{addr_display}`\n\n"
-                                "¿A cuál de tus direcciones restantes deseas que enviemos tu pedido o prefieres ingresar una nueva?"
-                            )
-                            await adapter.send_interactive_buttons(
-                                recipient_wa_id=wa_id,
-                                body_text=body,
-                                buttons=buttons,
-                            )
-                        else:
-                            sections = adapter.get_customer_addresses_list_sections(remaining)
-                            body = (
-                                f"✅ *Dirección eliminada con éxito:*\n📍 `{addr_display}`\n\n"
-                                "¿A cuál de tus direcciones restantes deseas que enviemos tu pedido o prefieres ingresar una nueva?"
-                            )
-                            await adapter.send_interactive_list(
-                                recipient_wa_id=wa_id,
-                                body_text=body,
-                                button_label="Ver Direcciones",
-                                sections=sections,
-                            )
-                    else:
-                        msg = (
-                            f"✅ *Dirección eliminada con éxito:*\n📍 `{addr_display}`\n\n"
-                            "Ya no tienes más direcciones guardadas en tu cuenta. Por favor escribe tu nueva dirección de entrega completa o comparte tu ubicación GPS 📍 para continuar con tu pedido:"
-                        )
-                        await adapter.send_text_message(wa_id, msg)
+                addrs = cust.addresses if (cust and cust.addresses) else []
+                if not addrs:
+                    await adapter.send_text_message(wa_id, "ℹ️ No tienes direcciones guardadas para eliminar.")
                     return
-                else:
-                    await adapter.send_text_message(
-                        wa_id,
-                        "⚠️ No se pudo localizar la dirección a eliminar. Por favor intenta nuevamente."
-                    )
-                    return
+                sections = adapter.get_delete_addresses_list_sections(addrs)
+                await adapter.send_interactive_list(
+                    recipient_wa_id=wa_id,
+                    body_text="🗑️ *Eliminar Dirección Guardada*\n\nSelecciona abajo cuál de tus direcciones deseas borrar de tu cuenta:",
+                    button_label="Borrar Dirección",
+                    sections=sections,
+                )
+                return
 
-        elif interactive_id.startswith("client_addr:"):
             flow_res = await flow_router.process_event(
                 session_id=thread_id,
                 callback_data=interactive_id,
@@ -1054,6 +1099,46 @@ async def _dispatch_flow_response_whatsapp(
             await adapter.send_text_message(
                 recipient_wa_id=wa_id,
                 text=_format_markdown_for_whatsapp(respuesta),
+            )
+            return
+
+        elif action_performed == "show_delete_address_buttons":
+            repo = get_repository()
+            phone_to_search = phone_10
+            if not phone_to_search and wa_id:
+                sess = flow_router.get_session(f"whatsapp:{TENANT_ID}:{wa_id}")
+                if sess and sess.draft_order and sess.draft_order.customer_phone:
+                    phone_to_search = sess.draft_order.customer_phone
+
+            cust = repo.get_customer_by_phone(TENANT_ID, phone_to_search) if phone_to_search else None
+            if not cust and not phone_to_search and wa_id:
+                cust = repo.get_customer(TENANT_ID, "whatsapp", wa_id)
+
+            addrs = cust.addresses if (cust and cust.addresses) else []
+            if addrs:
+                sections = adapter.get_delete_addresses_list_sections(addrs)
+                await adapter.send_interactive_list(
+                    recipient_wa_id=wa_id,
+                    body_text="🗑️ *Eliminar Dirección Guardada*\n\nSelecciona abajo cuál de tus direcciones deseas borrar de tu cuenta:",
+                    button_label="Borrar Dirección",
+                    sections=sections,
+                )
+            else:
+                await adapter.send_text_message(wa_id, "ℹ️ No tienes direcciones guardadas para eliminar.")
+            return
+
+        elif action_performed == "show_delete_confirm_buttons":
+            sess = flow_router.get_session(thread_id)
+            pending_aid = getattr(sess, "_pending_delete_address_id", "") if sess else ""
+            confirm_id = f"del_addr_confirm:{pending_aid}" if pending_aid else "del_addr_confirm_text"
+            confirm_buttons = [
+                {"id": confirm_id, "title": "🗑️ Sí, eliminar"},
+                {"id": "del_addr_cancel", "title": "❌ No, cancelar"},
+            ]
+            await adapter.send_interactive_buttons(
+                recipient_wa_id=wa_id,
+                body_text=respuesta,
+                buttons=confirm_buttons,
             )
             return
 

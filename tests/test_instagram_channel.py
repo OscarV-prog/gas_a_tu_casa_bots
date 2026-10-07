@@ -172,6 +172,9 @@ class TestInstagramChannel(unittest.IsolatedAsyncioTestCase):
             repo_mock = MagicMock()
             mock_get_repo.return_value = repo_mock
 
+            mock_order = MagicMock(driver_id="drv-1", customer_id="cust-1")
+            repo_mock.get_order_by_id.return_value = mock_order
+
             await _process_single_instagram_event(event)
 
             self.assertTrue(repo_mock.save_order_rating.called)
@@ -179,6 +182,8 @@ class TestInstagramChannel(unittest.IsolatedAsyncioTestCase):
                 tenant_id="petroil",
                 order_id=456,
                 rating=5,
+                driver_id="drv-1",
+                customer_id="cust-1",
             )
             self.assertTrue(mock_qr.called)
 

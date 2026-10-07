@@ -1959,6 +1959,18 @@ class ApiRepository:
                     except (ValueError, TypeError):
                         pass
 
+        # Also pull from fallback_repo if available
+        if self.fallback_repo and hasattr(self.fallback_repo, "get_driver_rating_stats"):
+            for d in drivers:
+                d_key = str(d.id).strip().lower()
+                if d_key not in ratings_by_driver or not ratings_by_driver[d_key]:
+                    try:
+                        stats = self.fallback_repo.get_driver_rating_stats(tenant_id, d.id)
+                        if stats and stats.get("count", 0) > 0 and stats.get("average"):
+                            ratings_by_driver[d_key] = [float(stats["average"])] * int(stats["count"])
+                    except Exception:
+                        pass
+
         result = []
         for d in drivers:
             active_orders = [
@@ -2014,6 +2026,7 @@ class ApiRepository:
                 "avg_rating": avg_rating,
                 "rating": avg_rating,
                 "total_ratings": total_ratings,
+                "rating_count": total_ratings,
                 "current_lat": d.current_lat,
                 "current_lng": d.current_lng,
             })
@@ -2426,7 +2439,7 @@ class ApiRepository:
     def get_scheduled_agenda(self, tenant_id: str = "petroil") -> list[dict[str, Any]]:
         """Return scheduled agenda orders with full countdowns and activation details."""
         self.check_and_activate_scheduled_orders(tenant_id)
-        now = datetime.now()
+        now = get_local_now()
 
         all_orders = self.get_all_orders_admin(tenant_id, status="all")
         agenda = []
@@ -2444,7 +2457,7 @@ class ApiRepository:
                     c_clean = str(created_raw).replace("Z", "+00:00")
                     order_ref_dt = datetime.fromisoformat(c_clean)
                     if order_ref_dt.tzinfo:
-                        order_ref_dt = order_ref_dt.astimezone().replace(tzinfo=None)
+                        order_ref_dt = order_ref_dt.astimezone(MAZATLAN_TZ).replace(tzinfo=None)
                 except Exception:
                     order_ref_dt = now
 
@@ -2477,7 +2490,7 @@ class ApiRepository:
             diff_act_mins = int((activation_time - now).total_seconds() / 60)
 
             deadline_display = format_schedule_display(deadline_dt, now)
-            act_time_label = activation_time.strftime("%I:%M %p").lstrip("0")
+            act_time_label = activation_time.strftime("%I:%M %p").lower().replace("am", "a.m.").replace("pm", "p.m.").lstrip("0")
             is_today = deadline_dt.date() == now.date()
             is_tomorrow = deadline_dt.date() == (now.date() + timedelta(days=1))
             day_label = "Hoy" if is_today else ("Mañana" if is_tomorrow else deadline_dt.strftime("%d/%m/%Y"))
@@ -2489,9 +2502,9 @@ class ApiRepository:
                 "customer_phone": o["customer_phone"],
                 "delivery_address": o["delivery_address"],
                 "delivery_schedule": schedule_text,
-                "scheduled_for": deadline_dt.isoformat(),
+                "scheduled_for": to_utc_iso(deadline_dt, now) or deadline_dt.isoformat(),
                 "deadline_display": deadline_display,
-                "activation_at": activation_time.isoformat(),
+                "activation_at": to_utc_iso(activation_time, now) or activation_time.isoformat(),
                 "activation_display": act_display,
                 "is_activated": is_activated,
                 "minutes_until_deadline": diff_deadline_mins,
@@ -2525,7 +2538,7 @@ class ApiRepository:
 
     def check_and_activate_scheduled_orders(self, tenant_id: str = "petroil") -> list[int]:
         """Check scheduled orders that should activate now (within 30 min of deadline)."""
-        now = datetime.now()
+        now = get_local_now()
         activated_ids: list[int] = []
 
         try:
@@ -2869,6 +2882,8 @@ class ApiRepository:
             return {
                 "average": 5.0,
                 "count": 0,
+                "average_rating": 5.0,
+                "total_reviews": 0,
                 "breakdown": {5: 0, 4: 0, 3: 0, 2: 0, 1: 0},
             }
         total = len(ratings)
@@ -2883,6 +2898,8 @@ class ApiRepository:
         return {
             "average": avg,
             "count": total,
+            "average_rating": avg,
+            "total_reviews": total,
             "breakdown": breakdown,
         }
 

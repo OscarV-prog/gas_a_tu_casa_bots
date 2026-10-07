@@ -1664,13 +1664,126 @@ class FlowRouter:
                 state=session.state,
             )
 
+        # 3. Callbacks de Eliminación y Gestión de Direcciones
+        if data in ("client_addr:del_menu", "client_addr_del_menu", "del_menu"):
+            phone_val = (
+                draft.customer_phone
+                or (identity_store.get_phone_for_channel_user(session.channel, session.channel_user_id) if session.channel and session.channel_user_id else None)
+            )
+            cust = repo.get_customer_by_phone(session.tenant_id, phone_val) if phone_val else None
+            if not cust and not phone_val and session.channel_user_id:
+                cust = repo.get_customer(session.tenant_id, session.channel, session.channel_user_id)
+            addrs = cust.addresses if (cust and cust.addresses) else []
+            if not addrs:
+                session._is_deleting_address = False
+                return FlowResponse(
+                    text="ℹ️ No tienes direcciones guardadas para eliminar.",
+                    state=session.state,
+                    action_performed="show_address_buttons",
+                )
+            session._is_deleting_address = True
+            session._pending_delete_address_id = None
+            formatted_list = []
+            for i, a in enumerate(addrs, 1):
+                c_addr = resolve_gps_address_to_name(a.address.strip())
+                c_addr = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", c_addr, flags=re.I).strip()
+                formatted_list.append(f"🗑️ **{i}.** {c_addr}")
+            addr_list = "\n".join(formatted_list)
+            return FlowResponse(
+                text=f"🗑️ **Eliminar Dirección Guardada**\n\nSelecciona el número de la dirección que deseas borrar de tu cuenta:\n\n{addr_list}",
+                state=session.state,
+                action_performed="show_delete_address_buttons",
+            )
+
+        if data in ("client_addr:cancel_del", "client_addr_cancel_del", "del_addr_cancel", "client_addr_back"):
+            session._is_deleting_address = False
+            session._pending_delete_address_id = None
+            return FlowResponse(
+                text="ℹ️ **Operación cancelada.** Tu dirección se mantiene guardada.\n\n¿A cuál de tus direcciones deseas que enviemos tu pedido o prefieres registrar una nueva?",
+                state=session.state,
+                action_performed="show_address_buttons",
+            )
+
+        if (data.startswith("del_addr:") or data.startswith("del_addr_prompt:") or data.startswith("client_addr_del:")) and not ("confirm" in data):
+            parts = data.split(":")
+            addr_id_str = parts[1]
+            phone_val = (
+                draft.customer_phone
+                or (identity_store.get_phone_for_channel_user(session.channel, session.channel_user_id) if session.channel and session.channel_user_id else None)
+            )
+            cust = repo.get_customer_by_phone(session.tenant_id, phone_val) if phone_val else None
+            if not cust and not phone_val and session.channel_user_id:
+                cust = repo.get_customer(session.tenant_id, session.channel, session.channel_user_id)
+            target_addr = None
+            if cust and cust.addresses:
+                target_addr = next((a for a in cust.addresses if str(a.id) == str(addr_id_str)), None)
+                if not target_addr and len(parts) > 2 and parts[2].isdigit():
+                    idx_i = int(parts[2]) - 1
+                    if 0 <= idx_i < len(cust.addresses):
+                        target_addr = cust.addresses[idx_i]
+
+            actual_aid = target_addr.id if target_addr else addr_id_str
+            clean_addr = resolve_gps_address_to_name(target_addr.address.strip()) if target_addr else f"Dirección #{addr_id_str}"
+            clean_addr = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_addr, flags=re.I).strip()
+            session._is_deleting_address = False
+            session._pending_delete_address_id = actual_aid
+            return FlowResponse(
+                text=(
+                    "⚠️ **¿Estás seguro de que deseas eliminar esta dirección?**\n\n"
+                    f"📍 `{clean_addr}`\n\n"
+                    "Esta acción no se puede deshacer. Por favor confirma tu decisión:"
+                ),
+                state=session.state,
+                action_performed="show_delete_confirm_buttons",
+            )
+
+        if data.startswith("del_addr_confirm:") or data.startswith("client_addr_del_confirm:"):
+            parts = data.split(":")
+            addr_id_str = parts[1]
+            actual_aid = int(addr_id_str) if addr_id_str.isdigit() else addr_id_str
+            phone_val = (
+                draft.customer_phone
+                or (identity_store.get_phone_for_channel_user(session.channel, session.channel_user_id) if session.channel and session.channel_user_id else None)
+            )
+            cust = repo.get_customer_by_phone(session.tenant_id, phone_val) if phone_val else None
+            if not cust and not phone_val and session.channel_user_id:
+                cust = repo.get_customer(session.tenant_id, session.channel, session.channel_user_id)
+            target_addr = next((a for a in cust.addresses if str(a.id) == str(addr_id_str)), None) if (cust and cust.addresses) else None
+            addr_text = target_addr.address if target_addr else ""
+            if cust:
+                repo.delete_customer_address(cust.id, actual_aid, phone=phone_val, address_text=addr_text)
+                updated_cust = repo.get_customer_by_phone(session.tenant_id, phone_val) if phone_val else None
+                remaining = updated_cust.addresses if (updated_cust and updated_cust.addresses) else []
+            else:
+                remaining = []
+            session._is_deleting_address = False
+            session._pending_delete_address_id = None
+            if remaining:
+                return FlowResponse(
+                    text="✅ **Dirección eliminada con éxito.**\n\n¿A cuál de tus direcciones restantes deseas que enviemos tu pedido o prefieres ingresar una nueva?",
+                    state=session.state,
+                    action_performed="show_address_buttons",
+                )
+            else:
+                session.state = FlowState.WAITING_FOR_NEW_CUSTOMER_ADDRESS
+                return FlowResponse(
+                    text="✅ **Dirección eliminada con éxito.**\n\nYa no tienes direcciones guardadas en tu cuenta. Por favor escribe tu dirección de entrega completa o comparte tu ubicación GPS 📍:",
+                    state=session.state,
+                    action_performed="ask_new_address",
+                )
+
         # 3. Selección de dirección guardada
         if data.startswith("client_addr:") or data in ("client_addr_new", "client_addr:new"):
             if data in ("client_addr_new", "client_addr:new"):
                 choice = "new"
             else:
                 choice = data.split(":", 1)[1]
+
+            if choice in ("del_menu", "cancel_del", "back") or choice.startswith("del"):
+                return FlowResponse(text="Operación de dirección", state=session.state)
+
             if choice in ("new", "_new"):
+                session._is_deleting_address = False
                 session.state = FlowState.WAITING_FOR_NEW_CUSTOMER_ADDRESS
                 return FlowResponse(
                     text="Por favor escribe tu **nueva dirección de entrega completa** (calle, número, colonia y referencias) o presiona el botón para compartir tu **ubicación GPS** 📍:",
@@ -1686,6 +1799,31 @@ class FlowRouter:
                     cust = repo.get_customer(session.tenant_id, session.channel, session.channel_user_id)
 
                 addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if (cust and cust.address) else [])
+
+                # Si estábamos en modo de eliminación y se pulsó un botón client_addr:X
+                if getattr(session, "_is_deleting_address", False):
+                    session._is_deleting_address = False
+                    idx_del = -1
+                    try:
+                        idx_del = int(choice) - 1
+                    except Exception:
+                        pass
+                    target_addr = addrs[idx_del] if (addrs and 0 <= idx_del < len(addrs)) else None
+                    if target_addr:
+                        actual_aid = target_addr.id
+                        session._pending_delete_address_id = actual_aid
+                        clean_addr = resolve_gps_address_to_name(target_addr.address.strip())
+                        clean_addr = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_addr, flags=re.I).strip()
+                        return FlowResponse(
+                            text=(
+                                "⚠️ **¿Estás seguro de que deseas eliminar esta dirección?**\n\n"
+                                f"📍 `{clean_addr}`\n\n"
+                                "Esta acción no se puede deshacer. Por favor confirma tu decisión:"
+                            ),
+                            state=session.state,
+                            action_performed="show_delete_confirm_buttons",
+                        )
+
                 selected_addr = ""
                 try:
                     idx = int(choice) - 1
@@ -2160,6 +2298,118 @@ class FlowRouter:
             if not cust and not phone_val and session.channel_user_id:
                 cust = repo.get_customer(session.tenant_id, session.channel, session.channel_user_id)
             addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if (cust and cust.address) else [])
+            # 0.5. Flujo de eliminación de dirección guardada
+            is_del_kw = any(k in text.lower() for k in ["borrar", "eliminar", "quitar", "borra", "elimina", "🗑️", "del_addr"])
+            pending_del_aid = getattr(session, "_pending_delete_address_id", None)
+            is_deleting = getattr(session, "_is_deleting_address", False)
+
+            # Si ya estábamos esperando confirmación de eliminación:
+            if pending_del_aid:
+                session._pending_delete_address_id = None
+                session._is_deleting_address = False
+                if any(w in text.lower() for w in ["si", "sí", "eliminar", "borrar", "confirmar", "confirmo", "adelante", "ok"]):
+                    target_addr = next((a for a in addrs if str(a.id) == str(pending_del_aid)), None)
+                    actual_aid = int(pending_del_aid) if str(pending_del_aid).isdigit() else pending_del_aid
+                    addr_text = target_addr.address if target_addr else ""
+                    if cust:
+                        repo.delete_customer_address(cust.id, actual_aid, phone=phone_val, address_text=addr_text)
+                        updated_cust = repo.get_customer_by_phone(session.tenant_id, phone_val) if phone_val else None
+                        remaining = updated_cust.addresses if (updated_cust and updated_cust.addresses) else []
+                    else:
+                        remaining = []
+
+                    if remaining:
+                        return FlowResponse(
+                            text="✅ **Dirección eliminada con éxito.**\n\n¿A cuál de tus direcciones restantes deseas que enviemos tu pedido o prefieres ingresar una nueva?",
+                            state=session.state,
+                            action_performed="show_address_buttons",
+                        )
+                    else:
+                        session.state = FlowState.WAITING_FOR_NEW_CUSTOMER_ADDRESS
+                        return FlowResponse(
+                            text="✅ **Dirección eliminada con éxito.**\n\nYa no tienes direcciones guardadas en tu cuenta. Por favor escribe tu dirección de entrega completa o comparte tu ubicación GPS 📍:",
+                            state=session.state,
+                            action_performed="ask_new_address",
+                        )
+                else:
+                    return FlowResponse(
+                        text="ℹ️ **Operación cancelada.** Tu dirección se mantiene guardada.\n\n¿A cuál de tus direcciones deseas que enviemos tu pedido o prefieres registrar una nueva?",
+                        state=session.state,
+                        action_performed="show_address_buttons",
+                    )
+
+            # Si estábamos en modo de selección de cuál dirección borrar:
+            if is_deleting:
+                if any(w in text.lower() for w in ["cancelar", "cancela", "no", "volver", "atras", "atrás", "regresar"]):
+                    session._is_deleting_address = False
+                    session._pending_delete_address_id = None
+                    return FlowResponse(
+                        text="ℹ️ **Operación cancelada.** Tu dirección se mantiene guardada.\n\n¿A cuál de tus direcciones deseas que enviemos tu pedido o prefieres registrar una nueva?",
+                        state=session.state,
+                        action_performed="show_address_buttons",
+                    )
+                m_del_num = re.search(r"\b([1-9])\b", text) or ("primera" in text.lower() and "1")
+                if m_del_num and addrs:
+                    del_idx = (int(m_del_num.group(1)) if hasattr(m_del_num, "group") else 1) - 1
+                    if 0 <= del_idx < len(addrs):
+                        session._is_deleting_address = False
+                        target_addr = addrs[del_idx]
+                        clean_addr = resolve_gps_address_to_name(target_addr.address.strip())
+                        clean_addr = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_addr, flags=re.I).strip()
+                        session._pending_delete_address_id = target_addr.id
+                        return FlowResponse(
+                            text=(
+                                "⚠️ **¿Estás seguro de que deseas eliminar esta dirección?**\n\n"
+                                f"📍 `{clean_addr}`\n\n"
+                                "Esta acción no se puede deshacer. Por favor confirma tu decisión:"
+                            ),
+                            state=session.state,
+                            action_performed="show_delete_confirm_buttons",
+                        )
+
+            # Si el usuario quiere borrar o seleccionó una opción de borrar:
+            if is_del_kw:
+                telemetry.record_message(channel=session.channel, is_llm=False)
+                m_del_num = re.search(r"\b([1-9])\b", text)
+                if m_del_num and addrs:
+                    del_idx = int(m_del_num.group(1)) - 1
+                    if 0 <= del_idx < len(addrs):
+                        session._is_deleting_address = False
+                        target_addr = addrs[del_idx]
+                        clean_addr = resolve_gps_address_to_name(target_addr.address.strip())
+                        clean_addr = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_addr, flags=re.I).strip()
+                        session._pending_delete_address_id = target_addr.id
+                        return FlowResponse(
+                            text=(
+                                "⚠️ **¿Estás seguro de que deseas eliminar esta dirección?**\n\n"
+                                f"📍 `{clean_addr}`\n\n"
+                                "Esta acción no se puede deshacer. Por favor confirma tu decisión:"
+                            ),
+                            state=session.state,
+                            action_performed="show_delete_confirm_buttons",
+                        )
+                # Si no especificó número, mostrar menú de direcciones para eliminar:
+                if addrs:
+                    session._is_deleting_address = True
+                    formatted_list = []
+                    for i, a in enumerate(addrs, 1):
+                        c_addr = resolve_gps_address_to_name(a.address.strip())
+                        c_addr = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", c_addr, flags=re.I).strip()
+                        formatted_list.append(f"🗑️ **{i}.** {c_addr}")
+                    addr_list = "\n".join(formatted_list)
+                    return FlowResponse(
+                        text=f"🗑️ **Eliminar Dirección Guardada**\n\nSelecciona abajo cuál de tus direcciones deseas borrar definitivamente de tu cuenta:\n\n{addr_list}",
+                        state=session.state,
+                        action_performed="show_delete_address_buttons",
+                    )
+                else:
+                    session._is_deleting_address = False
+                    return FlowResponse(
+                        text="ℹ️ No tienes direcciones guardadas para eliminar.",
+                        state=session.state,
+                        action_performed="show_address_buttons",
+                    )
+
             # 1. Opción numerada ("la 1", "opción 1", "1", "la primera")
             m_num = re.search(r"\b([1-9])\b", text) or ("primera" in text.lower() and "1")
             if m_num and addrs:
