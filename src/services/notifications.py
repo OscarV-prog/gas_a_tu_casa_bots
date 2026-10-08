@@ -1149,19 +1149,12 @@ def notify_delivery_survey(order_id: Any, tenant_id: str = "petroil") -> bool:
 
     ticket_url = f"http://localhost:3000/orders/{order_id}/ticket.pdf"
     msg_ticket = (
-        f"🧾 **¡COMPROBANTE DE COMPRA Y ENTREGA DE GAS LP!**
-
-"
-        f"📦 **Folio de Pedido:** #{order_id}
-"
-        f"👤 **Cliente:** {getattr(order, 'customer_name', 'Cliente')}
-"
+        f"🧾 **¡COMPROBANTE DE COMPRA Y ENTREGA DE GAS LP!**\n\n"
+        f"📦 **Folio de Pedido:** #{order_id}\n"
+        f"👤 **Cliente:** {getattr(order, 'customer_name', 'Cliente')}\n"
         f"💰 **Total Pagado:** ${order.total_amount:.2f} {order.currency} ({order.payment_method})"
-        f"{driver_desc_tg}
-
-"
-        f"📄 **Tu Comprobante Digital (Ticket PDF):**
-"
+        f"{driver_desc_tg}\n\n"
+        f"📄 **Tu Comprobante Digital (Ticket PDF):**\n"
         f"{ticket_url}"
     )
     try:
@@ -1170,11 +1163,8 @@ def notify_delivery_survey(order_id: Any, tenant_id: str = "petroil") -> bool:
         logger.error(f"Error sending ticket PDF: {e}")
 
     msg_cliente = (
-        f"📦 **¡Tu pedido #{order_id} ha sido entregado exitosamente!**
-
-"
-        f"🌟 **¿Cómo calificarías el servicio y la atención de tu repartidor?**
-"
+        f"📦 **¡Tu pedido #{order_id} ha sido entregado exitosamente!**\n\n"
+        f"🌟 **¿Cómo calificarías el servicio y la atención de tu repartidor?**\n"
         "Por favor califícalo tocando una de las estrellas a continuación (1 a 5):"
     )
 
