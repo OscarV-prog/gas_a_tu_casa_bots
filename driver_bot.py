@@ -2649,7 +2649,8 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 def main() -> None:
     """Iniciar el Bot de Choferes de Telegram."""
     settings = get_settings()
-    token = settings.telegram_driver_bot_token or settings.telegram_bot_token
+    import os
+    token = settings.telegram_driver_bot_token or os.getenv('TELEGRAM_DRIVER_BOT_TOKEN')
 
     if not token:
         print("❌ ERROR: TELEGRAM_DRIVER_BOT_TOKEN no está configurado en el archivo .env")
