@@ -1148,32 +1148,10 @@ def notify_delivery_survey(order_id: Any, tenant_id: str = "petroil") -> bool:
     }
 
     ticket_url = f"http://localhost:3000/orders/{order_id}/ticket.pdf"
-    msg_ticket = (
-        f"🧾 **¡COMPROBANTE DE COMPRA Y ENTREGA DE GAS LP!**
-
-"
-        f"📦 **Folio de Pedido:** #{order.order_number or order_id}
-"
-        f"👤 **Cliente:** {order.customer_name or 'Cliente'}
-"
-        f"💰 **Total Pagado:** ${order.total_amount:.2f} {order.currency} ({order.payment_method})"
-        f"{driver_desc_tg}
-
-"
-        f"📄 **Tu Comprobante Digital (Ticket PDF):**
-"
-        f"{ticket_url}"
-    )
+    msg_ticket = f'''🧾 **¡COMPROBANTE DE COMPRA Y ENTREGA DE GAS LP!**\n\n📦 **Folio de Pedido:** #{order.order_number or order_id}\n👤 **Cliente:** {order.customer_name or 'Cliente'}\n💰 **Total Pagado:**  {order.currency} ({order.payment_method}){driver_desc_tg}\n\n📄 **Tu Comprobante Digital (Ticket PDF):**\n{ticket_url}'''
     notify_client(recipient_id, msg_ticket, channel="telegram")
 
-    msg_cliente = (
-        f"📦 **¡Tu pedido #{order_id} ha sido entregado exitosamente!**
-
-"
-        f"🌟 **¿Cómo calificarías el servicio y la atención de tu repartidor?**
-"
-        "Por favor califícalo tocando una de las estrellas a continuación (1 a 5):"
-    )
+    msg_cliente = f'''📦 **¡Tu pedido #{order_id} ha sido entregado exitosamente!**\n\n🌟 **¿Cómo calificarías el servicio y la atención de tu repartidor?**\nPor favor califícalo tocando una de las estrellas a continuación (1 a 5):'''
 
     return notify_client(recipient_id, msg_cliente, reply_markup=reply_markup, channel="telegram")
 
