@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 import urllib.error
@@ -982,7 +983,9 @@ def notify_delivery_survey(order_id: Any, tenant_id: str = "petroil") -> bool:
         logger.warning(f"[Delivery Survey] Order #{order_id} has no channel_user_id or customer_phone.")
         return False
 
-    driver_desc = ""
+    driver_desc_raw = ""
+    driver_desc_wa = ""
+    driver_desc_tg = ""
     driver_name_str = "tu repartidor"
     if order.driver_id:
         driver = repo.get_driver(order.driver_id)
@@ -990,7 +993,57 @@ def notify_delivery_survey(order_id: Any, tenant_id: str = "petroil") -> bool:
             driver_name_str = driver.name
             v_plate = driver.vehicle_plate or (driver.unit_identifier if getattr(driver, "unit_identifier", None) else "")
             plate_info = f" ({v_plate})" if v_plate else ""
-            driver_desc = f"\n👨‍✈️ *Repartidor:* {driver.name}{plate_info}\n"
+            driver_desc_raw = f"\n👨‍✈️ Repartidor: {driver.name}{plate_info}"
+            driver_desc_wa = f"\n👨‍✈️ *Repartidor:* {driver.name}{plate_info}"
+            driver_desc_tg = f"\n👨‍✈️ **Repartidor:** {driver.name}{plate_info}"
+
+    # Construcción unificada del comprobante de compra y entrega (Ticket PDF) para todos los canales
+    api_base = (os.getenv("API_BASE_URL") or "http://localhost:3000").rstrip("/")
+    target_uuid = str(order_id)
+    if hasattr(repo, "_resolve_order_uuid"):
+        try:
+            resolved = repo._resolve_order_uuid(order_id)
+            if resolved:
+                target_uuid = resolved
+        except Exception:
+            target_uuid = str(order_id)
+
+    ticket_url = f"{api_base}/orders/{target_uuid}/ticket.pdf"
+    folio_display = getattr(order, "order_number", None) or getattr(order, "id", None) or order_id
+    customer_display = getattr(order, "customer_name", "Cliente") or "Cliente"
+    payment_method_display = getattr(order, "payment_method", "Efectivo") or "Efectivo"
+    currency_display = getattr(order, "currency", "MXN") or "MXN"
+    total_amount_display = f"${order.total_amount:.2f} {currency_display} ({payment_method_display.upper()})"
+
+    msg_ticket_wa = (
+        f"🧾 *¡COMPROBANTE DE COMPRA Y ENTREGA DE GAS LP!*\n\n"
+        f"📦 *Folio de Pedido:* #{folio_display}\n"
+        f"👤 *Cliente:* {customer_display}\n"
+        f"💰 *Total Pagado:* {total_amount_display}"
+        f"{driver_desc_wa}\n\n"
+        f"📄 *Tu Comprobante Digital (Ticket PDF):*\n"
+        f"{ticket_url}"
+    )
+
+    msg_ticket_plain = (
+        f"🧾 ¡COMPROBANTE DE COMPRA Y ENTREGA DE GAS LP!\n\n"
+        f"📦 Folio de Pedido: #{folio_display}\n"
+        f"👤 Cliente: {customer_display}\n"
+        f"💰 Total Pagado: {total_amount_display}"
+        f"{driver_desc_raw}\n\n"
+        f"📄 Tu Comprobante Digital (Ticket PDF):\n"
+        f"{ticket_url}"
+    )
+
+    msg_ticket_tg = (
+        f"🧾 **¡COMPROBANTE DE COMPRA Y ENTREGA DE GAS LP!**\n\n"
+        f"📦 **Folio de Pedido:** #{folio_display}\n"
+        f"👤 **Cliente:** {customer_display}\n"
+        f"💰 **Total Pagado:** {total_amount_display}"
+        f"{driver_desc_tg}\n\n"
+        f"📄 **Tu Comprobante Digital (Ticket PDF):**\n"
+        f"{ticket_url}"
+    )
 
     # Si el cliente proviene de Instagram
     if eff_channel == "instagram":
@@ -998,10 +1051,15 @@ def notify_delivery_survey(order_id: Any, tenant_id: str = "petroil") -> bool:
             from src.channels.instagram.adapter import InstagramAdapter
             ig_adapter = InstagramAdapter()
             if ig_adapter.is_configured:
+                # 1. Enviar comprobante de compra primero
+                try:
+                    _send_instagram_message_sync(recipient_id, msg_ticket_plain)
+                except Exception as e_tick:
+                    logger.warning(f"[Instagram Ticket] Error enviando comprobante: {e_tick}")
+
+                # 2. Enviar encuesta interactiva de calificación
                 msg_ig = (
-                    f"📦 **¡Tu pedido #{order_id} ha sido entregado exitosamente!**\n\n"
-                    f"💰 **Total pagado:** ${order.total_amount:.2f} {order.currency} ({order.payment_method})"
-                    f"{driver_desc}\n"
+                    f"📦 **¡Tu pedido #{folio_display} ha sido entregado exitosamente!**\n\n"
                     "🌟 **¿Cómo calificarías el servicio y la atención de tu repartidor?**\n"
                     "Por favor selecciona tu calificación tocando el botón a continuación (1 a 5 estrellas):"
                 )
@@ -1023,10 +1081,15 @@ def notify_delivery_survey(order_id: Any, tenant_id: str = "petroil") -> bool:
             from src.channels.messenger.adapter import MessengerAdapter
             msgr_adapter = MessengerAdapter()
             if msgr_adapter.is_configured:
+                # 1. Enviar comprobante de compra primero
+                try:
+                    _send_messenger_message_sync(recipient_id, msg_ticket_plain)
+                except Exception as e_tick:
+                    logger.warning(f"[Messenger Ticket] Error enviando comprobante: {e_tick}")
+
+                # 2. Enviar encuesta interactiva de calificación
                 msg_msgr = (
-                    f"📦 **¡Tu pedido #{order_id} ha sido entregado exitosamente!**\n\n"
-                    f"💰 **Total pagado:** ${order.total_amount:.2f} {order.currency} ({order.payment_method})"
-                    f"{driver_desc}\n"
+                    f"📦 **¡Tu pedido #{folio_display} ha sido entregado exitosamente!**\n\n"
                     "🌟 **¿Cómo calificarías el servicio y la atención de tu repartidor?**\n"
                     "Por favor selecciona tu calificación tocando el botón a continuación (1 a 5 estrellas):"
                 )
@@ -1048,10 +1111,15 @@ def notify_delivery_survey(order_id: Any, tenant_id: str = "petroil") -> bool:
             from src.channels.whatsapp.adapter import WhatsAppAdapter
             wa_adapter = WhatsAppAdapter()
             if wa_adapter.is_configured:
+                # 1. Enviar comprobante de compra primero
+                try:
+                    _send_whatsapp_message_sync(recipient_id, msg_ticket_wa)
+                except Exception as e_tick:
+                    logger.warning(f"[WhatsApp Ticket] Error enviando comprobante: {e_tick}")
+
+                # 2. Enviar encuesta interactiva de calificación
                 msg_wa = (
-                    f"📦 *¡Tu pedido #{order_id} ha sido entregado exitosamente!*\n\n"
-                    f"💰 *Total pagado:* ${order.total_amount:.2f} {order.currency} ({order.payment_method})"
-                    f"{driver_desc}\n"
+                    f"📦 *¡Tu pedido #{folio_display} ha sido entregado exitosamente!*\n\n"
                     "🌟 *¿Cómo calificarías el servicio y la atención de tu repartidor?*\n"
                     "Por favor selecciona tu calificación tocando el botón a continuación (1 a 5 estrellas):"
                 )
@@ -1117,9 +1185,7 @@ def notify_delivery_survey(order_id: Any, tenant_id: str = "petroil") -> bool:
 
                 # 3. Fallback garantizado: enviar confirmación de entrega y encuesta en texto plano
                 msg_wa_text = (
-                    f"📦 *¡Tu pedido #{order_id} ha sido entregado exitosamente!*\n\n"
-                    f"💰 *Total pagado:* ${order.total_amount:.2f} {order.currency} ({order.payment_method})"
-                    f"{driver_desc}\n"
+                    f"📦 *¡Tu pedido #{folio_display} ha sido entregado exitosamente!*\n\n"
                     "🌟 *¿Cómo calificarías la atención de tu repartidor?*\n"
                     "Por favor responde a este mensaje con un número del 1 al 5:\n\n"
                     "5️⃣ ⭐⭐⭐⭐⭐ Excelente\n"
@@ -1134,7 +1200,6 @@ def notify_delivery_survey(order_id: Any, tenant_id: str = "petroil") -> bool:
             return False
 
     # Interactive Inline Keyboard with 5 stars (Telegram)
-    driver_desc_tg = driver_desc.replace("*", "**")
     reply_markup = {
         "inline_keyboard": [
             [
@@ -1147,30 +1212,16 @@ def notify_delivery_survey(order_id: Any, tenant_id: str = "petroil") -> bool:
         ]
     }
 
-    ticket_url = f"http://localhost:3000/orders/{order_id}/ticket.pdf"
-    msg_ticket = (
-        f"🧾 **¡COMPROBANTE DE COMPRA Y ENTREGA DE GAS LP!**\n\n"
-        f"📦 **Folio de Pedido:** #{order_id}\n"
-        f"👤 **Cliente:** {getattr(order, 'customer_name', 'Cliente')}\n"
-        f"💰 **Total Pagado:** ${order.total_amount:.2f} {order.currency} ({order.payment_method})"
-        f"{driver_desc_tg}\n\n"
-        f"📄 **Tu Comprobante Digital (Ticket PDF):**\n"
-        f"{ticket_url}"
-    )
     try:
-        notify_client(recipient_id, msg_ticket, channel="telegram")
+        notify_client(recipient_id, msg_ticket_tg, channel="telegram")
     except Exception as e:
         logger.error(f"Error sending ticket PDF: {e}")
 
     msg_cliente = (
-        f"📦 **¡Tu pedido #{order_id} ha sido entregado exitosamente!**\n\n"
+        f"📦 **¡Tu pedido #{folio_display} ha sido entregado exitosamente!**\n\n"
         f"🌟 **¿Cómo calificarías el servicio y la atención de tu repartidor?**\n"
         "Por favor califícalo tocando una de las estrellas a continuación (1 a 5):"
     )
-
-    return notify_client(recipient_id, msg_cliente, reply_markup=reply_markup, channel="telegram")
-
-    msg_cliente = f'''📦 **¡Tu pedido #{order_id} ha sido entregado exitosamente!**\n\n🌟 **¿Cómo calificarías el servicio y la atención de tu repartidor?**\nPor favor califícalo tocando una de las estrellas a continuación (1 a 5):'''
 
     return notify_client(recipient_id, msg_cliente, reply_markup=reply_markup, channel="telegram")
 

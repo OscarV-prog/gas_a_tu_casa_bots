@@ -3,8 +3,19 @@
 from __future__ import annotations
 
 import json
+import logging
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+if sys.platform == "win32":
+    try:
+        if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+logger = logging.getLogger(__name__)
 
 from src.config.settings import get_settings
 from src.database.connection import get_db_connection
@@ -359,9 +370,9 @@ def seed_products_from_json() -> None:
                                 now_iso,
                             ),
                         )
-                    print(f"📦 [SQLite] Auto-seeded {len(items)} products for tenant '{tenant_id}'.")
+                    logger.info(f"[SQLite] Auto-seeded {len(items)} products for tenant '{tenant_id}'.")
                 except Exception as e:
-                    print(f"⚠️ [SQLite] Error seeding products for '{tenant_id}': {e}")
+                    logger.error(f"[SQLite] Error seeding products for '{tenant_id}': {e}")
 
 
 def seed_sample_vehicles() -> None:

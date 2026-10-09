@@ -1,0 +1,72 @@
+[
+  {
+    "id": "gas-lp-5kg",
+    "name": "Cilindro de Gas de 5 Kg",
+    "description": "Cilindro compacto y portátil de Gas LP, ideal para asadores, campismo o consumo ligero en Culiacán.",
+    "price": 100,
+    "currency": "MXN",
+    "category": "Cilindros",
+    "in_stock": true,
+    "tags": ["5 kg", "5kg", "cilindro", "gas lp", "portatil", "asador"]
+  },
+  {
+    "id": "gas-lp-10kg",
+    "name": "Cilindro de Gas LP 10 kg",
+    "description": "Cilindro portátil de Gas LP, ideal para hogares pequeños y consumo moderado en Culiacán.",
+    "price": 230,
+    "currency": "MXN",
+    "category": "Cilindros",
+    "in_stock": true,
+    "tags": ["10 kg", "cilindro", "gas lp", "hogar"]
+  },
+  {
+    "id": "gas-lp-20kg",
+    "name": "Cilindro de Gas LP 20 kg",
+    "description": "Cilindro de Gas LP para uso doméstico, adecuado para familias con consumo regular en Culiacán.",
+    "price": 450,
+    "currency": "MXN",
+    "category": "Cilindros",
+    "in_stock": true,
+    "tags": ["20 kg", "cilindro", "gas lp", "hogar"]
+  },
+  {
+    "id": "gas-lp-30kg",
+    "name": "Cilindro de Gas LP 30 kg",
+    "description": "Cilindro de Gas LP de mayor capacidad para hogares con mayor consumo en Culiacán.",
+    "price": 670,
+    "currency": "MXN",
+    "category": "Cilindros",
+    "in_stock": true,
+    "tags": ["30 kg", "cilindro", "gas lp", "hogar"]
+  },
+  {
+    "id": "gas-lp-45kg",
+    "name": "Cilindro de Gas LP 45 kg",
+    "description": "Cilindro de alta capacidad para hogares grandes y pequeños negocios en Culiacán.",
+    "price": 990,
+    "currency": "MXN",
+    "category": "Cilindros",
+    "in_stock": true,
+    "tags": ["45 kg", "cilindro", "gas lp", "negocio"]
+  },
+  {
+    "id": "tanque-estacionario",
+    "name": "Recarga para Tanque Estacionario",
+    "description": "Servicio de suministro de Gas LP para tanque estacionario a domicilio en Culiacán.",
+    "price": 12.50,
+    "currency": "MXN",
+    "category": "Tanque estacionario",
+    "in_stock": true,
+    "tags": ["tanque", "estacionario", "recarga", "gas lp", "litro"]
+  },
+  {
+    "id": "entrega-domicilio",
+    "name": "Entrega a Domicilio",
+    "description": "Servicio de entrega de Gas LP a domicilio dentro de la zona de cobertura en Culiacán.",
+    "price": 0,
+    "currency": "MXN",
+    "category": "Servicio",
+    "in_stock": true,
+    "tags": ["entrega", "domicilio", "envío", "servicio"]
+  }
+]

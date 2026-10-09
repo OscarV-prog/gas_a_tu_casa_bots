@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_LAT = 23.201400
 DEFAULT_LNG = -106.421500
 
+# Center for Culiacán, Sinaloa, Mexico (Catedral / Palacio Municipal de Culiacán)
+CULIACAN_LAT = 24.809060
+CULIACAN_LNG = -107.394020
+
 
 def clean_address_for_geocoding(address: str) -> list[str]:
     """Generate multiple cleaned variations of an address to maximize geocoding hit rate.
@@ -118,12 +122,17 @@ def geocode_address(address: str, city_context: str | None = None) -> Tuple[floa
     if not address or not address.strip():
         return DEFAULT_LAT, DEFAULT_LNG, ""
 
-    clean_key = address.strip().lower()
+    settings = get_settings()
+    city = city_context or settings.default_city or "Mazatlán"
+    is_culiacan = "culiac" in city.lower()
+    target_lat = CULIACAN_LAT if is_culiacan else DEFAULT_LAT
+    target_lng = CULIACAN_LNG if is_culiacan else DEFAULT_LNG
+    max_dist_km = 45.0 if is_culiacan else 75.0
+
+    clean_key = f"{address.strip().lower()}::{city.strip().lower()}"
     if clean_key in _geocode_cache:
         return _geocode_cache[clean_key]
 
-    settings = get_settings()
-    city = city_context or settings.default_city or "Mazatlán"
     candidates = clean_address_for_geocoding(address)
 
     # 1. Primary: ESRI ArcGIS World Geocoding (high-precision door / house number resolution in Mexico)
@@ -133,7 +142,7 @@ def geocode_address(address: str, city_context: str | None = None) -> Tuple[floa
             encoded = urllib.parse.quote(query)
             url = (
                 f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates"
-                f"?SingleLine={encoded}&f=json&outFields=Match_addr,Addr_type,Score&location={DEFAULT_LNG:.4f},{DEFAULT_LAT:.4f}&distance=60000&maxLocations=2"
+                f"?SingleLine={encoded}&f=json&outFields=Match_addr,Addr_type,Score&location={target_lng:.4f},{target_lat:.4f}&distance=60000&maxLocations=2"
             )
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
             with urllib.request.urlopen(req, timeout=3.0) as response:
@@ -147,8 +156,8 @@ def geocode_address(address: str, city_context: str | None = None) -> Tuple[floa
                         lat = float(loc.get("y", 0))
                         lng = float(loc.get("x", 0))
                         if lat > 0 and (14.0 <= lat <= 33.0 and -118.0 <= lng <= -86.0):
-                            dist_km = calculate_distance_km(lat, lng, DEFAULT_LAT, DEFAULT_LNG)
-                            if dist_km < 75.0 and score >= 60.0:
+                            dist_km = calculate_distance_km(lat, lng, target_lat, target_lng)
+                            if dist_km < max_dist_km and score >= 60.0:
                                 matched_name = top.get("address") or top.get("attributes", {}).get("Match_addr") or address
                                 res = (lat, lng, matched_name)
                                 _geocode_cache[clean_key] = res
@@ -163,7 +172,7 @@ def geocode_address(address: str, city_context: str | None = None) -> Tuple[floa
         try:
             query = f"{cand}, {city}".strip(", ")
             encoded = urllib.parse.quote(query)
-            url = f"https://photon.komoot.io/api/?q={encoded}&lat={DEFAULT_LAT}&lon={DEFAULT_LNG}&limit=3"
+            url = f"https://photon.komoot.io/api/?q={encoded}&lat={target_lat}&lon={target_lng}&limit=3"
             req = urllib.request.Request(url, headers={"User-Agent": "PetroilGasDeliveryAgent/2.0"})
             with urllib.request.urlopen(req, timeout=2.0) as response:
                 if response.status == 200:
@@ -178,9 +187,8 @@ def geocode_address(address: str, city_context: str | None = None) -> Tuple[floa
                             country = str(props.get("country") or "").lower()
                             is_mx = country in ("méxico", "mexico", "mx") or (14.0 <= lat <= 33.0 and -118.0 <= lng <= -86.0)
                             if is_mx and lat > 0:
-                                # Ensure it's reasonably close to city context (< 75 km)
-                                dist_km = calculate_distance_km(lat, lng, DEFAULT_LAT, DEFAULT_LNG)
-                                if dist_km < 75.0:
+                                dist_km = calculate_distance_km(lat, lng, target_lat, target_lng)
+                                if dist_km < max_dist_km:
                                     res = (lat, lng, address)
                                     _geocode_cache[clean_key] = res
                                     logger.info(f"✅ Pinpoint Geocoded (Photon) '{cand}' -> ({lat:.5f}, {lng:.5f}) dist={dist_km:.1f}km")
@@ -188,7 +196,7 @@ def geocode_address(address: str, city_context: str | None = None) -> Tuple[floa
         except Exception as e:
             logger.debug(f"Photon geocode attempt failed for candidate '{cand}': {e}")
 
-    # 2. Fallback to OpenStreetMap Nominatim with 2.5s timeout across candidates
+    # 3. Fallback to OpenStreetMap Nominatim with 2.5s timeout across candidates
     for cand in candidates[:3]:
         try:
             query = f"{cand}, {city}".strip(", ")
@@ -204,8 +212,8 @@ def geocode_address(address: str, city_context: str | None = None) -> Tuple[floa
                     for item in data:
                         lat = float(item["lat"])
                         lng = float(item["lon"])
-                        dist_km = calculate_distance_km(lat, lng, DEFAULT_LAT, DEFAULT_LNG)
-                        if dist_km < 75.0:
+                        dist_km = calculate_distance_km(lat, lng, target_lat, target_lng)
+                        if dist_km < max_dist_km:
                             display_name = item.get("display_name", address)
                             res = (lat, lng, display_name)
                             _geocode_cache[clean_key] = res
@@ -215,7 +223,7 @@ def geocode_address(address: str, city_context: str | None = None) -> Tuple[floa
             logger.debug(f"Nominatim geocode attempt failed for candidate '{cand}': {e}")
 
     logger.warning(f"⚠️ Geocoding failed for all candidates of '{address}'. Using city default.")
-    fallback_res = (DEFAULT_LAT, DEFAULT_LNG, address)
+    fallback_res = (target_lat, target_lng, address)
     _geocode_cache[clean_key] = fallback_res
     return fallback_res
 
@@ -228,6 +236,8 @@ def reverse_geocode(lat: float, lng: float) -> str:
     """
     if lat is None or lng is None:
         return ""
+
+    default_city = "Culiacán" if calculate_distance_km(lat, lng, CULIACAN_LAT, CULIACAN_LNG) < 70.0 else "Mazatlán"
 
     # Provider 1: ESRI ArcGIS World Reverse Geocoder (High-precision house numbers and street addresses in Mexico)
     try:
@@ -271,7 +281,7 @@ def reverse_geocode(lat: float, lng: float) -> str:
                         props.get("city")
                         or props.get("town")
                         or props.get("county")
-                        or "Mazatlán"
+                        or default_city
                     )
                     name = props.get("name")
 
@@ -322,7 +332,7 @@ def reverse_geocode(lat: float, lng: float) -> str:
                 city = (
                     addr_info.get("city")
                     or addr_info.get("town")
-                    or addr_info.get("municipality", "Mazatlán")
+                    or addr_info.get("municipality", default_city)
                 )
 
                 parts = []
@@ -358,7 +368,7 @@ def reverse_geocode(lat: float, lng: float) -> str:
     except Exception as e:
         logger.debug(f"BigDataCloud reverse geocode error for ({lat}, {lng}): {e}")
 
-    return f"Ubicación en Mazatlán (GPS: {lat:.4f}, {lng:.4f})"
+    return f"Ubicación en {default_city} (GPS: {lat:.4f}, {lng:.4f})"
 
 
 def resolve_gps_address_to_name(address_str: str) -> str:

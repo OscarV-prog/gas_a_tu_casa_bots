@@ -127,6 +127,63 @@ class TestSurveyAndRatings(unittest.IsolatedAsyncioTestCase):
             self.assertIn("¡Muchas gracias por tu tiempo y valiosa opinión!", sent_msg)
             self.assertIn("⭐⭐⭐⭐ (4/5)", sent_msg)
 
+    async def test_whatsapp_delivery_sends_ticket_before_survey(self):
+        """Verify delivery notification in WhatsApp sends payment receipt before interactive survey."""
+        order = self.repo.create_order(
+            tenant_id=self.tenant_id,
+            customer_name="Oscar Cliente",
+            customer_phone="6691234567",
+            delivery_address="Calle Test 123",
+            items=[{"product_name": "Cilindro 30kg", "quantity": 1, "unit_price": 705.0}],
+            channel="whatsapp",
+        )
+
+        with patch("src.services.notifications._send_whatsapp_message_sync", return_value=True) as mock_ticket_send, \
+             patch("src.channels.whatsapp.adapter.WhatsAppAdapter.is_configured", new_callable=PropertyMock, return_value=True), \
+             patch("src.channels.whatsapp.adapter.WhatsAppAdapter.send_interactive_list", new_callable=AsyncMock, return_value=True) as mock_survey:
+            ok = notify_delivery_survey(order.id, self.tenant_id)
+            self.assertTrue(ok)
+
+            # Ticket was sent first
+            mock_ticket_send.assert_called_once()
+            ticket_msg = mock_ticket_send.call_args[0][1]
+            self.assertIn("COMPROBANTE DE COMPRA", ticket_msg)
+            self.assertIn(f"#{order.id}", ticket_msg)
+            self.assertIn("Oscar Cliente", ticket_msg)
+            self.assertIn("ticket.pdf", ticket_msg)
+
+            # Survey was also sent
+            mock_survey.assert_called_once()
+
+    async def test_messenger_delivery_sends_ticket_before_survey(self):
+        """Verify delivery notification in Messenger sends payment receipt before interactive survey."""
+        order = self.repo.create_order(
+            tenant_id=self.tenant_id,
+            customer_name="Oscar Messenger",
+            customer_phone="6699887766",
+            delivery_address="Calle Test 456",
+            items=[{"product_name": "Cilindro 20kg", "quantity": 1, "unit_price": 450.0}],
+            channel="messenger",
+        )
+
+        with patch("src.services.notifications._send_messenger_message_sync", return_value=True) as mock_ticket_send, \
+             patch("src.channels.messenger.adapter.MessengerAdapter.is_configured", new_callable=PropertyMock, return_value=True), \
+             patch("src.services.notifications._send_messenger_buttons_sync", return_value=True) as mock_survey:
+            ok = notify_delivery_survey(order.id, self.tenant_id)
+            self.assertTrue(ok)
+
+            # Ticket was sent first
+            mock_ticket_send.assert_called_once()
+            ticket_msg = mock_ticket_send.call_args[0][1]
+            self.assertIn("COMPROBANTE DE COMPRA", ticket_msg)
+            self.assertIn(f"#{order.id}", ticket_msg)
+            self.assertIn("Oscar Messenger", ticket_msg)
+            self.assertIn("ticket.pdf", ticket_msg)
+
+            # Survey buttons were also sent
+            mock_survey.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
+

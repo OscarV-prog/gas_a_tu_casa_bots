@@ -43,8 +43,8 @@ OBVIOUS_JOKE_PATTERNS = [
 ]
 
 
-def _fast_heuristic_check(text: str) -> tuple[bool, str] | None:
-    """Evaluación rápida por heurísticas para descartar bromas obvias en 0ms."""
+def _fast_heuristic_check(text: str, is_culiacan_only: bool = False) -> tuple[bool, str] | None:
+    """Evaluación rápida por heurísticas para descartar bromas obvias y ciudades fuera de cobertura en 0ms."""
     t_clean = text.lower().strip()
 
     if len(t_clean) < 6:
@@ -53,6 +53,15 @@ def _fast_heuristic_check(text: str) -> tuple[bool, str] | None:
     for pat in OBVIOUS_JOKE_PATTERNS:
         if re.search(pat, t_clean, re.IGNORECASE):
             return False, "La dirección ingresada no parece ser un domicilio válido o existente. Por favor proporciona una dirección real (calle, número y colonia) o comparte tu ubicación GPS 📍."
+
+    if is_culiacan_only:
+        out_cities = [
+            r"\b(?:mazatl[aá]n|navolato|los\s+mochis|mochis|guasave|escuinapa|concordia|el\s+rosario|rosario|el\s+fuerte|choix|guam[uú]chil|salvador\s+alvarado|elota|san\s+ignacio)\b",
+            r"\b(?:guadalajara|monterrey|cdmx|ciudad\s+de\s+m[eé]xico|tijuana|hermosillo|durango|tepic)\b",
+        ]
+        for pat in out_cities:
+            if re.search(pat, t_clean, re.IGNORECASE):
+                return False, "⚠️ Por el momento nuestro servicio de Gas a tu Puerta Gascytsa tiene cobertura exclusivamente en la ciudad de Culiacán, Sinaloa. Por favor proporciona una dirección dentro de Culiacán o comparte tu ubicación GPS 📍."
 
     return None
 
@@ -64,6 +73,10 @@ async def validate_address_with_llm(
 ) -> AddressValidationResult:
     """Analiza semánticamente si una dirección es real, plausible y entregable en la localidad/sucursal objetivo."""
     raw = (address_text or "").strip()
+    is_culiacan_mode = (tenant_id == "gascytsa") or ("culiac" in (city_context or "").lower())
+    if is_culiacan_mode and city_context == "México / zona de cobertura de la sucursal":
+        city_context = "Culiacán, Sinaloa (cobertura exclusiva en Culiacán)"
+
     if not raw:
         return AddressValidationResult(
             is_valid=False,
@@ -79,7 +92,7 @@ async def validate_address_with_llm(
         )
 
     # 1. Filtro rápido heurístico
-    fast_check = _fast_heuristic_check(raw)
+    fast_check = _fast_heuristic_check(raw, is_culiacan_only=is_culiacan_mode)
     if fast_check is not None:
         is_val, fb = fast_check
         return AddressValidationResult(
@@ -91,34 +104,60 @@ async def validate_address_with_llm(
             number="",
             colonia="",
             references="",
-            reason="Rechazado por heurística de broma/incompletitud",
+            reason="Rechazado por heurística de cobertura o broma/incompletitud",
             user_feedback=fb,
         )
 
     # 2. Análisis semántico con LLM estructurado
-    system_prompt = (
-        "Eres un auditor y validador de direcciones de entrega de Gas LP para las sucursales de la empresa en México (ej. Mazatlán, Culiacán, Los Mochis, Guasave, Escuinapa y demás zonas con cobertura).\n"
-        "Tu misión es clasificar si el texto ingresado por un cliente representa un DOMICILIO REAL, PLAUSIBLE Y ENTREGABLE en su localidad, "
-        "o si es una DIRECCIÓN FALSA, UNA BROMA, UN TEXTO ABSURDO O ESTÁ INCOMPLETA.\n\n"
-        "CRITERIOS DE VALIDACIÓN:\n"
-        "- VÁLIDA (is_valid=true): Contiene datos suficientes para que una unidad de reparto localice el lugar en la ciudad o municipio correspondiente "
-        "(ej. Calle/Avenida + Número o entrecalles + Colonia/Fraccionamiento/Localidad, o referencias claras como 'Av. Insurgentes 1204 Col. Estadio', 'Blvd. Pedro Infante 2200 Culiacán', 'Misión San Javier 5246 Las Misiones', 'Calle Benito Juárez 45 entre 21 de Marzo y 5 de Mayo Centro').\n"
-        "- FALSA / BROMA / ABSURDA (is_valid=false, is_joke_or_fake=true): Textos ficticios como 'calle falsa 123', 'en mi casa', 'la luna', 'calle de los sueños', 'al lado de la tienda de don pepe sin calle', insultos o bromas.\n"
-        "- INCOMPLETA (is_valid=false, is_joke_or_fake=false): Solo pone una palabra suelta sin número ni colonia ni referencias (ej. 'Flores Magón', 'calle México').\n\n"
-        "DEBES RESPONDER EXCLUSIVAMENTE CON UN OBJETO JSON VÁLIDO CON ESTE ESQUEMA EXACTO:\n"
-        "{\n"
-        '  "is_valid": true,\n'
-        '  "is_joke_or_fake": false,\n'
-        '  "confidence": 0.95,\n'
-        '  "street": "Misión San Javier",\n'
-        '  "number": "5246",\n'
-        '  "colonia": "Las Misiones",\n'
-        '  "references": "Portón blanco",\n'
-        '  "normalized_address": "Misión San Javier 5246, Fracc. Las Misiones",\n'
-        '  "reason": "Explicación breve de la validación",\n'
-        '  "user_feedback": "Mensaje cordial para el cliente si falta algún dato o si fue rechazada"\n'
-        "}"
-    )
+    if is_culiacan_mode:
+        system_prompt = (
+            "Eres un auditor y validador de direcciones de entrega de Gas LP para Gas a tu Puerta Gascytsa con cobertura EXCLUSIVA en CULIACÁN, SINALOA.\n"
+            "Tu misión es clasificar si el texto ingresado por un cliente representa un DOMICILIO REAL, PLAUSIBLE Y ENTREGABLE dentro de CULIACÁN, SINALOA (ej. Las Quintas, Tres Ríos, Infonavit Humaya, Valle Alto, Centro, Bugambilias, Los Ángeles, Barrancos, etc.), "
+            "o si es una DIRECCIÓN FUERA DE COBERTURA (pertenece a otra ciudad o municipio como Mazatlán, Navolato, Mochis, etc.), UNA DIRECCIÓN FALSA, UNA BROMA O ESTÁ INCOMPLETA.\n\n"
+            "CRITERIOS DE VALIDACIÓN:\n"
+            "- VÁLIDA (is_valid=true): Contiene datos suficientes para que una unidad de reparto localice el lugar DENTRO DE CULIACÁN "
+            "(ej. Calle/Avenida + Número o entrecalles + Colonia/Fraccionamiento/Sector de Culiacán, o referencias claras como 'Blvd. Pedro Infante 2200 Tres Ríos', 'Av. Álvaro Obregón 1540 Col. Gabriel Leyva', 'Misión San Javier 5246 Las Misiones', 'Calle Benito Juárez 45 Centro Culiacán').\n"
+            "- FUERA DE COBERTURA / OTRA CIUDAD (is_valid=false, is_joke_or_fake=false): Si menciona o pertenece a Mazatlán, Navolato, Los Mochis u otra ciudad ajena a Culiacán. En este caso, reason='Fuera de cobertura (solo Culiacán)' y user_feedback='⚠️ Por el momento nuestro servicio de Gas a tu Puerta Gascytsa tiene cobertura exclusivamente en la ciudad de Culiacán, Sinaloa. Por favor proporciona una dirección dentro de Culiacán o comparte tu ubicación GPS 📍.'\n"
+            "- FALSA / BROMA / ABSURDA (is_valid=false, is_joke_or_fake=true): Textos ficticios como 'calle falsa 123', 'en mi casa', 'la luna', 'calle de los sueños', 'al lado de la tienda de don pepe sin calle', insultos o bromas.\n"
+            "- INCOMPLETA (is_valid=false, is_joke_or_fake=false): Solo pone una palabra suelta sin número ni colonia ni referencias (ej. 'Flores Magón', 'calle México').\n\n"
+            "DEBES RESPONDER EXCLUSIVAMENTE CON UN OBJETO JSON VÁLIDO CON ESTE ESQUEMA EXACTO:\n"
+            "{\n"
+            '  "is_valid": true,\n'
+            '  "is_joke_or_fake": false,\n'
+            '  "confidence": 0.95,\n'
+            '  "street": "Blvd. Pedro Infante",\n'
+            '  "number": "2200",\n'
+            '  "colonia": "Desarrollo Urbano Tres Ríos",\n'
+            '  "references": "Cerca de la plaza",\n'
+            '  "normalized_address": "Blvd. Pedro Infante 2200, Desarrollo Urbano Tres Ríos, Culiacán",\n'
+            '  "reason": "Explicación breve de la validación",\n'
+            '  "user_feedback": "Mensaje cordial para el cliente si falta algún dato, está fuera de Culiacán o fue rechazada"\n'
+            "}"
+        )
+    else:
+        system_prompt = (
+            "Eres un auditor y validador de direcciones de entrega de Gas LP para las sucursales de la empresa en México (ej. Mazatlán, Culiacán, Los Mochis, Guasave, Escuinapa y demás zonas con cobertura).\n"
+            "Tu misión es clasificar si el texto ingresado por un cliente representa un DOMICILIO REAL, PLAUSIBLE Y ENTREGABLE en su localidad, "
+            "o si es una DIRECCIÓN FALSA, UNA BROMA, UN TEXTO ABSURDO O ESTÁ INCOMPLETA.\n\n"
+            "CRITERIOS DE VALIDACIÓN:\n"
+            "- VÁLIDA (is_valid=true): Contiene datos suficientes para que una unidad de reparto localice el lugar en la ciudad o municipio correspondiente "
+            "(ej. Calle/Avenida + Número o entrecalles + Colonia/Fraccionamiento/Localidad, o referencias claras como 'Av. Insurgentes 1204 Col. Estadio', 'Blvd. Pedro Infante 2200 Culiacán', 'Misión San Javier 5246 Las Misiones', 'Calle Benito Juárez 45 entre 21 de Marzo y 5 de Mayo Centro').\n"
+            "- FALSA / BROMA / ABSURDA (is_valid=false, is_joke_or_fake=true): Textos ficticios como 'calle falsa 123', 'en mi casa', 'la luna', 'calle de los sueños', 'al lado de la tienda de don pepe sin calle', insultos o bromas.\n"
+            "- INCOMPLETA (is_valid=false, is_joke_or_fake=false): Solo pone una palabra suelta sin número ni colonia ni referencias (ej. 'Flores Magón', 'calle México').\n\n"
+            "DEBES RESPONDER EXCLUSIVAMENTE CON UN OBJETO JSON VÁLIDO CON ESTE ESQUEMA EXACTO:\n"
+            "{\n"
+            '  "is_valid": true,\n'
+            '  "is_joke_or_fake": false,\n'
+            '  "confidence": 0.95,\n'
+            '  "street": "Misión San Javier",\n'
+            '  "number": "5246",\n'
+            '  "colonia": "Las Misiones",\n'
+            '  "references": "Portón blanco",\n'
+            '  "normalized_address": "Misión San Javier 5246, Fracc. Las Misiones",\n'
+            '  "reason": "Explicación breve de la validación",\n'
+            '  "user_feedback": "Mensaje cordial para el cliente si falta algún dato o si fue rechazada"\n'
+            "}"
+        )
 
     user_prompt = f"Dirección recibida del cliente para entrega en {city_context}:\n\"{raw}\""
 
@@ -155,6 +194,13 @@ async def validate_address_with_llm(
             reason = str(data.get("reason") or "").strip()
             fb = str(data.get("user_feedback") or "").strip()
 
+            if is_culiacan_mode and is_valid:
+                out_cities = ["mazatlán", "mazatlan", "navolato", "los mochis", "mochis", "guasave", "escuinapa", "concordia", "el rosario", "rosario", "el fuerte", "choix", "guamúchil", "guamuchil", "guadalajara", "monterrey", "tijuana"]
+                if any(re.search(r"\b" + re.escape(c) + r"\b", (norm + " " + raw).lower()) for c in out_cities):
+                    is_valid = False
+                    reason = "Fuera de cobertura (solo Culiacán)"
+                    fb = "⚠️ Por el momento nuestro servicio de Gas a tu Puerta Gascytsa tiene cobertura exclusivamente en la ciudad de Culiacán, Sinaloa. Por favor proporciona una dirección dentro de Culiacán o comparte tu ubicación GPS 📍."
+
             if not fb:
                 if not is_valid:
                     fb = "Por favor indícanos tu **calle, número exterior y colonia** (o referencias de tu domicilio) para poder realizar tu entrega correctamente 📍."
@@ -180,6 +226,13 @@ async def validate_address_with_llm(
     has_digits = bool(re.search(r"\d+", raw))
     has_words = len(raw.split()) >= 3
     is_plausible = has_digits and has_words
+
+    fb_fallback = "Dirección aceptada." if is_plausible else "Por favor escribe tu calle, número y colonia completa."
+    if is_culiacan_mode and is_plausible:
+        out_cities = ["mazatlán", "mazatlan", "navolato", "los mochis", "mochis", "guasave", "escuinapa", "concordia", "el rosario", "rosario"]
+        if any(re.search(r"\b" + re.escape(c) + r"\b", raw.lower()) for c in out_cities):
+            is_plausible = False
+            fb_fallback = "⚠️ Por el momento nuestro servicio de Gas a tu Puerta Gascytsa tiene cobertura exclusivamente en la ciudad de Culiacán, Sinaloa. Por favor proporciona una dirección dentro de Culiacán o comparte tu ubicación GPS 📍."
 
     return AddressValidationResult(
         is_valid=is_plausible,

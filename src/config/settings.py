@@ -54,6 +54,7 @@ _DYNAMIC_ATTR_MAP: dict[str, tuple[str, list[str]]] = {
     "instagram_app_secret": ("INSTAGRAM_APP_SECRET", ["MESSENGER_APP_SECRET"]),
     "instagram_api_version": ("INSTAGRAM_API_VERSION", []),
     "telegram_bot_token": ("TELEGRAM_BOT_TOKEN", []),
+    "telegram_bot_gascytsa_token": ("TELEGRAM_BOT_GASCYTSA_TOKEN", ["TELEGRAM_BOT_TOKEN"]),
     "telegram_driver_bot_token": ("TELEGRAM_DRIVER_BOT_TOKEN", []),
     "maps_api_key": ("GOOGLE_MAPS_API_KEY", ["MAPS_API_KEY"]),
     "default_city": ("DEFAULT_CITY", []),
@@ -85,6 +86,9 @@ class Settings(BaseModel):
     )
     telegram_bot_token: str = Field(
         default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", "")
+    )
+    telegram_bot_gascytsa_token: str = Field(
+        default_factory=lambda: os.getenv("TELEGRAM_BOT_GASCYTSA_TOKEN", "")
     )
     telegram_driver_bot_token: str = Field(
         default_factory=lambda: os.getenv("TELEGRAM_DRIVER_BOT_TOKEN", "")
