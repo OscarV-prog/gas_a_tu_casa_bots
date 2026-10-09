@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
@@ -216,10 +217,11 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
     # 1. Manejo de Calificación / Encuestas de Entrega (CSAT)
     # -------------------------------------------------------------------------
     interactive_id = event.get("interactive_id") or ""
-    if interactive_id.startswith("rate_driver:"):
+    if interactive_id.startswith("rate_driver:") or interactive_id.startswith("rate:"):
         parts = interactive_id.split(":")
-        order_id = int(parts[1])
-        stars = max(1, min(5, int(parts[2])))
+        raw_oid = parts[1] if len(parts) > 1 else ""
+        order_id = int(raw_oid) if raw_oid.isdigit() else raw_oid
+        stars = max(1, min(5, int(parts[2]))) if len(parts) > 2 and parts[2].isdigit() else 5
 
         order = repo.get_order_by_id(TENANT_ID, order_id)
         if order:
@@ -270,18 +272,38 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
                     ]
                 }]
 
-            await adapter.send_interactive_list(
+            # Registrar sesión en espera de detalles para poder agradecer tanto si pulsa lista como si escribe texto
+            _AWAITING_RATING_COMMENTS[wa_id] = {
+                "order_id": order_id,
+                "stars": stars,
+                "time": time.time(),
+                "awaiting_tag": True,
+            }
+
+            ok_detail = await adapter.send_interactive_list(
                 recipient_wa_id=wa_id,
                 body_text=body_msg,
                 button_label="Seleccionar Detalle",
                 sections=sections,
             )
+            if not ok_detail:
+                btn_options = [
+                    {"id": f"rate_tag:{order_id}:Rapidez", "title": "⚡ Rapidez"},
+                    {"id": f"rate_tag:{order_id}:Amabilidad", "title": "😊 Trato amable"},
+                    {"id": f"rate_tag:{order_id}:Omitido", "title": "⏩ Finalizar"},
+                ] if stars >= 4 else [
+                    {"id": f"rate_tag:{order_id}:Demora", "title": "⏳ Demora"},
+                    {"id": f"rate_tag:{order_id}:Actitud", "title": "🙁 Actitud"},
+                    {"id": f"rate_tag:{order_id}:Omitido", "title": "⏩ Finalizar"},
+                ]
+                await adapter.send_interactive_buttons(wa_id, body_msg, btn_options)
             return
 
     if interactive_id.startswith("rate_tag:"):
         parts = interactive_id.split(":")
-        order_id = int(parts[1])
-        tag = parts[2]
+        raw_oid = parts[1] if len(parts) > 1 else ""
+        order_id = int(raw_oid) if raw_oid.isdigit() else raw_oid
+        tag = parts[2] if len(parts) > 2 else "Omitido"
 
         tag_labels = {
             "Rapidez": "⚡ Rapidez y puntualidad",
@@ -305,7 +327,9 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
 
         _AWAITING_RATING_COMMENTS[wa_id] = {
             "order_id": order_id,
+            "stars": stars_val,
             "time": time.time(),
+            "awaiting_tag": False,
         }
 
         detalle_str = f"\n💬 *Aspecto registrado:* {tag_display}" if feedback_to_save else ""
@@ -392,12 +416,30 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
                             ]
                         }]
 
-                    await adapter.send_interactive_list(
+                    _AWAITING_RATING_COMMENTS[wa_id] = {
+                        "order_id": last_delivered.id,
+                        "stars": parsed_stars,
+                        "time": time.time(),
+                        "awaiting_tag": True,
+                    }
+
+                    ok_detail = await adapter.send_interactive_list(
                         recipient_wa_id=wa_id,
                         body_text=body_msg,
                         button_label="Seleccionar Detalle",
                         sections=sections,
                     )
+                    if not ok_detail:
+                        btn_options = [
+                            {"id": f"rate_tag:{last_delivered.id}:Rapidez", "title": "⚡ Rapidez"},
+                            {"id": f"rate_tag:{last_delivered.id}:Amabilidad", "title": "😊 Trato amable"},
+                            {"id": f"rate_tag:{last_delivered.id}:Omitido", "title": "⏩ Finalizar"},
+                        ] if parsed_stars >= 4 else [
+                            {"id": f"rate_tag:{last_delivered.id}:Demora", "title": "⏳ Demora"},
+                            {"id": f"rate_tag:{last_delivered.id}:Actitud", "title": "🙁 Actitud"},
+                            {"id": f"rate_tag:{last_delivered.id}:Omitido", "title": "⏩ Finalizar"},
+                        ]
+                        await adapter.send_interactive_buttons(wa_id, body_msg, btn_options)
                     return
 
     # -------------------------------------------------------------------------
@@ -497,14 +539,36 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
         if has_phone_digits or is_greeting_or_cmd or is_order_intent or is_in_active_order or (time.time() - awaiting_time) >= 600 or interactive_id:
             _AWAITING_RATING_COMMENTS.pop(wa_id, None)
         elif awaiting_order_id and texto_usuario:
-            _AWAITING_RATING_COMMENTS.pop(wa_id, None)
-            repo.update_order_rating_feedback(TENANT_ID, awaiting_order_id, comment=texto_usuario)
-            await adapter.send_text_message(
-                wa_id,
-                "📝 *¡Comentario registrado!*\n\n"
-                "Muchas gracias por compartirnos tu opinión detallada. Tus comentarios han sido guardados para el equipo de calidad de Petroil. ¡Que tengas un excelente día! ⛽🌟"
-            )
-            return
+            is_awaiting_tag = rating_ctx.get("awaiting_tag", False)
+            if is_awaiting_tag:
+                _AWAITING_RATING_COMMENTS[wa_id] = {
+                    "order_id": awaiting_order_id,
+                    "stars": rating_ctx.get("stars", 5),
+                    "time": time.time(),
+                    "awaiting_tag": False,
+                }
+                repo.update_order_rating_feedback(TENANT_ID, awaiting_order_id, comment=texto_usuario)
+                rating_data = repo.get_order_rating(TENANT_ID, awaiting_order_id)
+                stars_val = rating_data.get("rating", rating_ctx.get("stars", 5)) if rating_data else rating_ctx.get("stars", 5)
+                stars_str = "⭐" * stars_val
+                msg_final = (
+                    f"✅ *¡ENCUESTA COMPLETADA CON ÉXITO!*\n\n"
+                    f"⭐ *Calificación:* {stars_str} ({stars_val}/5)\n"
+                    f"💬 *Comentario registrado:* {texto_usuario}\n\n"
+                    "¡Muchas gracias por tu tiempo y valiosa opinión! Nos ayuda a premiar a nuestros mejores choferes y mejorar día a día. ¡Estamos a tus órdenes! ⛽🌟\n\n"
+                    "_💡 Opcional: Si deseas agregar algún comentario adicional, puedes enviarlo en tu siguiente mensaje._"
+                )
+                await adapter.send_text_message(wa_id, msg_final)
+                return
+            else:
+                _AWAITING_RATING_COMMENTS.pop(wa_id, None)
+                repo.update_order_rating_feedback(TENANT_ID, awaiting_order_id, comment=texto_usuario)
+                await adapter.send_text_message(
+                    wa_id,
+                    "📝 *¡Comentario registrado!*\n\n"
+                    "Muchas gracias por compartirnos tu opinión detallada. Tus comentarios han sido guardados para el equipo de calidad de Petroil. ¡Que tengas un excelente día! ⛽🌟"
+                )
+                return
 
     if interactive_id:
         _AWAITING_RATING_COMMENTS.pop(wa_id, None)
@@ -737,7 +801,6 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
             identity_store.save_order_cancellation(order_id, cancelled_by="el cliente", reason="Cancelado por el cliente desde WhatsApp")
             try:
                 from src.services.order_events import _EVENT_DEDUP_CACHE
-                import time
                 _EVENT_DEDUP_CACHE[f"cancelled:{order_id}"] = time.time()
             except Exception:
                 pass

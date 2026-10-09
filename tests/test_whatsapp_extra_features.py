@@ -91,9 +91,9 @@ async def run_whatsapp_feature_tests():
         assert "mapa" in call_args[1].lower() or "google.com/maps" in call_args[1]
         # Buttons include cancel_order_client
         buttons = call_args[2]
-        assert len(buttons) == 1
-        assert buttons[0]["id"] == f"cancel_order_client:{order.id}"
-        assert "Cancelar" in buttons[0]["title"]
+        cancel_btn = next((b for b in buttons if b["id"] == f"cancel_order_client:{order.id}"), None)
+        assert cancel_btn is not None
+        assert "Cancelar" in cancel_btn["title"]
     print("  ✅ Passed: WhatsApp received map pin + tracking message with [❌ Cancelar Pedido] button.\n")
 
     # -------------------------------------------------------------------------

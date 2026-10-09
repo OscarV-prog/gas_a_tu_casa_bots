@@ -216,8 +216,9 @@ async def _process_single_instagram_event(event: dict[str, Any]) -> None:
     # -------------------------------------------------------------------------
     if interactive_id.startswith("rate:"):
         parts = interactive_id.split(":")
-        order_id = int(parts[1])
-        stars = int(parts[2])
+        raw_oid = parts[1] if len(parts) > 1 else ""
+        order_id = int(raw_oid) if raw_oid.isdigit() else raw_oid
+        stars = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 5
 
         order = repo.get_order_by_id(TENANT_ID, order_id)
         driver_id = order.driver_id if order else None
@@ -250,6 +251,13 @@ async def _process_single_instagram_event(event: dict[str, Any]) -> None:
                 "¿En qué aspecto podemos mejorar?"
             )
 
+        _AWAITING_RATING_COMMENTS[igsid] = {
+            "order_id": order_id,
+            "stars": stars,
+            "time": time.time(),
+            "awaiting_tag": True,
+        }
+
         quick_replies = adapter.get_rating_feedback_quick_replies(order_id, stars)
         await adapter.send_quick_replies(
             recipient_igsid=igsid,
@@ -260,8 +268,9 @@ async def _process_single_instagram_event(event: dict[str, Any]) -> None:
 
     elif interactive_id.startswith("rate_tag:"):
         parts = interactive_id.split(":")
-        order_id = int(parts[1])
-        tag = parts[2]
+        raw_oid = parts[1] if len(parts) > 1 else ""
+        order_id = int(raw_oid) if raw_oid.isdigit() else raw_oid
+        tag = parts[2] if len(parts) > 2 else "Omitido"
         feedback_to_save = None if tag == "Omitido" else tag
 
         if feedback_to_save:
@@ -273,7 +282,9 @@ async def _process_single_instagram_event(event: dict[str, Any]) -> None:
 
         _AWAITING_RATING_COMMENTS[igsid] = {
             "order_id": order_id,
+            "stars": stars_val,
             "time": time.time(),
+            "awaiting_tag": False,
         }
 
         detalle_str = f"\n💬 **Aspecto registrado:** {feedback_to_save}" if feedback_to_save else ""
@@ -306,14 +317,36 @@ async def _process_single_instagram_event(event: dict[str, Any]) -> None:
         if has_phone_digits or is_greeting_or_cmd or is_order_intent or is_in_active_order or (time.time() - awaiting_time) >= 600 or interactive_id:
             _AWAITING_RATING_COMMENTS.pop(igsid, None)
         elif awaiting_order_id and texto_usuario:
-            _AWAITING_RATING_COMMENTS.pop(igsid, None)
-            repo.update_order_rating_feedback(TENANT_ID, awaiting_order_id, comment=texto_usuario)
-            await adapter.send_text_message(
-                igsid,
-                "📝 **¡Comentario registrado!**\n\n"
-                "Muchas gracias por compartirnos tu opinión detallada. Tus comentarios han sido guardados para el equipo de calidad de Petroil. ¡Que tengas un excelente día! ⛽🌟"
-            )
-            return
+            is_awaiting_tag = rating_ctx.get("awaiting_tag", False)
+            if is_awaiting_tag:
+                _AWAITING_RATING_COMMENTS[igsid] = {
+                    "order_id": awaiting_order_id,
+                    "stars": rating_ctx.get("stars", 5),
+                    "time": time.time(),
+                    "awaiting_tag": False,
+                }
+                repo.update_order_rating_feedback(TENANT_ID, awaiting_order_id, comment=texto_usuario)
+                rating_data = repo.get_order_rating(TENANT_ID, awaiting_order_id)
+                stars_val = rating_data.get("rating", rating_ctx.get("stars", 5)) if rating_data else rating_ctx.get("stars", 5)
+                stars_str = "⭐" * stars_val
+                msg_final = (
+                    f"✅ **¡ENCUESTA COMPLETADA CON ÉXITO!**\n\n"
+                    f"⭐ **Calificación:** {stars_str} ({stars_val}/5)\n"
+                    f"💬 **Comentario registrado:** {texto_usuario}\n\n"
+                    "¡Muchas gracias por tu tiempo y valiosa opinión! Nos ayuda a premiar a nuestros mejores choferes y mejorar día a día. ¡Estamos a tus órdenes! ⛽🌟\n\n"
+                    "_💡 Opcional: Si deseas agregar algún comentario adicional, puedes enviarlo en tu siguiente mensaje._"
+                )
+                await adapter.send_text_message(igsid, msg_final)
+                return
+            else:
+                _AWAITING_RATING_COMMENTS.pop(igsid, None)
+                repo.update_order_rating_feedback(TENANT_ID, awaiting_order_id, comment=texto_usuario)
+                await adapter.send_text_message(
+                    igsid,
+                    "📝 **¡Comentario registrado!**\n\n"
+                    "Muchas gracias por compartirnos tu opinión detallada. Tus comentarios han sido guardados para el equipo de calidad de Petroil. ¡Que tengas un excelente día! ⛽🌟"
+                )
+                return
 
     # -------------------------------------------------------------------------
     # 2. Manejo de Notas de Voz / Audio

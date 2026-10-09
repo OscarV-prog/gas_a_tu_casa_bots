@@ -380,11 +380,14 @@ class WhatsAppAdapter:
 
         clean_phone = self.normalize_wa_id(recipient_wa_id)
 
+        clean_btn = re.sub(r"[^\w\s\(\)\-\.]", "", button_label).strip()[:20] or "Ver Opciones"
+
         formatted_sections = []
         total_rows = 0
 
         for sec in sections:
-            sec_title = sec.get("title", "Opciones")[:24]
+            sec_title = sec.get("title", "Opciones")
+            clean_sec_title = re.sub(r"[^\w\s\(\)\-\.]", "", sec_title).strip()[:24] or "Opciones"
             raw_rows = sec.get("rows", [])
             valid_rows = []
 
@@ -406,7 +409,7 @@ class WhatsAppAdapter:
 
             if valid_rows:
                 formatted_sections.append({
-                    "title": sec_title,
+                    "title": clean_sec_title,
                     "rows": valid_rows,
                 })
 
@@ -414,7 +417,7 @@ class WhatsAppAdapter:
             "type": "list",
             "body": {"text": body_text[:1024]},
             "action": {
-                "button": button_label[:20],
+                "button": clean_btn,
                 "sections": formatted_sections,
             },
         }
@@ -438,10 +441,10 @@ class WhatsAppAdapter:
                 if resp.status_code in (200, 201, 202):
                     return True
                 logger.error(f"[WhatsApp] Error sending list ({resp.status_code}): {resp.text}")
-                return await self.send_text_message(clean_phone, body_text)
+                return False
         except Exception as e:
             logger.error(f"[WhatsApp] Exception sending list to {clean_phone}: {e}")
-            return await self.send_text_message(clean_phone, body_text)
+            return False
 
     async def send_location(
         self,

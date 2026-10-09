@@ -1058,9 +1058,9 @@ def notify_delivery_survey(order_id: Any, tenant_id: str = "petroil") -> bool:
                 
                 # Lista interactiva completa de 5 estrellas (como en Telegram)
                 sections = [{
-                    "title": "Calificación del Repartidor",
+                    "title": "Calificar Chofer",
                     "rows": [
-                        {"id": f"rate_driver:{order_id}:5", "title": "⭐⭐⭐⭐⭐ 5 Estrellas", "description": f"Excelente servicio de {driver_name_str}"},
+                        {"id": f"rate_driver:{order_id}:5", "title": "⭐⭐⭐⭐⭐ 5 Estrellas", "description": f"Excelente servicio de {driver_name_str}"[:72]},
                         {"id": f"rate_driver:{order_id}:4", "title": "⭐⭐⭐⭐ 4 Estrellas", "description": "Buen servicio"},
                         {"id": f"rate_driver:{order_id}:3", "title": "⭐⭐⭐ 3 Estrellas", "description": "Servicio regular"},
                         {"id": f"rate_driver:{order_id}:2", "title": "⭐⭐ 2 Estrellas", "description": "Malo / Inconforme"},
@@ -1078,7 +1078,7 @@ def notify_delivery_survey(order_id: Any, tenant_id: str = "petroil") -> bool:
                         loop.create_task(wa_adapter.send_interactive_list(
                             recipient_wa_id=recipient_id,
                             body_text=msg_wa,
-                            button_label="⭐ Calificar Repartidor",
+                            button_label="Calificar Chofer",
                             sections=sections,
                         ))
                         return True
@@ -1086,7 +1086,7 @@ def notify_delivery_survey(order_id: Any, tenant_id: str = "petroil") -> bool:
                         ok_list = asyncio.run(wa_adapter.send_interactive_list(
                             recipient_wa_id=recipient_id,
                             body_text=msg_wa,
-                            button_label="⭐ Calificar Repartidor",
+                            button_label="Calificar Chofer",
                             sections=sections,
                         ))
                         if ok_list:
