@@ -57,7 +57,13 @@ graph = compile_sales_graph()
 
 # Token del bot de clientes (Gascytsa)
 settings = get_settings()
-TELEGRAM_BOT_TOKEN = settings.telegram_bot_gascytsa_token or os.getenv("TELEGRAM_BOT_GASCYTSA_TOKEN", "")
+TELEGRAM_BOT_TOKEN = (
+    settings.telegram_bot_gascytsa_token
+    or os.getenv("TELEGRAM_BOT_GASCYTSA_TOKEN", "")
+    or os.getenv("TELEGRAM_GASCYTSA", "")
+    or get_dynamic_setting("TELEGRAM_BOT_GASCYTSA_TOKEN", tenant_id=TENANT_ID)
+    or get_dynamic_setting("TELEGRAM_GASCYTSA", tenant_id=TENANT_ID)
+)
 
 # Inicializar base de datos SQLite
 init_db()
@@ -1997,10 +2003,13 @@ def main() -> None:
     """Iniciar el bot de Telegram."""
     global TELEGRAM_BOT_TOKEN
     if not TELEGRAM_BOT_TOKEN:
-        TELEGRAM_BOT_TOKEN = get_dynamic_setting("TELEGRAM_BOT_GASCYTSA_TOKEN", force_refresh=True)
+        TELEGRAM_BOT_TOKEN = (
+            get_dynamic_setting("TELEGRAM_BOT_GASCYTSA_TOKEN", tenant_id=TENANT_ID, force_refresh=True)
+            or get_dynamic_setting("TELEGRAM_GASCYTSA", tenant_id=TENANT_ID, force_refresh=True)
+        )
 
     if not TELEGRAM_BOT_TOKEN:
-        print("❌ ERROR: TELEGRAM_BOT_GASCYTSA_TOKEN no está configurado ni en el archivo .env ni en el Dashboard (/settings).")
+        print("❌ ERROR: El token de Gascytsa no está configurado en .env ni en el Dashboard (/settings con clave TELEGRAM_GASCYTSA o TELEGRAM_BOT_GASCYTSA_TOKEN).")
         sys.exit(1)
 
     print("=" * 60)

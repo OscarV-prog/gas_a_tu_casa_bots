@@ -43,7 +43,21 @@ _KEY_MAPPINGS: dict[str, list[str]] = {
     "INSTAGRAM_APP_SECRET": ["INSTAGRAM_APP_SECRET"],
     "INSTAGRAM_API_VERSION": ["INSTAGRAM_API_VERSION"],
     "TELEGRAM_BOT_TOKEN": ["TELEGRAM_BOT_TOKEN"],
-    "TELEGRAM_BOT_GASCYTSA_TOKEN": ["TELEGRAM_BOT_GASCYTSA_TOKEN"],
+    "TELEGRAM_BOT_GASCYTSA_TOKEN": [
+        "TELEGRAM_BOT_GASCYTSA_TOKEN",
+        "TELEGRAM_GASCYTSA",
+        "TELEGRAM_GASCYTSA_TOKEN",
+    ],
+    "TELEGRAM_GASCYTSA": [
+        "TELEGRAM_BOT_GASCYTSA_TOKEN",
+        "TELEGRAM_GASCYTSA",
+        "TELEGRAM_GASCYTSA_TOKEN",
+    ],
+    "TELEGRAM_GASCYTSA_TOKEN": [
+        "TELEGRAM_BOT_GASCYTSA_TOKEN",
+        "TELEGRAM_GASCYTSA",
+        "TELEGRAM_GASCYTSA_TOKEN",
+    ],
     "TELEGRAM_DRIVER_BOT_TOKEN": ["TELEGRAM_DRIVER_BOT_TOKEN"],
     "API_EMAIL": ["API_EMAIL", "OPERATOR_EMAIL", "API_USER"],
     "API_PASSWORD": ["API_PASSWORD", "OPERATOR_PASSWORD", "API_PASS"],
@@ -55,7 +69,7 @@ _KEY_MAPPINGS: dict[str, list[str]] = {
 
 
 
-def fetch_remote_settings(force_refresh: bool = False, timeout: int = 4) -> dict[str, str]:
+def fetch_remote_settings(tenant_id: str | None = None, force_refresh: bool = False, timeout: int = 4) -> dict[str, str]:
     """Fetch settings from central NestJS endpoint /settings with multi-tenant header."""
     global _cached_settings, _last_fetch_time
 
@@ -66,9 +80,10 @@ def fetch_remote_settings(force_refresh: bool = False, timeout: int = 4) -> dict
 
     try:
         from src.services.api_client import api_get
-        items = api_get("/settings", timeout=timeout)
+        primary_tenant = tenant_id or os.getenv("TENANT_ID", "petroil")
+        items = api_get("/settings", tenant_id=primary_tenant, timeout=timeout)
+        new_settings: dict[str, str] = {}
         if isinstance(items, list):
-            new_settings: dict[str, str] = {}
             for it in items:
                 if not isinstance(it, dict):
                     continue
@@ -76,16 +91,32 @@ def fetch_remote_settings(force_refresh: bool = False, timeout: int = 4) -> dict
                 v = str(it.get("value", "")).strip()
                 if k and v:
                     new_settings[k] = v
-                    # Synchronize into os.environ for transparent compatibility
                     os.environ[k] = v
                     for alias in _KEY_MAPPINGS.get(k, []):
                         os.environ[alias] = v
 
-            with _lock:
-                _cached_settings = new_settings
-                _last_fetch_time = time.time()
-            logger.info(f"[DynamicSettings] Synchronized {len(new_settings)} settings from remote backend.")
-            return dict(new_settings)
+        # Si el tenant consultado no es gascytsa, también consultar gascytsa para sincronizar sus credenciales
+        if primary_tenant != "gascytsa":
+            try:
+                gas_items = api_get("/settings", tenant_id="gascytsa", timeout=timeout)
+                if isinstance(gas_items, list):
+                    for it in gas_items:
+                        if isinstance(it, dict):
+                            k = it.get("key")
+                            v = str(it.get("value", "")).strip()
+                            if k and v:
+                                new_settings[k] = v
+                                os.environ[k] = v
+                                for alias in _KEY_MAPPINGS.get(k, []):
+                                    os.environ[alias] = v
+            except Exception as e_gas:
+                logger.debug(f"[DynamicSettings] Gascytsa settings check skipped: {e_gas}")
+
+        with _lock:
+            _cached_settings = new_settings
+            _last_fetch_time = time.time()
+        logger.info(f"[DynamicSettings] Synchronized {len(new_settings)} settings from remote backend.")
+        return dict(new_settings)
     except Exception as e:
         logger.warning(f"[DynamicSettings] Failed to fetch remote settings from /settings: {e}. Falling back to cached/env.")
 
@@ -93,7 +124,7 @@ def fetch_remote_settings(force_refresh: bool = False, timeout: int = 4) -> dict
         return dict(_cached_settings)
 
 
-def get_dynamic_setting(key: str, default: str = "", force_refresh: bool = False) -> str:
+def get_dynamic_setting(key: str, default: str = "", tenant_id: str | None = None, force_refresh: bool = False) -> str:
     """Retrieve setting, prioritizing local environment (.env) first, then remote backend settings."""
     # 1. Primero buscar en variables de entorno locales (.env / os.environ)
     env_val = os.getenv(key)
@@ -109,14 +140,16 @@ def get_dynamic_setting(key: str, default: str = "", force_refresh: bool = False
                     return val.strip()
 
     # 2. Si no está en el .env local, buscar en el endpoint remoto del backend central
-    settings = fetch_remote_settings(force_refresh=force_refresh)
+    settings = fetch_remote_settings(tenant_id=tenant_id, force_refresh=force_refresh)
     if key in settings and settings[key]:
         return settings[key]
 
     # Buscar aliases en configuraciones remotas
     for primary_key, aliases in _KEY_MAPPINGS.items():
-        if key in aliases and primary_key in settings and settings[primary_key]:
-            return settings[primary_key]
+        if key == primary_key or key in aliases:
+            for alias in [primary_key] + aliases:
+                if alias in settings and settings[alias]:
+                    return settings[alias]
 
     return default
 

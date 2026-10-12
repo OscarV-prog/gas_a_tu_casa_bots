@@ -107,12 +107,16 @@ def _sanitize_log_data(data: Any) -> Any:
     return sanitized
 
 
-def api_get(endpoint: str, params: dict | None = None, timeout: int = 8) -> dict | list | None:
+def api_get(endpoint: str, params: dict | None = None, headers: dict | None = None, tenant_id: str | None = None, timeout: int = 8) -> dict | list | None:
     """Make a GET request to the centralized NestJS API and return parsed JSON."""
     url = f"{get_api_base_url()}{endpoint if endpoint.startswith('/') else '/' + endpoint}"
-    headers = get_headers()
+    req_headers = get_headers()
+    if tenant_id:
+        req_headers["x-tenant-id"] = tenant_id
+    if headers:
+        req_headers.update(headers)
     try:
-        response = _session.get(url, headers=headers, params=params, timeout=timeout)
+        response = _session.get(url, headers=req_headers, params=params, timeout=timeout)
         response.raise_for_status()
         if not response.text or not response.text.strip():
             return None
@@ -122,12 +126,16 @@ def api_get(endpoint: str, params: dict | None = None, timeout: int = 8) -> dict
         raise
 
 
-def api_post(endpoint: str, body: dict, timeout: int = 8) -> dict | list | None:
+def api_post(endpoint: str, body: dict, headers: dict | None = None, tenant_id: str | None = None, timeout: int = 8) -> dict | list | None:
     """Make a POST request to the centralized NestJS API and return parsed JSON."""
     url = f"{get_api_base_url()}{endpoint if endpoint.startswith('/') else '/' + endpoint}"
-    headers = get_headers()
+    req_headers = get_headers()
+    if tenant_id:
+        req_headers["x-tenant-id"] = tenant_id
+    if headers:
+        req_headers.update(headers)
     try:
-        response = _session.post(url, headers=headers, json=body, timeout=timeout)
+        response = _session.post(url, headers=req_headers, json=body, timeout=timeout)
         response.raise_for_status()
         if not response.text or not response.text.strip():
             return None
@@ -138,12 +146,16 @@ def api_post(endpoint: str, body: dict, timeout: int = 8) -> dict | list | None:
         raise
 
 
-def api_patch(endpoint: str, body: dict, timeout: int = 8) -> dict | list | None:
+def api_patch(endpoint: str, body: dict, headers: dict | None = None, tenant_id: str | None = None, timeout: int = 8) -> dict | list | None:
     """Make a PATCH request to the centralized NestJS API and return parsed JSON."""
     url = f"{get_api_base_url()}{endpoint if endpoint.startswith('/') else '/' + endpoint}"
-    headers = get_headers()
+    req_headers = get_headers()
+    if tenant_id:
+        req_headers["x-tenant-id"] = tenant_id
+    if headers:
+        req_headers.update(headers)
     try:
-        response = _session.patch(url, headers=headers, json=body, timeout=timeout)
+        response = _session.patch(url, headers=req_headers, json=body, timeout=timeout)
         response.raise_for_status()
         if not response.text or not response.text.strip():
             return None
@@ -154,12 +166,16 @@ def api_patch(endpoint: str, body: dict, timeout: int = 8) -> dict | list | None
         raise
 
 
-def api_put(endpoint: str, body: dict, timeout: int = 8) -> dict | list | None:
+def api_put(endpoint: str, body: dict, headers: dict | None = None, tenant_id: str | None = None, timeout: int = 8) -> dict | list | None:
     """Make a PUT request to the centralized NestJS API and return parsed JSON."""
     url = f"{get_api_base_url()}{endpoint if endpoint.startswith('/') else '/' + endpoint}"
-    headers = get_headers()
+    req_headers = get_headers()
+    if tenant_id:
+        req_headers["x-tenant-id"] = tenant_id
+    if headers:
+        req_headers.update(headers)
     try:
-        response = _session.put(url, headers=headers, json=body, timeout=timeout)
+        response = _session.put(url, headers=req_headers, json=body, timeout=timeout)
         response.raise_for_status()
         if not response.text or not response.text.strip():
             return None
@@ -170,12 +186,16 @@ def api_put(endpoint: str, body: dict, timeout: int = 8) -> dict | list | None:
         raise
 
 
-def api_delete(endpoint: str, params: dict | None = None, timeout: int = 8) -> dict:
+def api_delete(endpoint: str, params: dict | None = None, headers: dict | None = None, tenant_id: str | None = None, timeout: int = 8) -> dict:
     """Make a DELETE request to the centralized NestJS API and return parsed JSON."""
     url = f"{get_api_base_url()}{endpoint if endpoint.startswith('/') else '/' + endpoint}"
-    headers = get_headers()
+    req_headers = get_headers()
+    if tenant_id:
+        req_headers["x-tenant-id"] = tenant_id
+    if headers:
+        req_headers.update(headers)
     try:
-        response = _session.delete(url, headers=headers, params=params, timeout=timeout)
+        response = _session.delete(url, headers=req_headers, params=params, timeout=timeout)
         response.raise_for_status()
         if response.text and response.headers.get("content-type", "").startswith("application/json"):
             return response.json()
