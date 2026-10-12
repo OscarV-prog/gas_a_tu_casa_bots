@@ -27,15 +27,24 @@ if [ "$1" = "all" ]; then
 
     # 3. Bot de Telegram para Choferes (Despacho / GPS)
     if [ -n "$DRIVER_BOT_TOKEN" ] || [ -n "$TELEGRAM_DRIVER_BOT_TOKEN" ] || [ -n "$API_BASE_URL" ]; then
-        echo "[3/3] Iniciando Bot de Telegram para Choferes..."
+        echo "[3/4] Iniciando Bot de Telegram para Choferes..."
         python driver_bot.py &
         DRIVER_PID=$!
     else
-        echo "[3/3] DRIVER_BOT_TOKEN / API_BASE_URL no configurado (omitido)."
+        echo "[3/4] DRIVER_BOT_TOKEN / API_BASE_URL no configurado (omitido)."
+    fi
+
+    # 4. Bot de Telegram para Gascytsa (Culiacán)
+    if [ -n "$TELEGRAM_BOT_GASCYTSA_TOKEN" ] || [ -n "$API_BASE_URL" ]; then
+        echo "[4/4] Iniciando Bot de Telegram Gascytsa..."
+        python telegram_bot_gascytsa.py &
+        GASCYTSA_PID=$!
+    else
+        echo "[4/4] TELEGRAM_BOT_GASCYTSA_TOKEN / API_BASE_URL no configurado (omitido)."
     fi
 
     # Manejar señales de apagado limpio
-    trap "echo 'Deteniendo servicios...'; kill -TERM $API_PID $TELEGRAM_PID $DRIVER_PID 2>/dev/null; exit 0" SIGTERM SIGINT
+    trap "echo 'Deteniendo servicios...'; kill -TERM $API_PID $TELEGRAM_PID $DRIVER_PID $GASCYTSA_PID 2>/dev/null; exit 0" SIGTERM SIGINT
 
     # Mantener el contenedor vivo mientras corra la API principal
     wait "$API_PID"

@@ -1,6 +1,7 @@
 """Telegram Bot adapter for Gas a tu Puerta Gascytsa (Culiacán)."""
 
 import logging
+import os
 import re
 import sys
 from datetime import datetime
@@ -39,6 +40,7 @@ from src.services.audio_transcription import transcribe_audio_file
 from src.services.flow_router import FlowResponse, FlowState, flow_router, get_or_create_session
 from src.services.geocoding import resolve_gps_address_to_name, reverse_geocode
 from src.services.notifications import notify_driver
+from src.services.dynamic_settings import get_dynamic_setting
 from src.tools.get_order_status import format_clean_driver_status
 
 # Configurar logging
@@ -53,9 +55,9 @@ TENANT_ID = "gascytsa"
 tenant = get_tenant(TENANT_ID)
 graph = compile_sales_graph()
 
-# Token del bot de clientes
+# Token del bot de clientes (Gascytsa)
 settings = get_settings()
-TELEGRAM_BOT_TOKEN = settings.telegram_bot_gascytsa_token or os.getenv("TELEGRAM_BOT_GASCYTSA_TOKEN", "") or settings.telegram_bot_token
+TELEGRAM_BOT_TOKEN = settings.telegram_bot_gascytsa_token or os.getenv("TELEGRAM_BOT_GASCYTSA_TOKEN", "")
 
 # Inicializar base de datos SQLite
 init_db()
@@ -1993,8 +1995,12 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
 
 def main() -> None:
     """Iniciar el bot de Telegram."""
+    global TELEGRAM_BOT_TOKEN
     if not TELEGRAM_BOT_TOKEN:
-        print("❌ ERROR: TELEGRAM_BOT_GASCYTSA_TOKEN (o TELEGRAM_BOT_TOKEN) no está configurado en el archivo .env")
+        TELEGRAM_BOT_TOKEN = get_dynamic_setting("TELEGRAM_BOT_GASCYTSA_TOKEN", force_refresh=True)
+
+    if not TELEGRAM_BOT_TOKEN:
+        print("❌ ERROR: TELEGRAM_BOT_GASCYTSA_TOKEN no está configurado ni en el archivo .env ni en el Dashboard (/settings).")
         sys.exit(1)
 
     print("=" * 60)
