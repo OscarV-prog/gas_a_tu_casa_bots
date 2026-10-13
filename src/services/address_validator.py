@@ -44,6 +44,8 @@ OBVIOUS_JOKE_PATTERNS = [
 
 # Ciudades, municipios, estados y países fuera de cobertura para Mazatlán (Petroil)
 OUT_LOCATIONS_MAZATLAN = [
+    # Colonias, sectores, avenidas y zonas de Culiacán que deben rechazarse categóricamente en Mazatlán
+    r"\b(?:colinas\s+de\s+san\s+miguel|tres\s+r[ií]os|desarrollo\s+urbano\s+tres\s+r[ií]os|las\s+quintas|infonavit\s+humaya|valle\s+alto|barrancos|infonavit\s+barrancos|pedro\s+infante|blvd\.?\s*pedro\s+infante|enrique\s+s[aá]nchez\s+alonso|lola\s+beltr[aá]n|rolando\s+arjona|la\s+conquista|stanza\s+toscana|stanza\s+florencia|stanza|bachigualato|nakayama|alturas\s+del\s+sur|isla\s+musala|aguaruto|costa\s+rica|eldorado|quil[aá]|limita\s+de\s+iturbe|prol\.?\s*[aá]lvaro\s+obreg[oó]n|avenida\s+[aá]lvaro\s+obreg[oó]n|av\.?\s+[aá]lvaro\s+obreg[oó]n|[aá]lvaro\s+obreg[oó]n\s+(?:norte|sur|\d+)|calzada\s+heroico\s+colegio\s+militar|montebello|santa\s+fe\s+culiac[aá]n|san\s+rafael\s+culiac[aá]n|villa\s+universidad|plaza\s+cuatro\s+r[ií]os|plaza\s+ceiba|forum\s+culiac[aá]n|parque\s+las\s+riberas|estadio\s+tomateros|jard[ií]n\s+bot[aá]nico\s+culiac[aá]n)\b",
     # Otros municipios de Sinaloa
     r"\b(?:culiac[aá]n|cln|navolato|los\s+mochis|mochis|guasave|escuinapa|concordia|el\s+rosario|el\s+fuerte|choix|guam[uú]chil|salvador\s+alvarado|elota|la\s+cruz\s+de\s+elota|san\s+ignacio|badiraguato|angostura|mocorito|sinaloa\s+de\s+leyva)\b",
     # Otras ciudades de México (precisión para no chocar con nombres de próceres en calles como Juárez o Hidalgo)
@@ -56,6 +58,8 @@ OUT_LOCATIONS_MAZATLAN = [
 
 # Ciudades, municipios, estados y países fuera de cobertura para Culiacán (Gascytsa)
 OUT_LOCATIONS_CULIACAN = [
+    # Colonias, fraccionamientos y avenidas de Mazatlán que deben rechazarse categóricamente en Culiacán
+    r"\b(?:zona\s+dorada|marina\s+mazatl[aá]n|s[aá]balo\s+country|las\s+misiones|misi[oó]n\s+san\s+javier|misi[oó]n\s+santo\s+tom[aá]s|misi[oó]n\s+loreto|real\s+del\s+valle|pradera\s+dorada|el\s+conchi|flores\s+mag[oó]n|palos\s+prietos|ferrocarrilera|lomas\s+del\s+mar|playa\s+sur|jacarandas|villa\s+verde|valles\s+del\s+ejido|urbi\s+villa\s+del\s+real|santa\s+teresa|alarc[oó]n|infonavit\s+playas|cerro\s+del\s+vig[ií]a|montuosa|jaripillo|francisco\s+villa|l[oó]pez\s+mateos|sirena|urias|cerritos|el\s+venadillo|av\.?\s+del\s+mar|av\.?\s+camar[oó]n\s+s[aá]balo|camar[oó]n\s+s[aá]balo|av\.?\s+rafael\s+buelna|rafael\s+buelna|ej[eé]rcito\s+mexicano|paseo\s+claussen|olas\s+altas)\b",
     # Otros municipios de Sinaloa (incluyendo Mazatlán)
     r"\b(?:mazatl[aá]n|maza|navolato|los\s+mochis|mochis|guasave|escuinapa|concordia|el\s+rosario|el\s+fuerte|choix|guam[uú]chil|salvador\s+alvarado|elota|la\s+cruz\s+de\s+elota|san\s+ignacio|badiraguato|angostura|mocorito|sinaloa\s+de\s+leyva)\b",
     # Otras ciudades de México

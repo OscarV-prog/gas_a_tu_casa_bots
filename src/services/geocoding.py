@@ -63,8 +63,13 @@ def clean_address_for_geocoding(address: str) -> list[str]:
     street_part = parts[0] if parts else cleaned_main
     neigh_part = parts[1] if len(parts) >= 2 else ""
 
-    # Clean 'Col.', 'Fracc.', 'Colonia', 'Fraccionamiento', 'Privada'
-    clean_neigh = re.sub(r"\b(?:col\.?|colonia|fracc\.?|fraccionamiento|privada|residencial)\s*", "", neigh_part, flags=re.IGNORECASE).strip()
+    # Clean 'Col.', 'Fracc.', 'Colonia', 'Fraccionamiento', 'Privada', 'Residencial' without truncating words like 'Colinas'
+    clean_neigh = re.sub(
+        r"^\s*(?:colonia\b|col\b\.?|fraccionamiento\b|fracc\b\.?|privada\b|priv\b\.?|residencial\b)\s*",
+        "",
+        neigh_part,
+        flags=re.IGNORECASE,
+    ).strip()
 
     # Street without house numbers (e.g. "Misión San Javier 5246" -> "Misión San Javier")
     street_no_num = re.sub(r"\s*#?\s*\d+[\w\-]*", "", street_part).strip()
@@ -142,6 +147,26 @@ def verify_address_city_grounding(
     cache_key = f"{raw.lower()}::{target_city_name.lower()}"
     if cache_key in _grounding_cache:
         return _grounding_cache[cache_key]
+
+    # Detección instantánea de coordenadas GPS incluidas en el texto (ej. compartido desde Telegram/WhatsApp)
+    m_gps = re.search(r"GPS:\s*(-?\d+\.\d+),\s*(-?\d+\.\d+)", raw, re.IGNORECASE)
+    if m_gps:
+        gps_lat = float(m_gps.group(1))
+        gps_lng = float(m_gps.group(2))
+        dist_t = calculate_distance_km(gps_lat, gps_lng, t_lat, t_lng)
+        dist_a = calculate_distance_km(gps_lat, gps_lng, alt_lat, alt_lng)
+        if dist_t <= 35.0:
+            res_gps = (True, f"Dirección confirmada físicamente en {target_city_name}", {"lat": gps_lat, "lng": gps_lng, "match_addr": raw, "dist_km": dist_t})
+            _grounding_cache[cache_key] = res_gps
+            return res_gps
+        else:
+            fb = (
+                f"⚠️ Por el momento nuestro servicio de {service_name} tiene cobertura exclusivamente en la ciudad de {target_city_name}, Sinaloa. "
+                f"Por favor proporciona una dirección o ubicación dentro de {target_city_name} 📍."
+            )
+            res_gps = (False, fb, {"detected_city": alt_city_name if dist_a <= 35.0 else "otra localidad", "lat": gps_lat, "lng": gps_lng, "dist_km": dist_t, "dist_alt_km": dist_a})
+            _grounding_cache[cache_key] = res_gps
+            return res_gps
 
     cands = clean_address_for_geocoding(raw)
     queries_to_try = []
@@ -239,6 +264,23 @@ def verify_address_city_grounding(
     return res_none
 
 
+def _street_name_matches(query_cand: str, result_name: str) -> bool:
+    """Verifica que el nombre de calle/lugar devuelto por el geocodificador tenga correspondencia con lo buscado."""
+    if not query_cand or not result_name:
+        return True
+    stop_words = {
+        "calle", "av", "avenida", "blvd", "boulevard", "de", "del", "la", "las", "el", "los",
+        "y", "en", "fracc", "col", "privada", "residencial", "colonia", "fraccionamiento",
+        "san", "santa", "santo", "mision", "misión", "paseo", "camino", "calzada",
+    }
+    q_words = [re.sub(r"[^a-záéíóúñ0-9]", "", w.lower()) for w in query_cand.split()]
+    q_words = [w for w in q_words if len(w) >= 3 and w not in stop_words and not w.isdigit()]
+    if not q_words:
+        return True
+    r_lower = result_name.lower()
+    return any(qw in r_lower for qw in q_words)
+
+
 def geocode_address(
     address: str,
     city_context: str | None = None,
@@ -261,6 +303,9 @@ def geocode_address(
     is_culiacan = "culiac" in city.lower()
     target_lat = CULIACAN_LAT if is_culiacan else DEFAULT_LAT
     target_lng = CULIACAN_LNG if is_culiacan else DEFAULT_LNG
+    alt_lat = DEFAULT_LAT if is_culiacan else CULIACAN_LAT
+    alt_lng = DEFAULT_LNG if is_culiacan else CULIACAN_LNG
+    opposing_city_kw = "mazatl" if is_culiacan else "culiac"
     max_dist_km = 35.0
 
     clean_key = f"{address.strip().lower()}::{city.strip().lower()}"
@@ -280,7 +325,7 @@ def geocode_address(
             encoded = urllib.parse.quote(query)
             url = (
                 f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates"
-                f"?SingleLine={encoded}&f=json&outFields=Match_addr,Addr_type,Score&location={target_lng:.4f},{target_lat:.4f}&distance=60000&maxLocations=2"
+                f"?SingleLine={encoded}&f=json&outFields=Match_addr,Addr_type,Score,City,Subregion&location={target_lng:.4f},{target_lat:.4f}&distance=60000&maxLocations=3"
             )
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
             with urllib.request.urlopen(req, timeout=3.0) as response:
@@ -298,10 +343,22 @@ def geocode_address(
                             logger.debug(f"ArcGIS candidate rejected because Addr_type is generic locality/city: {addr_type}")
                             continue
 
+                        matched_name = str(top.get("address") or top.get("attributes", {}).get("Match_addr") or address)
+                        city_attr = str(top.get("attributes", {}).get("City") or "")
+                        subregion_attr = str(top.get("attributes", {}).get("Subregion") or "")
+                        combined_meta = f"{matched_name} {city_attr} {subregion_attr}".lower()
+                        if opposing_city_kw in combined_meta:
+                            logger.warning(f"🚫 ArcGIS candidate rejected because it mentions opposing city '{opposing_city_kw}': {matched_name}")
+                            continue
+
                         if lat > 0 and (14.0 <= lat <= 33.0 and -118.0 <= lng <= -86.0):
                             dist_km = calculate_distance_km(lat, lng, target_lat, target_lng)
+                            dist_alt_km = calculate_distance_km(lat, lng, alt_lat, alt_lng)
+                            if dist_alt_km <= 35.0 and dist_km > 50.0:
+                                logger.warning(f"🚫 ArcGIS candidate rejected because GPS belongs to opposing city '{opposing_city_kw}' (dist_alt={dist_alt_km:.1f}km vs dist_target={dist_km:.1f}km)")
+                                continue
+
                             if dist_km < max_dist_km and score >= 60.0:
-                                matched_name = top.get("address") or top.get("attributes", {}).get("Match_addr") or address
                                 res = (lat, lng, matched_name)
                                 _geocode_cache[clean_key] = res
                                 logger.info(f"🎯 Pinpoint High-Precision Geocoded (ArcGIS {addr_type} score={score}) '{cand}' -> ({lat:.5f}, {lng:.5f}) dist={dist_km:.1f}km")
@@ -309,8 +366,8 @@ def geocode_address(
         except Exception as e:
             logger.debug(f"ArcGIS geocode attempt failed for candidate '{cand}': {e}")
 
-    # 2. Secondary fallback: Photon Komoot (OSM) with city location bias across all candidates
-    for cand in candidates:
+    # 2. Secondary fallback: Photon Komoot (OSM) with city location bias across top candidates
+    for cand in candidates[:2]:
         try:
             query = f"{cand}, {city}".strip(", ")
             encoded = urllib.parse.quote(query)
@@ -336,6 +393,20 @@ def geocode_address(
                             is_mx = country in ("méxico", "mexico", "mx") or (14.0 <= lat <= 33.0 and -118.0 <= lng <= -86.0)
                             if is_mx and lat > 0:
                                 dist_km = calculate_distance_km(lat, lng, target_lat, target_lng)
+                                dist_alt_km = calculate_distance_km(lat, lng, alt_lat, alt_lng)
+                                if dist_alt_km <= 35.0 and dist_km > 50.0:
+                                    logger.warning(f"🚫 Photon candidate rejected because GPS belongs to opposing city '{opposing_city_kw}'")
+                                    continue
+                                cand_city = str(props.get("city") or props.get("county") or "").lower()
+                                if opposing_city_kw in cand_city:
+                                    logger.warning(f"🚫 Photon candidate rejected because city belongs to '{opposing_city_kw}'")
+                                    continue
+
+                                cand_street_name = f"{props.get('name') or ''} {props.get('street') or ''}".strip()
+                                if cand_street_name and not _street_name_matches(cand, cand_street_name):
+                                    logger.warning(f"🚫 Photon candidate rejected because street name does not match '{cand}': {cand_street_name}")
+                                    continue
+
                                 if dist_km < max_dist_km:
                                     res = (lat, lng, address)
                                     _geocode_cache[clean_key] = res
@@ -345,7 +416,7 @@ def geocode_address(
             logger.debug(f"Photon geocode attempt failed for candidate '{cand}': {e}")
 
     # 3. Fallback to OpenStreetMap Nominatim with 2.5s timeout across candidates
-    for cand in candidates[:3]:
+    for cand in candidates[:2]:
         try:
             query = f"{cand}, {city}".strip(", ")
             encoded_query = urllib.parse.quote(query)
@@ -366,8 +437,21 @@ def geocode_address(
                         lat = float(item["lat"])
                         lng = float(item["lon"])
                         dist_km = calculate_distance_km(lat, lng, target_lat, target_lng)
+                        dist_alt_km = calculate_distance_km(lat, lng, alt_lat, alt_lng)
+                        if dist_alt_km <= 35.0 and dist_km > 50.0:
+                            logger.warning(f"🚫 Nominatim candidate rejected because GPS belongs to opposing city '{opposing_city_kw}'")
+                            continue
+
+                        display_name = item.get("display_name", address)
+                        if opposing_city_kw in display_name.lower():
+                            logger.warning(f"🚫 Nominatim candidate rejected because display_name mentions '{opposing_city_kw}'")
+                            continue
+
+                        if display_name and not _street_name_matches(cand, display_name):
+                            logger.warning(f"🚫 Nominatim candidate rejected because street name does not match '{cand}': {display_name}")
+                            continue
+
                         if dist_km < max_dist_km:
-                            display_name = item.get("display_name", address)
                             res = (lat, lng, display_name)
                             _geocode_cache[clean_key] = res
                             logger.info(f"✅ Geocoded (Nominatim) '{cand}' -> ({lat:.5f}, {lng:.5f}) dist={dist_km:.1f}km")

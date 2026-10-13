@@ -29,6 +29,9 @@ from src.services.flow_router import flow_router, FlowState, get_or_create_sessi
 async def test_fast_heuristic_mazatlan_restrictions():
     print("🧪 [Test 1] Fast Heuristic Rejections for Mazatlán (Petroil)...")
     out_for_mazatlan = [
+        "Prol. Álvaro Obregón 1880, Colinas de San Miguel",
+        "Colinas de San Miguel",
+        "Desarrollo Urbano Tres Ríos",
         "Blvd. Pedro Infante 2200, Culiacán",
         "Av. Álvaro Obregón 1540, Culiacán",
         "Calle Leyva 45, Los Mochis",
@@ -220,6 +223,15 @@ async def test_cross_city_text_address_validation():
     assert "Mazatlán" in res_cul_in_mzt.user_feedback, f"Expected 'Mazatlán' in feedback: {res_cul_in_mzt.user_feedback}"
     assert "Culiacán" not in res_cul_in_mzt.user_feedback, f"Opposing city should NOT be leaked: {res_cul_in_mzt.user_feedback}"
 
+    res_obregon_in_mzt = await validate_address_with_llm(
+        "Prol. Álvaro Obregón 1880, Colinas de San Miguel",
+        tenant_id="petroil",
+        city_context="Mazatlán",
+    )
+    assert not res_obregon_in_mzt.is_valid, f"Expected invalid in Mazatlán for Colinas de San Miguel, got valid: {res_obregon_in_mzt}"
+    assert "Mazatlán" in res_obregon_in_mzt.user_feedback
+    assert "Culiacán" not in res_obregon_in_mzt.user_feedback
+
     # 4. Dirección de Culiacán enviada a Gascytsa (Culiacán) -> DEBE ACEPTARSE
     res_cul_in_cul = await validate_address_with_llm(
         "Blvd. Pedro Infante 2200, Tres Rios",
@@ -284,7 +296,7 @@ async def test_cross_city_flow_router_enforcement():
 
     resp_p_bad = await flow_router.process_event(
         session_id=sid_petroil,
-        text="Blvd. Pedro Infante 2200, Tres Rios",
+        text="Prol. Álvaro Obregón 1880, Colinas de San Miguel",
         channel="telegram",
         channel_user_id="67890",
         tenant_id="petroil",
