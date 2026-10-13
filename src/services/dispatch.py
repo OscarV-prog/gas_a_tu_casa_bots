@@ -95,8 +95,12 @@ def dispatch_order(order_id: int, tenant_id: str = "petroil", force_immediate: b
         formatted_addr = order.delivery_address
         logger.info(f"[Dispatch] Order #{order_id} using existing GPS: ({lat:.5f}, {lng:.5f})")
     else:
-        lat, lng, formatted_addr = geocode_address(order.delivery_address)
-        logger.info(f"[Dispatch] Order #{order_id} geocoded to ({lat:.5f}, {lng:.5f}) - {formatted_addr}")
+        target_city = "Culiacán" if (tenant_id or "").lower() == "gascytsa" else "Mazatlán"
+        lat, lng, formatted_addr = geocode_address(order.delivery_address, city_context=target_city)
+        if lat is not None and lng is not None:
+            logger.info(f"[Dispatch] Order #{order_id} geocoded to ({lat:.5f}, {lng:.5f}) - {formatted_addr}")
+        else:
+            logger.info(f"[Dispatch] Order #{order_id} could not be geocoded to coordinates - {formatted_addr}")
 
     # 2. Check if this order is scheduled for future days or > 30 minutes away
     if not force_immediate:

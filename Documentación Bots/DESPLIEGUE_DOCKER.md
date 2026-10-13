@@ -2,8 +2,9 @@
 
 Esta configuración orquesta **todo el sistema de bots en un solo contenedor Docker**:
 1. **API FastAPI (Puerto 3000):** Maneja los Webhooks de Meta Messenger, la sincronización de la PWA del Chofer y la página de Tracking del cliente.
-2. **Bot de Telegram Clientes:** Atiende pedidos de venta por Telegram (usando `TELEGRAM_BOT_TOKEN`).
+2. **Bot de Telegram Clientes (Mazatlán):** Atiende pedidos de venta por Telegram (usando `TELEGRAM_BOT_TOKEN`).
 3. **Bot de Telegram Choferes:** Atiende despacho y coordenadas por Telegram (usando `DRIVER_BOT_TOKEN`).
+4. **Bot de Telegram Gascytsa (Culiacán):** Atiende pedidos de venta en Culiacán (usando `TELEGRAM_BOT_GASCYTSA_TOKEN` o dynamic setting `TELEGRAM_GASCYTSA`).
 
 ---
 

@@ -57,13 +57,14 @@ graph = compile_sales_graph()
 
 # Token del bot de clientes (Gascytsa)
 settings = get_settings()
-TELEGRAM_BOT_TOKEN = (
+TELEGRAM_BOT_TOKEN = str(
     settings.telegram_bot_gascytsa_token
     or os.getenv("TELEGRAM_BOT_GASCYTSA_TOKEN", "")
     or os.getenv("TELEGRAM_GASCYTSA", "")
     or get_dynamic_setting("TELEGRAM_BOT_GASCYTSA_TOKEN", tenant_id=TENANT_ID)
     or get_dynamic_setting("TELEGRAM_GASCYTSA", tenant_id=TENANT_ID)
-)
+    or ""
+).strip()
 
 # Inicializar base de datos SQLite
 init_db()
@@ -2002,15 +2003,31 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
 def main() -> None:
     """Iniciar el bot de Telegram."""
     global TELEGRAM_BOT_TOKEN
-    if not TELEGRAM_BOT_TOKEN:
-        TELEGRAM_BOT_TOKEN = (
-            get_dynamic_setting("TELEGRAM_BOT_GASCYTSA_TOKEN", tenant_id=TENANT_ID, force_refresh=True)
-            or get_dynamic_setting("TELEGRAM_GASCYTSA", tenant_id=TENANT_ID, force_refresh=True)
-        )
+    import time
+
+    # Intentar resolver el token (de .env, settings o backend remoto) con reintentos para inicio en servidor
+    for attempt in range(5):
+        if not TELEGRAM_BOT_TOKEN:
+            TELEGRAM_BOT_TOKEN = str(
+                settings.telegram_bot_gascytsa_token
+                or os.getenv("TELEGRAM_BOT_GASCYTSA_TOKEN", "")
+                or os.getenv("TELEGRAM_GASCYTSA", "")
+                or get_dynamic_setting("TELEGRAM_BOT_GASCYTSA_TOKEN", tenant_id=TENANT_ID, force_refresh=True)
+                or get_dynamic_setting("TELEGRAM_GASCYTSA", tenant_id=TENANT_ID, force_refresh=True)
+                or ""
+            ).strip()
+        if TELEGRAM_BOT_TOKEN:
+            break
+        if attempt < 4:
+            logger.info("[Gascytsa] Esperando configuración remota de token de Telegram (intento %d/5)...", attempt + 1)
+            time.sleep(2)
 
     if not TELEGRAM_BOT_TOKEN:
-        print("❌ ERROR: El token de Gascytsa no está configurado en .env ni en el Dashboard (/settings con clave TELEGRAM_GASCYTSA o TELEGRAM_BOT_GASCYTSA_TOKEN).")
-        sys.exit(1)
+        logger.warning(
+            "⚠️ No se encontró token para Gascytsa (TELEGRAM_BOT_GASCYTSA_TOKEN o TELEGRAM_GASCYTSA) "
+            "en .env ni en el Dashboard (/settings). El bot de Gascytsa permanecerá inactivo."
+        )
+        return
 
     print("=" * 60)
     print("🤖 Iniciando Bot de Telegram para Ventas de Gas (Gascytsa - Culiacán)")
@@ -2066,19 +2083,20 @@ def main() -> None:
     print("✅ Bot conectado con Telegram. Esperando mensajes y ubicaciones GPS...")
     try:
         application.run_polling(
-            bootstrap_retries=5,
+            bootstrap_retries=10,
             poll_interval=1.0,
             timeout=30,
         )
     except Exception as e:
         err_str = str(e)
-        if "All connection attempts failed" in err_str or "ConnectError" in err_str or "ConnectTimeout" in err_str:
+        if sys.platform == "win32" and ("All connection attempts failed" in err_str or "ConnectError" in err_str or "ConnectTimeout" in err_str):
             print("\n" + "!" * 70)
             print("🚨 ERROR DE CONEXIÓN: La red Wi-Fi actual está bloqueando Telegram (api.telegram.org).")
             print("👉 Solución rápida: Conecta tu computadora al Punto de Acceso / Datos Móviles de tu celular.")
             print("   Las redes móviles no bloquean Telegram y el bot encenderá de inmediato.")
             print("!" * 70 + "\n")
         else:
+            logger.error("Error en polling de Telegram Gascytsa: %s", e)
             raise e
 
 

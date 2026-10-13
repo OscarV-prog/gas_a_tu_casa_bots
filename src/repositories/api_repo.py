@@ -532,9 +532,12 @@ class ApiRepository:
         lng = kwargs.get("longitude") or kwargs.get("delivery_lng")
         if (lat is None or lng is None or float(lat) == 0.0) and address:
             try:
-                g_lat, g_lng, _ = geocode_address(address, city_context="Mazatlán")
+                target_city = "Culiacán" if (tenant_id or "").lower() == "gascytsa" else "Mazatlán"
+                g_lat, g_lng, _ = geocode_address(address, city_context=target_city, fallback_to_default=False)
                 if g_lat and g_lng:
                     lat, lng = g_lat, g_lng
+                else:
+                    lat, lng = None, None
             except Exception:
                 pass
 
@@ -892,11 +895,14 @@ class ApiRepository:
         clean_pay = "EFECTIVO" if "efectivo" in payment_method.lower() else ("TARJETA" if "tarjeta" in payment_method.lower() or "terminal" in payment_method.lower() else "EFECTIVO")
         clean_channel = channel.upper() if channel else "TELEGRAM"
 
+        target_city = "Culiacán" if (tenant_id or "").lower() == "gascytsa" else "Mazatlán"
         if (delivery_lat is None or delivery_lng is None or float(delivery_lat) == 0.0) and delivery_address:
             try:
-                g_lat, g_lng, _ = geocode_address(delivery_address, city_context="Mazatlán")
+                g_lat, g_lng, _ = geocode_address(delivery_address, city_context=target_city, fallback_to_default=False)
                 if g_lat and g_lng:
                     delivery_lat, delivery_lng = g_lat, g_lng
+                else:
+                    delivery_lat, delivery_lng = None, None
             except Exception:
                 pass
 
@@ -907,8 +913,8 @@ class ApiRepository:
             "customerName": customer_name,
             "customerPhone": customer_phone,
             "deliveryAddress": delivery_address,
-            "colonia": "Mazatlán",
-            "city": "Mazatlán",
+            "colonia": target_city,
+            "city": target_city,
             "channel": clean_channel,
             "paymentMethod": clean_pay,
             "notes": notes or "",

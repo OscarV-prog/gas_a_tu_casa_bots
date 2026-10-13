@@ -169,9 +169,12 @@ def create_order(
 
         if delivery_lat is None or delivery_lng is None or delivery_lat == 0.0:
             try:
-                g_lat, g_lng, _ = geocode_address(clean_addr, city_context="Mazatlán")
+                target_city = "Culiacán" if (tenant_id or "").lower() == "gascytsa" else "Mazatlán"
+                g_lat, g_lng, _ = geocode_address(clean_addr, city_context=target_city, fallback_to_default=False)
                 if g_lat and g_lng:
                     delivery_lat, delivery_lng = g_lat, g_lng
+                else:
+                    delivery_lat, delivery_lng = None, None
             except Exception:
                 pass
 

@@ -84,7 +84,7 @@ def clean_address_for_geocoding(address: str) -> list[str]:
     if street_no_num and street_no_num not in variations:
         variations.append(street_no_num)
 
-    if clean_neigh and clean_neigh not in variations:
+    if clean_neigh and not street_part and clean_neigh not in variations:
         variations.append(clean_neigh)
 
     # 4. Add raw address as fallback
@@ -111,27 +111,165 @@ def calculate_distance_km(lat1: float, lng1: float, lat2: float, lng2: float) ->
 
 
 _geocode_cache: dict[str, Tuple[float, float, str]] = {}
+_grounding_cache: dict[str, tuple[bool | None, str, dict[str, Any]]] = {}
 
 
-def geocode_address(address: str, city_context: str | None = None) -> Tuple[float, float, str]:
+def verify_address_city_grounding(
+    address: str,
+    target_city: str = "Mazatlán",
+) -> tuple[bool | None, str, dict[str, Any]]:
+    """Valida físicamente si una dirección pertenece a la ciudad objetivo mediante cartografía satelital.
+
+    Retorna:
+    - (True, mensaje, data): Confirmada físicamente dentro de target_city (< 35 km)
+    - (False, mensaje, data): Confirmada fuera de cobertura (otra ciudad/municipio o > 35 km)
+    - (None, mensaje, data): Sin coincidencia cartográfica concluyente (requiere auditoría semántica)
+    """
+    raw = (address or "").strip()
+    if not raw or len(raw) < 5:
+        return False, "La dirección es demasiado corta para ser un domicilio real.", {}
+
+    is_culiacan = "culiac" in target_city.lower()
+    target_city_name = "Culiacán" if is_culiacan else "Mazatlán"
+    service_name = "Gas a tu Puerta Gascytsa" if is_culiacan else "Gas a tu Puerta"
+    alt_city_name = "Mazatlán" if is_culiacan else "Culiacán"
+
+    t_lat = CULIACAN_LAT if is_culiacan else DEFAULT_LAT
+    t_lng = CULIACAN_LNG if is_culiacan else DEFAULT_LNG
+    alt_lat = DEFAULT_LAT if is_culiacan else CULIACAN_LAT
+    alt_lng = DEFAULT_LNG if is_culiacan else CULIACAN_LNG
+
+    cache_key = f"{raw.lower()}::{target_city_name.lower()}"
+    if cache_key in _grounding_cache:
+        return _grounding_cache[cache_key]
+
+    cands = clean_address_for_geocoding(raw)
+    queries_to_try = []
+    if cands:
+        queries_to_try.append(cands[0])
+        if len(cands) > 1 and cands[1] != cands[0]:
+            queries_to_try.append(cands[1])
+    else:
+        queries_to_try.append(raw)
+
+    for q_text in queries_to_try:
+        try:
+            encoded = urllib.parse.quote(q_text)
+            url = (
+                f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates"
+                f"?SingleLine={encoded}&f=json&outFields=Match_addr,Addr_type,Score,City,Subregion,Region"
+                f"&countryCode=MEX&location={t_lng:.4f},{t_lat:.4f}&distance=35000&maxLocations=3"
+            )
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with urllib.request.urlopen(req, timeout=3.5) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    candidates = data.get("candidates", [])
+
+                    for c in candidates:
+                        score = float(c.get("score", 0))
+                        if score < 65.0:
+                            continue
+                        addr_type = str(c.get("attributes", {}).get("Addr_type") or c.get("Addr_type") or "")
+                        if addr_type in ("Locality", "City", "Subregion", "Region", "Country", "Zone", "Coordinate"):
+                            continue
+
+                        loc = c.get("location", {})
+                        lat = float(loc.get("y", 0))
+                        lng = float(loc.get("x", 0))
+                        if lat == 0 and lng == 0:
+                            continue
+
+                        dist_target = calculate_distance_km(lat, lng, t_lat, t_lng)
+                        dist_alt = calculate_distance_km(lat, lng, alt_lat, alt_lng)
+                        match_addr = c.get("attributes", {}).get("Match_addr") or c.get("address", raw)
+                        city_attr = c.get("attributes", {}).get("City") or c.get("attributes", {}).get("Subregion") or ""
+
+                        # 1. ¿Está dentro de la ciudad objetivo (< 35 km)?
+                        if dist_target <= 35.0:
+                            res = (
+                                True,
+                                f"Dirección confirmada físicamente en {target_city_name}",
+                                {
+                                    "lat": lat,
+                                    "lng": lng,
+                                    "match_addr": match_addr,
+                                    "score": score,
+                                    "addr_type": addr_type,
+                                },
+                            )
+                            _geocode_cache[f"{raw.lower()}::{target_city_name.lower()}"] = (lat, lng, match_addr)
+                            _grounding_cache[cache_key] = res
+                            logger.info(
+                                f"🎯 [Grounding] Dirección verificada físicamente en {target_city_name}: '{raw}' -> {match_addr} (dist={dist_target:.1f}km)"
+                            )
+                            return res
+
+                        # 2. ¿Pertenece a la otra ciudad (< 35 km de la otra y > 50 km de la objetivo)?
+                        if dist_alt <= 35.0 and dist_target > 50.0:
+                            fb = (
+                                f"⚠️ Por el momento nuestro servicio de {service_name} tiene cobertura exclusivamente en la ciudad de {target_city_name}, Sinaloa. "
+                                f"Por favor proporciona una dirección o ubicación dentro de {target_city_name} 📍."
+                            )
+                            res = (False, fb, {"detected_city": alt_city_name, "lat": lat, "lng": lng, "match_addr": match_addr})
+                            _grounding_cache[cache_key] = res
+                            logger.warning(
+                                f"🚫 [Grounding] Dirección rechazada (fuera de cobertura en {target_city_name}): '{raw}' -> {match_addr} (dist_{alt_city_name}={dist_alt:.1f}km, dist_{target_city_name}={dist_target:.1f}km)"
+                            )
+                            return res
+
+                        # 3. ¿Está fuera de cobertura en otra ciudad/municipio de México (> 35 km)?
+                        if dist_target > 35.0:
+                            city_label = city_attr or "otra localidad"
+                            fb = (
+                                f"⚠️ Por el momento nuestro servicio de {service_name} tiene cobertura exclusivamente en la ciudad de {target_city_name}, Sinaloa. "
+                                f"Por favor proporciona una dirección o ubicación dentro de {target_city_name} 📍."
+                            )
+                            res = (False, fb, {"detected_city": city_label, "lat": lat, "lng": lng, "match_addr": match_addr})
+                            _grounding_cache[cache_key] = res
+                            logger.warning(
+                                f"🚫 [Grounding] Dirección fuera de cobertura ({city_label}): '{raw}' -> dist={dist_target:.1f}km"
+                            )
+                            return res
+        except Exception as e:
+            logger.debug(f"[verify_address_city_grounding] Error querying candidate '{q_text}': {e}")
+
+    res_none = (None, "Sin coincidencia cartográfica concluyente", {})
+    _grounding_cache[cache_key] = res_none
+    return res_none
+
+
+def geocode_address(
+    address: str,
+    city_context: str | None = None,
+    fallback_to_default: bool = False,
+) -> Tuple[float | None, float | None, str]:
     """Convert an address string into latitude and longitude coordinates.
 
     Uses smart in-memory caching, multi-candidate Photon Komoot OSM with Nominatim fallback,
     and strict Mexican bounds and city proximity filtering to ensure pinpoint accuracy.
+    When fallback_to_default is False (default), returns (None, None, address) when no
+    door or street match is found, avoiding false pins on Torre de Control.
     """
     if not address or not address.strip():
-        return DEFAULT_LAT, DEFAULT_LNG, ""
+        if fallback_to_default:
+            return DEFAULT_LAT, DEFAULT_LNG, ""
+        return None, None, ""
 
     settings = get_settings()
     city = city_context or settings.default_city or "Mazatlán"
     is_culiacan = "culiac" in city.lower()
     target_lat = CULIACAN_LAT if is_culiacan else DEFAULT_LAT
     target_lng = CULIACAN_LNG if is_culiacan else DEFAULT_LNG
-    max_dist_km = 45.0 if is_culiacan else 75.0
+    max_dist_km = 35.0
 
     clean_key = f"{address.strip().lower()}::{city.strip().lower()}"
     if clean_key in _geocode_cache:
-        return _geocode_cache[clean_key]
+        cached_lat, cached_lng, cached_name = _geocode_cache[clean_key]
+        if not fallback_to_default and cached_lat in (DEFAULT_LAT, CULIACAN_LAT):
+            pass  # Don't return cached fallback center
+        else:
+            return _geocode_cache[clean_key]
 
     candidates = clean_address_for_geocoding(address)
 
@@ -149,19 +287,23 @@ def geocode_address(address: str, city_context: str | None = None) -> Tuple[floa
                 if response.status == 200:
                     data = json.loads(response.read().decode("utf-8"))
                     cands = data.get("candidates", [])
-                    if cands:
-                        top = cands[0]
+                    for top in cands:
                         score = float(top.get("score", 0))
                         loc = top.get("location", {})
                         lat = float(loc.get("y", 0))
                         lng = float(loc.get("x", 0))
+                        addr_type = str(top.get("attributes", {}).get("Addr_type") or top.get("Addr_type") or "")
+                        # Ignorar centroides genéricos de ciudad / municipio / país (ej. "Mazatlán, Sinaloa")
+                        if addr_type in ("Locality", "City", "Subregion", "Region", "Country", "Zone", "Coordinate"):
+                            logger.debug(f"ArcGIS candidate rejected because Addr_type is generic locality/city: {addr_type}")
+                            continue
+
                         if lat > 0 and (14.0 <= lat <= 33.0 and -118.0 <= lng <= -86.0):
                             dist_km = calculate_distance_km(lat, lng, target_lat, target_lng)
                             if dist_km < max_dist_km and score >= 60.0:
                                 matched_name = top.get("address") or top.get("attributes", {}).get("Match_addr") or address
                                 res = (lat, lng, matched_name)
                                 _geocode_cache[clean_key] = res
-                                addr_type = top.get("attributes", {}).get("Addr_type", "Address")
                                 logger.info(f"🎯 Pinpoint High-Precision Geocoded (ArcGIS {addr_type} score={score}) '{cand}' -> ({lat:.5f}, {lng:.5f}) dist={dist_km:.1f}km")
                                 return res
         except Exception as e:
@@ -181,6 +323,12 @@ def geocode_address(address: str, city_context: str | None = None) -> Tuple[floa
                     for feat in features:
                         coords = feat.get("geometry", {}).get("coordinates", [])
                         props = feat.get("properties", {})
+                        feat_type = str(props.get("type") or props.get("osm_value") or "").lower()
+                        osm_key = str(props.get("osm_key") or "").lower()
+                        # Ignorar tipo ciudad/municipio completo, áreas verdes o tipos genéricos 'other'
+                        if feat_type in ("city", "town", "county", "state", "country", "administrative", "other") or osm_key in ("leisure", "landuse"):
+                            continue
+
                         if len(coords) >= 2:
                             lng = float(coords[0])
                             lat = float(coords[1])
@@ -210,6 +358,11 @@ def geocode_address(address: str, city_context: str | None = None) -> Tuple[floa
                 if response.status == 200:
                     data = json.loads(response.read().decode("utf-8"))
                     for item in data:
+                        osm_class = str(item.get("class") or "").lower()
+                        osm_type = str(item.get("type") or "").lower()
+                        if osm_class == "place" and osm_type in ("city", "town", "administrative", "state", "country"):
+                            continue
+
                         lat = float(item["lat"])
                         lng = float(item["lon"])
                         dist_km = calculate_distance_km(lat, lng, target_lat, target_lng)
@@ -221,6 +374,10 @@ def geocode_address(address: str, city_context: str | None = None) -> Tuple[floa
                             return res
         except Exception as e:
             logger.debug(f"Nominatim geocode attempt failed for candidate '{cand}': {e}")
+
+    if not fallback_to_default:
+        logger.info(f"📍 Geocoding no encontró coincidencia a nivel calle para '{address}' en {city}. No se asignan coordenadas fijas para no engañar a Torre de Control.")
+        return None, None, address
 
     logger.warning(f"⚠️ Geocoding failed for all candidates of '{address}'. Using city default.")
     fallback_res = (target_lat, target_lng, address)
@@ -405,7 +562,7 @@ def resolve_gps_address_to_name(address_str: str) -> str:
     return raw
 
 
-def get_google_maps_url(lat: float | None, lng: float | None, query_fallback: str = "") -> str:
+def get_google_maps_url(lat: float | None, lng: float | None, query_fallback: str = "", city_context: str | None = None) -> str:
     """Generate Google Maps directions URL for the driver.
 
     If query_fallback has a structured address, Google Maps text query is used so Google Maps
@@ -418,17 +575,18 @@ def get_google_maps_url(lat: float | None, lng: float | None, query_fallback: st
 
     if clean_addr and not is_gps_text:
         query = clean_addr
-        if "mazatl" not in query.lower():
-            query = f"{query}, Mazatlán, Sinaloa, México"
+        city = city_context or ("Culiacán" if lat and calculate_distance_km(lat, lng, CULIACAN_LAT, CULIACAN_LNG) < 40.0 else "Mazatlán")
+        if "mazatl" not in query.lower() and "culiac" not in query.lower():
+            query = f"{query}, {city}, Sinaloa, México"
         encoded = urllib.parse.quote(query)
         return f"https://www.google.com/maps/dir/?api=1&destination={encoded}&travelmode=driving"
 
-    if lat is not None and lng is not None and lat != 0.0:
+    if lat is not None and lng is not None and lat != 0.0 and lat not in (DEFAULT_LAT, CULIACAN_LAT):
         return f"https://www.google.com/maps/dir/?api=1&destination={lat:.6f},{lng:.6f}&travelmode=driving"
     return "https://www.google.com/maps"
 
 
-def get_waze_url(lat: float | None, lng: float | None, query_fallback: str = "") -> str:
+def get_waze_url(lat: float | None, lng: float | None, query_fallback: str = "", city_context: str | None = None) -> str:
     """Generate Waze navigation URL for the driver."""
     cands = clean_address_for_geocoding(query_fallback) if query_fallback else []
     clean_addr = cands[0] if cands else ""
@@ -436,18 +594,19 @@ def get_waze_url(lat: float | None, lng: float | None, query_fallback: str = "")
 
     if clean_addr and not is_gps_text:
         query = clean_addr
-        if "mazatl" not in query.lower():
-            query = f"{query}, Mazatlán, Sinaloa"
+        city = city_context or ("Culiacán" if lat and calculate_distance_km(lat, lng, CULIACAN_LAT, CULIACAN_LNG) < 40.0 else "Mazatlán")
+        if "mazatl" not in query.lower() and "culiac" not in query.lower():
+            query = f"{query}, {city}, Sinaloa"
         encoded = urllib.parse.quote(query)
         return f"https://waze.com/ul?q={encoded}&navigate=yes"
 
-    if lat is not None and lng is not None and lat != 0.0 and lat != DEFAULT_LAT:
+    if lat is not None and lng is not None and lat != 0.0 and lat not in (DEFAULT_LAT, CULIACAN_LAT):
         return f"https://waze.com/ul?ll={lat:.6f},{lng:.6f}&navigate=yes"
     return "https://waze.com"
 
 
 def get_apple_maps_url(lat: float, lng: float) -> str:
     """Generate Apple Maps navigation URL."""
-    if lat is not None and lng is not None and lat != 0.0:
+    if lat is not None and lng is not None and lat != 0.0 and lat not in (DEFAULT_LAT, CULIACAN_LAT):
         return f"https://maps.apple.com/?daddr={lat:.6f},{lng:.6f}&dirflg=d"
     return "https://maps.apple.com"

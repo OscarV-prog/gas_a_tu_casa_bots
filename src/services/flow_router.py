@@ -1079,16 +1079,22 @@ class FlowRouter:
             lng = float(location["longitude"])
             resolved_name = reverse_geocode(lat, lng)
 
-            if (session.tenant_id or "").lower() == "gascytsa":
-                from src.services.geocoding import calculate_distance_km, CULIACAN_LAT, CULIACAN_LNG
-                dist_culiacan = calculate_distance_km(lat, lng, CULIACAN_LAT, CULIACAN_LNG)
-                if dist_culiacan > 45.0:
-                    return FlowResponse(
-                        text="⚠️ La ubicación GPS compartida se encuentra fuera de nuestra zona de cobertura en Culiacán, Sinaloa. Por favor comparte una ubicación dentro de Culiacán o indícanos tu domicilio en la ciudad 📍.",
-                        state=session.state,
-                        is_llm=False,
-                        action_performed=None,
-                    )
+            # Validación de ubicación compartida con Inteligencia Artificial
+            target_city_lbl = _get_city_context_for_tenant(session.tenant_id)
+            gps_val = await validate_address_with_llm(
+                f"{resolved_name} (GPS: {lat:.6f}, {lng:.6f})",
+                tenant_id=session.tenant_id,
+                city_context=target_city_lbl,
+            )
+            if not gps_val.is_valid:
+                telemetry.record_message(channel=channel, is_llm=True)
+                clean_fb = gps_val.user_feedback if str(gps_val.user_feedback).startswith("⚠️") else f"⚠️ {gps_val.user_feedback}"
+                return FlowResponse(
+                    text=clean_fb,
+                    state=session.state,
+                    is_llm=True,
+                    action_performed=None,
+                )
 
             # 2.1 Verificar si quien envía la ubicación es un CHOFER en turno activo
             # IMPORTANTE: Si el usuario está interactuando como cliente en un flujo de pedido,
@@ -1867,10 +1873,17 @@ class FlowRouter:
 
                 draft.delivery_address = resolve_gps_address_to_name(selected_addr)
                 try:
-                    geo_lat, geo_lng, _ = geocode_address(draft.delivery_address, city_context=_get_city_context_for_tenant(session.tenant_id))
+                    geo_lat, geo_lng, _ = geocode_address(
+                        draft.delivery_address,
+                        city_context=_get_city_context_for_tenant(session.tenant_id),
+                        fallback_to_default=False,
+                    )
                     if geo_lat and geo_lng:
                         draft.delivery_lat = geo_lat
                         draft.delivery_lng = geo_lng
+                    else:
+                        draft.delivery_lat = None
+                        draft.delivery_lng = None
                 except Exception:
                     pass
                 session.state = FlowState.WAITING_FOR_SCHEDULE
@@ -2452,10 +2465,17 @@ class FlowRouter:
                     telemetry.record_message(channel=session.channel, is_llm=False)
                     draft.delivery_address = resolve_gps_address_to_name(addrs[idx].address)
                     try:
-                        geo_lat, geo_lng, _ = geocode_address(draft.delivery_address, city_context=_get_city_context_for_tenant(session.tenant_id))
+                        geo_lat, geo_lng, _ = geocode_address(
+                            draft.delivery_address,
+                            city_context=_get_city_context_for_tenant(session.tenant_id),
+                            fallback_to_default=False,
+                        )
                         if geo_lat and geo_lng:
                             draft.delivery_lat = geo_lat
                             draft.delivery_lng = geo_lng
+                        else:
+                            draft.delivery_lat = None
+                            draft.delivery_lng = None
                     except Exception:
                         pass
                     session.state = FlowState.WAITING_FOR_SCHEDULE
@@ -2476,11 +2496,16 @@ class FlowRouter:
 
             # 3. Si el usuario escribió una dirección completa directamente
             if len(text.strip()) > 8 and any(k in text.lower() for k in ["calle", "av", "avenida", "#", "col", "colonia", "fracc", "casa", "lote", "misión", "misiones", "privada"]):
-                val_res = await validate_address_with_llm(text.strip(), tenant_id=session.tenant_id)
+                val_res = await validate_address_with_llm(
+                    text.strip(),
+                    tenant_id=session.tenant_id,
+                    city_context=_get_city_context_for_tenant(session.tenant_id),
+                )
                 if not val_res.is_valid:
                     telemetry.record_message(channel=session.channel, is_llm=True)
+                    clean_fb = val_res.user_feedback if str(val_res.user_feedback).startswith("⚠️") else f"⚠️ {val_res.user_feedback}"
                     return FlowResponse(
-                        text=f"⚠️ {val_res.user_feedback}",
+                        text=clean_fb,
                         state=session.state,
                         is_llm=True,
                     )
@@ -2488,10 +2513,17 @@ class FlowRouter:
                 clean_user_addr = re.sub(r"^(?:mi\s+direcci[oó]n\s+es\s+|es\s+en\s+|vivo\s+en\s+)", "", text.strip(), flags=re.IGNORECASE).strip()
                 draft.delivery_address = clean_user_addr or val_res.normalized_address
                 try:
-                    geo_lat, geo_lng, _ = geocode_address(draft.delivery_address, city_context=_get_city_context_for_tenant(session.tenant_id))
+                    geo_lat, geo_lng, _ = geocode_address(
+                        draft.delivery_address,
+                        city_context=_get_city_context_for_tenant(session.tenant_id),
+                        fallback_to_default=False,
+                    )
                     if geo_lat and geo_lng:
                         draft.delivery_lat = geo_lat
                         draft.delivery_lng = geo_lng
+                    else:
+                        draft.delivery_lat = None
+                        draft.delivery_lng = None
                 except Exception:
                     pass
                 session.state = FlowState.WAITING_FOR_SCHEDULE
@@ -2633,11 +2665,16 @@ class FlowRouter:
                     )
 
             # Validación Semántica con IA y Heurísticas (Filtro Anti-Bromas / Fake Addresses)
-            val_res = await validate_address_with_llm(text.strip(), tenant_id=session.tenant_id)
+            val_res = await validate_address_with_llm(
+                text.strip(),
+                tenant_id=session.tenant_id,
+                city_context=_get_city_context_for_tenant(session.tenant_id),
+            )
             if not val_res.is_valid:
                 telemetry.record_message(channel=session.channel, is_llm=True)
+                clean_fb = val_res.user_feedback if str(val_res.user_feedback).startswith("⚠️") else f"⚠️ {val_res.user_feedback}"
                 return FlowResponse(
-                    text=f"⚠️ {val_res.user_feedback}",
+                    text=clean_fb,
                     state=session.state,
                     is_llm=True,
                 )
@@ -2646,10 +2683,17 @@ class FlowRouter:
             clean_user_addr = re.sub(r"^(?:mi\s+direcci[oó]n\s+es\s+|es\s+en\s+|vivo\s+en\s+)", "", text.strip(), flags=re.IGNORECASE).strip()
             draft.delivery_address = clean_user_addr or val_res.normalized_address
             try:
-                geo_lat, geo_lng, _ = geocode_address(draft.delivery_address, city_context=_get_city_context_for_tenant(session.tenant_id))
+                geo_lat, geo_lng, _ = geocode_address(
+                    draft.delivery_address,
+                    city_context=_get_city_context_for_tenant(session.tenant_id),
+                    fallback_to_default=False,
+                )
                 if geo_lat and geo_lng:
                     draft.delivery_lat = geo_lat
                     draft.delivery_lng = geo_lng
+                else:
+                    draft.delivery_lat = None
+                    draft.delivery_lng = None
             except Exception:
                 pass
 
