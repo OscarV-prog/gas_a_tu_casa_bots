@@ -15,11 +15,15 @@ def create_llm(tenant_config: TenantConfig) -> BaseChatModel:
     cfg = tenant_config.llm
     provider = cfg.provider.lower()
 
+    from src.services.dynamic_settings import get_dynamic_setting
+
     if provider == "openai":
         from langchain_openai import ChatOpenAI
 
+        api_key = os.getenv("OPENAI_API_KEY") or get_dynamic_setting("OPENAI_API_KEY")
         return ChatOpenAI(
             model=cfg.model,
+            api_key=api_key or None,
             temperature=cfg.temperature,
             max_tokens=cfg.max_tokens,
         )
@@ -27,8 +31,10 @@ def create_llm(tenant_config: TenantConfig) -> BaseChatModel:
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
+        api_key = os.getenv("ANTHROPIC_API_KEY") or get_dynamic_setting("ANTHROPIC_API_KEY")
         return ChatAnthropic(
             model=cfg.model,
+            api_key=api_key or None,
             temperature=cfg.temperature,
             max_tokens=cfg.max_tokens,
         )
@@ -36,11 +42,11 @@ def create_llm(tenant_config: TenantConfig) -> BaseChatModel:
     if provider == "openrouter":
         from langchain_openai import ChatOpenAI
 
-        api_key = os.getenv("OPENROUTER_API_KEY")
+        api_key = os.getenv("OPENROUTER_API_KEY") or get_dynamic_setting("OPENROUTER_API_KEY")
 
         if not api_key:
             raise ValueError(
-                "No se encontró OPENROUTER_API_KEY en el archivo .env"
+                "No se encontró OPENROUTER_API_KEY en .env ni en la configuración remota (/settings)"
             )
 
         # OpenRouter provider routing & price limits

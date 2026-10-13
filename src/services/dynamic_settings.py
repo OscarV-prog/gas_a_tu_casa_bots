@@ -80,37 +80,62 @@ def fetch_remote_settings(tenant_id: str | None = None, force_refresh: bool = Fa
 
     try:
         from src.services.api_client import api_get
-        primary_tenant = tenant_id or os.getenv("TENANT_ID", "petroil")
-        items = api_get("/settings", tenant_id=primary_tenant, timeout=timeout)
         new_settings: dict[str, str] = {}
-        if isinstance(items, list):
-            for it in items:
-                if not isinstance(it, dict):
-                    continue
-                k = it.get("key")
-                v = str(it.get("value", "")).strip()
-                if k and v:
-                    new_settings[k] = v
-                    os.environ[k] = v
-                    for alias in _KEY_MAPPINGS.get(k, []):
-                        os.environ[alias] = v
 
-        # Si el tenant consultado no es gascytsa, también consultar gascytsa para sincronizar sus credenciales
-        if primary_tenant != "gascytsa":
+        # 1. Consultar tenant base de plataforma (petroil) para credenciales comunes (LLM, mapas, etc.)
+        try:
+            petroil_items = api_get("/settings", tenant_id="petroil", timeout=timeout)
+            if isinstance(petroil_items, list):
+                for it in petroil_items:
+                    if not isinstance(it, dict):
+                        continue
+                    k = it.get("key")
+                    v = str(it.get("value", "")).strip()
+                    if k and v:
+                        new_settings[k] = v
+                        os.environ[k] = v
+                        for alias in _KEY_MAPPINGS.get(k, []):
+                            os.environ[alias] = v
+                            new_settings[alias] = v
+        except Exception as e_petroil:
+            logger.debug(f"[DynamicSettings] Error fetching petroil settings: {e_petroil}")
+
+        # 2. Consultar tenant gascytsa para credenciales específicas (TELEGRAM_GASCYTSA)
+        try:
+            gas_items = api_get("/settings", tenant_id="gascytsa", timeout=timeout)
+            if isinstance(gas_items, list):
+                for it in gas_items:
+                    if not isinstance(it, dict):
+                        continue
+                    k = it.get("key")
+                    v = str(it.get("value", "")).strip()
+                    if k and v:
+                        new_settings[k] = v
+                        os.environ[k] = v
+                        for alias in _KEY_MAPPINGS.get(k, []):
+                            os.environ[alias] = v
+                            new_settings[alias] = v
+        except Exception as e_gas:
+            logger.debug(f"[DynamicSettings] Error fetching gascytsa settings: {e_gas}")
+
+        # 3. Si se solicitó un tenant_id diferente a petroil y gascytsa, consultarlo también
+        if tenant_id and tenant_id not in ("petroil", "gascytsa"):
             try:
-                gas_items = api_get("/settings", tenant_id="gascytsa", timeout=timeout)
-                if isinstance(gas_items, list):
-                    for it in gas_items:
-                        if isinstance(it, dict):
-                            k = it.get("key")
-                            v = str(it.get("value", "")).strip()
-                            if k and v:
-                                new_settings[k] = v
-                                os.environ[k] = v
-                                for alias in _KEY_MAPPINGS.get(k, []):
-                                    os.environ[alias] = v
-            except Exception as e_gas:
-                logger.debug(f"[DynamicSettings] Gascytsa settings check skipped: {e_gas}")
+                custom_items = api_get("/settings", tenant_id=tenant_id, timeout=timeout)
+                if isinstance(custom_items, list):
+                    for it in custom_items:
+                        if not isinstance(it, dict):
+                            continue
+                        k = it.get("key")
+                        v = str(it.get("value", "")).strip()
+                        if k and v:
+                            new_settings[k] = v
+                            os.environ[k] = v
+                            for alias in _KEY_MAPPINGS.get(k, []):
+                                os.environ[alias] = v
+                                new_settings[alias] = v
+            except Exception as e_custom:
+                logger.debug(f"[DynamicSettings] Error fetching custom tenant '{tenant_id}' settings: {e_custom}")
 
         with _lock:
             _cached_settings = new_settings
@@ -122,6 +147,27 @@ def fetch_remote_settings(tenant_id: str | None = None, force_refresh: bool = Fa
 
     with _lock:
         return dict(_cached_settings)
+
+
+def export_env_file(filepath: str = "/tmp/dynamic_env.sh") -> None:
+    """Fetch remote settings and write shell export statements to a file so Bash entrypoint can source them."""
+    settings = fetch_remote_settings(force_refresh=True)
+    try:
+        lines = ["#!/bin/bash\n"]
+        for k, v in sorted(settings.items()):
+            if not k or not v:
+                continue
+            safe_v = v.replace("'", "'\\''")
+            lines.append(f"export {k}='{safe_v}'\n")
+
+        dirname = os.path.dirname(filepath)
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        logger.info(f"[DynamicSettings] Exported {len(settings)} variables to {filepath}")
+    except Exception as e:
+        logger.warning(f"[DynamicSettings] Could not export dynamic env file to {filepath}: {e}")
 
 
 def get_dynamic_setting(key: str, default: str = "", tenant_id: str | None = None, force_refresh: bool = False) -> str:
