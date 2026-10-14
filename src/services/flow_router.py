@@ -1871,7 +1871,23 @@ class FlowRouter:
                 if not selected_addr:
                     selected_addr = f"Dirección #{choice}"
 
-                draft.delivery_address = resolve_gps_address_to_name(selected_addr)
+                candidate_addr = resolve_gps_address_to_name(selected_addr)
+                val_res = await validate_address_with_llm(
+                    candidate_addr,
+                    tenant_id=session.tenant_id,
+                    city_context=_get_city_context_for_tenant(session.tenant_id),
+                )
+                if not val_res.is_valid:
+                    clean_fb = val_res.user_feedback if str(val_res.user_feedback).startswith("⚠️") else f"⚠️ {val_res.user_feedback}"
+                    target_city_lbl = _get_city_context_for_tenant(session.tenant_id)
+                    session.state = FlowState.WAITING_FOR_NEW_CUSTOMER_ADDRESS
+                    return FlowResponse(
+                        text=f"{clean_fb}\n\nPor favor escribe tu dirección de entrega en {target_city_lbl} o comparte tu ubicación GPS 📍:",
+                        state=session.state,
+                        is_llm=True,
+                    )
+
+                draft.delivery_address = candidate_addr
                 try:
                     geo_lat, geo_lng, _ = geocode_address(
                         draft.delivery_address,
@@ -2464,7 +2480,23 @@ class FlowRouter:
                 idx = (int(m_num.group(1)) if hasattr(m_num, "group") else 1) - 1
                 if 0 <= idx < len(addrs):
                     telemetry.record_message(channel=session.channel, is_llm=False)
-                    draft.delivery_address = resolve_gps_address_to_name(addrs[idx].address)
+                    candidate_addr = resolve_gps_address_to_name(addrs[idx].address)
+                    val_res = await validate_address_with_llm(
+                        candidate_addr,
+                        tenant_id=session.tenant_id,
+                        city_context=_get_city_context_for_tenant(session.tenant_id),
+                    )
+                    if not val_res.is_valid:
+                        clean_fb = val_res.user_feedback if str(val_res.user_feedback).startswith("⚠️") else f"⚠️ {val_res.user_feedback}"
+                        target_city_lbl = _get_city_context_for_tenant(session.tenant_id)
+                        session.state = FlowState.WAITING_FOR_NEW_CUSTOMER_ADDRESS
+                        return FlowResponse(
+                            text=f"{clean_fb}\n\nPor favor escribe tu dirección de entrega en {target_city_lbl} o comparte tu ubicación GPS 📍:",
+                            state=session.state,
+                            is_llm=True,
+                        )
+
+                    draft.delivery_address = candidate_addr
                     try:
                         geo_lat, geo_lng, _ = geocode_address(
                             draft.delivery_address,
