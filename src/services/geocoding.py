@@ -179,17 +179,27 @@ def verify_address_city_grounding(
 
     for q_text in queries_to_try:
         try:
-            encoded = urllib.parse.quote(q_text)
+            # Si el texto no especifica otra ciudad, buscar preferentemente en la ciudad objetivo
+            has_explicit_city = any(c.lower() in q_text.lower() for c in ["culiac", "mazatl", "ahome", "mochis", "guasave", "navolato", "concordia", "escuinapa", "rosario"])
+            if not has_explicit_city:
+                q_query = f"{q_text}, {target_city_name}, Sinaloa, Mexico"
+            else:
+                q_query = q_text if "sinaloa" in q_text.lower() else f"{q_text}, Sinaloa, Mexico"
+
+            encoded = urllib.parse.quote(q_query)
             url = (
                 f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates"
                 f"?SingleLine={encoded}&f=json&outFields=Match_addr,Addr_type,Score,City,Subregion,Region"
-                f"&countryCode=MEX&location={t_lng:.4f},{t_lat:.4f}&distance=35000&maxLocations=3"
+                f"&countryCode=MEX&maxLocations=5"
             )
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
             with urllib.request.urlopen(req, timeout=3.5) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
                     candidates = data.get("candidates", [])
+
+                    target_match = None
+                    alt_match = None
 
                     for c in candidates:
                         score = float(c.get("score", 0))
@@ -208,54 +218,62 @@ def verify_address_city_grounding(
                         dist_target = calculate_distance_km(lat, lng, t_lat, t_lng)
                         dist_alt = calculate_distance_km(lat, lng, alt_lat, alt_lng)
                         match_addr = c.get("attributes", {}).get("Match_addr") or c.get("address", raw)
-                        city_attr = c.get("attributes", {}).get("City") or c.get("attributes", {}).get("Subregion") or ""
+                        city_attr = c.get("attributes", {}).get("City") or ""
+                        subregion = c.get("attributes", {}).get("Subregion") or ""
 
-                        # 1. ¿Está dentro de la ciudad objetivo (< 35 km)?
+                        # 1. ¿Está dentro de la ciudad objetivo (< 35 km) con correspondencia de calle?
                         if dist_target <= 35.0:
-                            res = (
-                                True,
-                                f"Dirección confirmada físicamente en {target_city_name}",
-                                {
+                            if _street_name_matches(raw, match_addr) and score >= 80.0:
+                                target_match = {
                                     "lat": lat,
                                     "lng": lng,
                                     "match_addr": match_addr,
                                     "score": score,
                                     "addr_type": addr_type,
-                                },
-                            )
-                            _geocode_cache[f"{raw.lower()}::{target_city_name.lower()}"] = (lat, lng, match_addr)
-                            _grounding_cache[cache_key] = res
-                            logger.info(
-                                f"🎯 [Grounding] Dirección verificada físicamente en {target_city_name}: '{raw}' -> {match_addr} (dist={dist_target:.1f}km)"
-                            )
-                            return res
+                                    "dist_km": dist_target,
+                                }
+                                break  # Encontrado en la ciudad objetivo
 
-                        # 2. ¿Pertenece a la otra ciudad (< 35 km de la otra y > 50 km de la objetivo)?
-                        if dist_alt <= 35.0 and dist_target > 50.0:
-                            fb = (
-                                f"⚠️ Por el momento nuestro servicio de {service_name} tiene cobertura exclusivamente en la ciudad de {target_city_name}, Sinaloa. "
-                                f"Por favor proporciona una dirección o ubicación dentro de {target_city_name} 📍."
-                            )
-                            res = (False, fb, {"detected_city": alt_city_name, "lat": lat, "lng": lng, "match_addr": match_addr})
-                            _grounding_cache[cache_key] = res
-                            logger.warning(
-                                f"🚫 [Grounding] Dirección rechazada (fuera de cobertura en {target_city_name}): '{raw}' -> {match_addr} (dist_{alt_city_name}={dist_alt:.1f}km, dist_{target_city_name}={dist_target:.1f}km)"
-                            )
-                            return res
+                        # 2. ¿Pertenece a la otra ciudad? (ej. Culiacán en bot de Mazatlán o Mazatlán en bot de Culiacán)
+                        is_in_alt_city = (
+                            dist_alt <= 40.0 and dist_target > 50.0
+                        ) or (
+                            alt_city_name.lower() in subregion.lower() or alt_city_name.lower() in city_attr.lower()
+                        )
+                        if is_in_alt_city and not alt_match:
+                            alt_match = {
+                                "detected_city": alt_city_name,
+                                "lat": lat,
+                                "lng": lng,
+                                "match_addr": match_addr,
+                                "dist_km": dist_target,
+                                "dist_alt_km": dist_alt,
+                            }
 
-                        # 3. ¿Está fuera de cobertura en otra ciudad/municipio de México (> 35 km)?
-                        if dist_target > 35.0:
-                            city_label = city_attr or "otra localidad"
-                            fb = (
-                                f"⚠️ Por el momento nuestro servicio de {service_name} tiene cobertura exclusivamente en la ciudad de {target_city_name}, Sinaloa. "
-                                f"Por favor proporciona una dirección o ubicación dentro de {target_city_name} 📍."
-                            )
-                            res = (False, fb, {"detected_city": city_label, "lat": lat, "lng": lng, "match_addr": match_addr})
-                            _grounding_cache[cache_key] = res
-                            logger.warning(
-                                f"🚫 [Grounding] Dirección fuera de cobertura ({city_label}): '{raw}' -> dist={dist_target:.1f}km"
-                            )
-                            return res
+                    if target_match:
+                        res = (
+                            True,
+                            f"Dirección confirmada físicamente en {target_city_name}",
+                            target_match,
+                        )
+                        _geocode_cache[f"{raw.lower()}::{target_city_name.lower()}"] = (target_match["lat"], target_match["lng"], target_match["match_addr"])
+                        _grounding_cache[cache_key] = res
+                        logger.info(
+                            f"🎯 [Grounding] Dirección verificada físicamente en {target_city_name}: '{raw}' -> {target_match['match_addr']} (dist={target_match['dist_km']:.1f}km)"
+                        )
+                        return res
+
+                    if alt_match:
+                        fb = (
+                            f"⚠️ Por el momento nuestro servicio de {service_name} tiene cobertura exclusivamente en la ciudad de {target_city_name}, Sinaloa. "
+                            f"Por favor proporciona una dirección o ubicación dentro de {target_city_name} 📍."
+                        )
+                        res = (False, fb, alt_match)
+                        _grounding_cache[cache_key] = res
+                        logger.warning(
+                            f"🚫 [Grounding] Dirección rechazada (pertenece a {alt_city_name}): '{raw}' -> {alt_match['match_addr']} (dist_{alt_city_name}={alt_match['dist_alt_km']:.1f}km, dist_{target_city_name}={alt_match['dist_km']:.1f}km)"
+                        )
+                        return res
         except Exception as e:
             logger.debug(f"[verify_address_city_grounding] Error querying candidate '{q_text}': {e}")
 

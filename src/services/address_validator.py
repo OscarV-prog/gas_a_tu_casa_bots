@@ -45,7 +45,8 @@ OBVIOUS_JOKE_PATTERNS = [
 # Ciudades, municipios, estados y países fuera de cobertura para Mazatlán (Petroil)
 OUT_LOCATIONS_MAZATLAN = [
     # Colonias, sectores, avenidas y zonas de Culiacán que deben rechazarse categóricamente en Mazatlán
-    r"\b(?:colinas\s+de\s+san\s+miguel|tres\s+r[ií]os|desarrollo\s+urbano\s+tres\s+r[ií]os|las\s+quintas|infonavit\s+humaya|valle\s+alto|barrancos|infonavit\s+barrancos|pedro\s+infante|blvd\.?\s*pedro\s+infante|enrique\s+s[aá]nchez\s+alonso|lola\s+beltr[aá]n|rolando\s+arjona|la\s+conquista|stanza\s+toscana|stanza\s+florencia|stanza|bachigualato|nakayama|alturas\s+del\s+sur|isla\s+musala|aguaruto|costa\s+rica|eldorado|quil[aá]|limita\s+de\s+iturbe|prol\.?\s*[aá]lvaro\s+obreg[oó]n|avenida\s+[aá]lvaro\s+obreg[oó]n|av\.?\s+[aá]lvaro\s+obreg[oó]n|[aá]lvaro\s+obreg[oó]n\s+(?:norte|sur|\d+)|calzada\s+heroico\s+colegio\s+militar|montebello|santa\s+fe\s+culiac[aá]n|san\s+rafael\s+culiac[aá]n|villa\s+universidad|plaza\s+cuatro\s+r[ií]os|plaza\s+ceiba|forum\s+culiac[aá]n|parque\s+las\s+riberas|estadio\s+tomateros|jard[ií]n\s+bot[aá]nico\s+culiac[aá]n)\b",
+    r"\b(?:colinas\s+de\s+san\s+miguel|tres\s+r[ií]os|desarrollo\s+urbano\s+tres\s+r[ií]os|las\s+quintas|quintas|infonavit\s+humaya|humaya|r[ií]o\s+humaya|sector\s+humaya|valle\s+alto|barrancos|infonavit\s+barrancos|pedro\s+infante|blvd\.?\s*pedro\s+infante|enrique\s+s[aá]nchez\s+alonso|lola\s+beltr[aá]n|rolando\s+arjona|la\s+conquista|stanza\s+toscana|stanza\s+florencia|stanza|bachigualato|nakayama|alturas\s+del\s+sur|isla\s+musala|aguaruto|costa\s+rica|eldorado|quil[aá]|limita\s+de\s+iturbe|prol\.?\s*[aá]lvaro\s+obreg[oó]n|avenida\s+[aá]lvaro\s+obreg[oó]n|av\.?\s+[aá]lvaro\s+obreg[oó]n|[aá]lvaro\s+obreg[oó]n\s+(?:norte|sur|\d+)|calzada\s+heroico\s+colegio\s+militar|montebello|santa\s+fe\s+culiac[aá]n|san\s+rafael\s+culiac[aá]n|villa\s+universidad|plaza\s+cuatro\s+r[ií]os|plaza\s+ceiba|forum\s+culiac[aá]n|parque\s+las\s+riberas|estadio\s+tomateros|jard[ií]n\s+bot[aá]nico\s+culiac[aá]n)\b",
+    r"\b(?:cerro\s+de\s+la\s+campana|campana\s+culiac[aá]n|tierra\s+blanca|chapultepec|ciudades\s+hermanas|blvd\.?\s*ciudades\s+hermanas|el\s+palmito|palmito|palmito\s+viejo|culiacancito|portalegre|portalegre\s+elite|cedros|los\s+cedros|chula\s+vista|chulavista|emiliano\s+zapata|blvd\.?\s*emiliano\s+zapata|calzada\s+aeropuerto|blvd\.?\s*aeropuerto|aeropuerto\s+culiac[aá]n|plaza\s+fiesta|plaza\s+san\s+isidro|plaza\s+sendero\s+culiac[aá]n|loma\s+linda|guadalupe\s+victoria|10\s+de\s+mayo|diez\s+de\s+mayo|las\s+coloradas|la\s+campiña|campiña|interlomas|universitarios|blvd\.?\s*universitarios|malecon\s+nuevo|malec[oó]n\s+nuevo|malecon\s+viejo|malec[oó]n\s+viejo|diego\s+valad[eé]s|colinas\s+del\s+humaya|plutarco\s+el[ií]as\s+calles|jorge\s+almada|recursos\s+hidr[aá]ulicos|vallado|infonavit\s+el\s+vallado|campo\s+el\s+diez|el\s+diez|costita|la\s+costita|bellavista|los\s+pinos)\b",
     # Otros municipios de Sinaloa
     r"\b(?:culiac[aá]n|cln|navolato|los\s+mochis|mochis|guasave|escuinapa|concordia|el\s+rosario|el\s+fuerte|choix|guam[uú]chil|salvador\s+alvarado|elota|la\s+cruz\s+de\s+elota|san\s+ignacio|badiraguato|angostura|mocorito|sinaloa\s+de\s+leyva)\b",
     # Otras ciudades de México (precisión para no chocar con nombres de próceres en calles como Juárez o Hidalgo)
@@ -91,12 +92,12 @@ def _fast_heuristic_check(
     if is_culiacan:
         for pat in OUT_LOCATIONS_CULIACAN:
             if re.search(pat, t_clean, re.IGNORECASE):
-                return False, "⚠️ Por el momento nuestro servicio de Gas a tu Puerta Gascytsa tiene cobertura exclusivamente en la ciudad de Culiacán, Sinaloa. Por favor proporciona una dirección dentro de Culiacán o comparte tu ubicación GPS 📍."
+                return False, "⚠️ Por el momento nuestro servicio de Gas a tu Puerta Gascytsa tiene cobertura exclusivamente en la ciudad de Culiacán, Sinaloa. Por favor proporciona una dirección o ubicación dentro de Culiacán 📍."
     else:
         # Modo Mazatlán (Petroil / bots originales de Gas a tu Puerta)
         for pat in OUT_LOCATIONS_MAZATLAN:
             if re.search(pat, t_clean, re.IGNORECASE):
-                return False, "⚠️ Por el momento nuestro servicio de Gas a tu Puerta tiene cobertura exclusivamente en la ciudad de Mazatlán, Sinaloa. Por favor proporciona una dirección dentro de Mazatlán o comparte tu ubicación GPS 📍."
+                return False, "⚠️ Por el momento nuestro servicio de Gas a tu Puerta tiene cobertura exclusivamente en la ciudad de Mazatlán, Sinaloa. Por favor proporciona una dirección o ubicación dentro de Mazatlán 📍."
 
     return None
 
@@ -110,6 +111,7 @@ async def validate_address_with_llm(
     raw = (address_text or "").strip()
     is_culiacan_mode = (tenant_id == "gascytsa") or ("culiac" in (city_context or "").lower())
     target_city_name = "Culiacán" if is_culiacan_mode else "Mazatlán"
+    service_name = "Gas a tu Puerta Gascytsa" if is_culiacan_mode else "Gas a tu Puerta"
 
     if not raw:
         return AddressValidationResult(
@@ -125,7 +127,7 @@ async def validate_address_with_llm(
             user_feedback="Por favor escribe tu calle, número y colonia o presiona el botón para compartir tu ubicación GPS 📍.",
         )
 
-    # 1. Filtro rápido heurístico
+    # 1. Filtro rápido heurístico (0ms)
     fast_check = _fast_heuristic_check(raw, is_culiacan_only=is_culiacan_mode, target_city=target_city_name)
     if fast_check is not None:
         is_val, fb = fast_check
@@ -144,6 +146,22 @@ async def validate_address_with_llm(
 
     # 2. Obtención de evidencia física y satelital (Grounding en Cartografía)
     ground_ok, ground_fb, ground_data = verify_address_city_grounding(raw, target_city=target_city_name)
+
+    # Si la cartografía determinó categóricamente que está físicamente fuera de cobertura (otra ciudad o > 35km):
+    if ground_ok is False:
+        clean_norm = ground_data.get("match_addr") or raw
+        return AddressValidationResult(
+            is_valid=False,
+            is_joke_or_fake=False,
+            confidence=0.95,
+            normalized_address=clean_norm,
+            street="",
+            number="",
+            colonia="",
+            references="",
+            reason="Dirección físicamente fuera de cobertura de la ciudad objetivo",
+            user_feedback=ground_fb,
+        )
 
     # 3. Análisis semántico y delimitación estricta con IA (LLM)
     if is_culiacan_mode:
@@ -183,10 +201,10 @@ async def validate_address_with_llm(
             "Tu misión crítica es validar si la dirección o ubicación que se te comparte PERTENECE A MAZATLÁN, SINALOA, "
             "o si pertenece a OTRA CIUDAD (Culiacán, Los Mochis, Navolato, Escuinapa, El Rosario, Concordia, etc.), a otro estado o país, o si es una dirección inventada o falsa.\n\n"
             "ZONAS Y COLONIAS REALES DE MAZATLÁN (VÁLIDAS PARA ESTE BOT):\n"
-            "- Centro, Zona Dorada, Sábalo Country, Marina Mazatlán, Fracc. Las Misiones, Real del Valle, Pradera Dorada, Benito Juárez, El Conchi, Flores Magón, Palos Prietos, Ferrocarrilera, Lomas del Mar, Playa Sur, Jacarandas, Villa Verde, Valles del Ejido, Urbi Villa del Real, Santa Teresa, Alarcón, Infonavit Playas, Cerro del Vigía, Montuosa, Jaripillo, Francisco Villa, López Mateos, Sirena, Urias, Cerritos, El Venadillo, etc.\n"
-            "- Avenidas y Calles Principales: Av. del Mar, Av. Camarón Sábalo, Av. Rafael Buelna, Av. Ejército Mexicano, Av. Gabriel Leyva, Av. Insurgentes, Blvd. Niños Héroes, Av. Manuel J. Clouthier, Av. Bicentenario Juárez, Av. Cruz Lizárraga, Paseo Claussen, etc.\n\n"
+            "- Centro, Zona Dorada, Sábalo Country, Marina Mazatlán, Fracc. Las Misiones, Real del Valle, Pradera Dorada, Benito Juárez, El Conchi, Flores Magón, Palos Prietos, Ferrocarrilera, Lomas del Mar, Playa Sur, Jacarandas, Villa Verde, Valles del Ejido, Urbi Villa del Real, Santa Teresa, Alarcón, Infonavit Playas, Cerro del Vigía, Montuosa, Jaripillo, Francisco Villa, López Mateos, Sirena, Urias, Cerritos, El Venadillo, Lomas de Mazatlán, etc.\n"
+            "- Avenidas y Calles Principales: Av. del Mar, Av. Camarón Sábalo, Av. Rafael Buelna, Av. Ejército Mexicano, Av. Gabriel Leyva (Mazatlán), Av. Insurgentes, Blvd. Niños Héroes, Av. Manuel J. Clouthier, Av. Bicentenario Juárez, Av. Cruz Lizárraga, Paseo Claussen, etc.\n\n"
             "ZONAS DE OTRAS CIUDADES COMO CULIACÁN (DEBES RECHAZAR CATEGÓRICAMENTE EN ESTE BOT DE MAZATLÁN):\n"
-            "- Desarrollo Urbano Tres Ríos, Las Quintas, Infonavit Humaya, Valle Alto, Barrancos, Bugambilias, Los Ángeles, Gabriel Leyva (Culiacán), Guadalupe (Culiacán), Montebello, Villa Universidad, Stanza Toscana, Nakayama, Bachigualato, San Rafael, Santa Fe, Chula Vista (Culiacán), La Conquista, Cedros, Alturas del Sur, Blvd. Pedro Infante, Av. Álvaro Obregón (Culiacán), Blvd. Enrique Sánchez Alonso, Blvd. Emiliano Zapata, Blvd. Lola Beltrán, Blvd. Rolando Arjona, etc.\n"
+            "- Desarrollo Urbano Tres Ríos, Las Quintas, Quintas, Infonavit Humaya, Humaya, Valle Alto, Barrancos, Bugambilias, Los Ángeles, Gabriel Leyva (Culiacán), Guadalupe (Culiacán), Montebello, Villa Universidad, Stanza Toscana, Stanza Florencia, Stanza, Nakayama, Bachigualato, San Rafael, Santa Fe, Chula Vista (Culiacán), La Conquista, Cedros, Alturas del Sur, Blvd. Pedro Infante, Av. Álvaro Obregón (Culiacán), Blvd. Enrique Sánchez Alonso, Blvd. Emiliano Zapata, Blvd. Francisco I. Madero, Calzada Aeropuerto, El Palmito, Palmito, Culiacancito, Portalegre, Tierra Blanca, Chapultepec (Culiacán), Ciudades Hermanas, Los Pinos (Culiacán), etc.\n"
             "- REGLA: Si la dirección o ubicación compartida pertenece a Culiacán o a cualquier otra ciudad, debes clasificarla con is_valid=false.\n"
             "- REGLA VITAL DE MENSAJE: En user_feedback NUNCA intentes adivinar ni menciones en qué otra ciudad o lugar se encuentra esa dirección. Solo indica amablemente que el servicio tiene cobertura exclusivamente en Mazatlán, Sinaloa, y solicita una dirección o ubicación dentro de Mazatlán 📍.\n\n"
             "CRITERIOS DE VALIDACIÓN:\n"
@@ -210,36 +228,24 @@ async def validate_address_with_llm(
         )
 
     # Construir prompt para la IA con evidencia cartográfica
-    if ground_ok is False:
-        detected_c = ground_data.get("detected_city", "otra ciudad")
-        match_str = ground_data.get("match_addr") or raw
-        dist_t = ground_data.get("dist_km", 0.0)
-        dist_alt = ground_data.get("dist_alt_km", 0.0)
-        alt_name = "Mazatlán" if is_culiacan_mode else "Culiacán"
-        user_prompt = (
-            f"Dirección o ubicación recibida del usuario:\n\"{raw}\"\n\n"
-            f"[EVIDENCIA CARTOGRÁFICA Y SATELITAL]:\n"
-            f"- Ubicación resuelta en mapas: '{match_str}' ({detected_c})\n"
-            f"- Distancia a la ciudad objetivo ({target_city_name}): {dist_t:.1f} km\n"
-            f"- Distancia a la ciudad alterna ({alt_name}): {dist_alt:.1f} km\n\n"
-            f"Tu tarea como IA validadora:\n"
-            f"Determina y clasifica que esta dirección NO pertenece a {target_city_name} (está físicamente fuera de cobertura). "
-            f"Responde con is_valid=false. En user_feedback indica amablemente que el servicio tiene cobertura exclusivamente en la ciudad de {target_city_name}, Sinaloa, SIN mencionar ni tratar de adivinar en qué otra ciudad o lugar se encuentra."
-        )
-    elif ground_ok is True:
+    alt_name = "Mazatlán" if is_culiacan_mode else "Culiacán"
+    if ground_ok is True:
         match_str = ground_data.get("match_addr") or raw
         user_prompt = (
             f"Dirección o ubicación recibida del usuario para entrega en {target_city_name}, Sinaloa:\n\"{raw}\"\n\n"
-            f"[CONFIRMACIÓN CARTOGRÁFICA]: Domicilio verificado físicamente dentro de {target_city_name} ('{match_str}').\n"
-            f"Tu tarea como IA validadora: Confirma is_valid=true y extrae calle, número, colonia y referencias de manera limpia."
+            f"[INFORMACIÓN CARTOGRÁFICA PREVIA]: Se detectó una coincidencia tentativa en mapas: '{match_str}'.\n\n"
+            f"Tu tarea como IA validadora:\n"
+            f"Evalúa con tu conocimiento si el texto original del usuario (\"{raw}\") pertenece legítimamente a {target_city_name}, Sinaloa.\n"
+            f"Si la dirección o zona pertenece en realidad a {alt_name} (o a otra ciudad) y fue confundida por similitud de nombres, DEBES CLASIFICARLA CON is_valid=false.\n"
+            f"Solo si estás seguro de que es una dirección dentro de {target_city_name}, clasifícala con is_valid=true.\n"
+            f"Si es rechazada por ser de otra ciudad, en user_feedback pon exclusivamente: '⚠️ Por el momento nuestro servicio de {service_name} tiene cobertura exclusivamente en la ciudad de {target_city_name}, Sinaloa. Por favor proporciona una dirección o ubicación dentro de {target_city_name} 📍.'"
         )
     else:
-        alt_name = "Mazatlán" if is_culiacan_mode else "Culiacán"
         user_prompt = (
             f"Dirección o ubicación recibida del usuario para entrega en {target_city_name}, Sinaloa:\n\"{raw}\"\n\n"
-            f"[AUDITORÍA SEMÁNTICA]: Analiza con tu conocimiento si esta calle o colonia pertenece a {target_city_name}, Sinaloa. "
-            f"Si pertenece a {alt_name} o a otra ciudad/estado/país, o si es una dirección inventada o falsa, clasifícala con is_valid=false. "
-            f"En user_feedback solo indica que el servicio tiene cobertura exclusivamente en {target_city_name}, Sinaloa, sin mencionar en qué otra ciudad está."
+            f"[AUDITORÍA SEMÁNTICA CON IA]: Analiza si esta calle, colonia o zona pertenece a {target_city_name}, Sinaloa.\n"
+            f"Si pertenece a {alt_name} o a otra ciudad/estado/país, o si es una dirección inventada o falsa, clasifícala con is_valid=false.\n"
+            f"En user_feedback si no pertenece a {target_city_name}, solo indica que el servicio tiene cobertura exclusivamente en {target_city_name}, Sinaloa, sin mencionar en qué otra ciudad está."
         )
 
     try:
@@ -275,9 +281,7 @@ async def validate_address_with_llm(
             reason = str(data.get("reason") or "").strip()
             fb = str(data.get("user_feedback") or "").strip()
 
-            if ground_ok is True:
-                is_valid = True
-                is_joke = False
+            if ground_ok is True and is_valid:
                 conf = max(conf, 0.98)
                 if not norm or norm == raw:
                     norm = ground_data.get("match_addr") or raw
@@ -291,7 +295,7 @@ async def validate_address_with_llm(
                         is_valid = False
                         is_joke = False
                         reason = "Fuera de cobertura (solo Culiacán)"
-                        fb = "⚠️ Por el momento nuestro servicio de Gas a tu Puerta Gascytsa tiene cobertura exclusivamente en la ciudad de Culiacán, Sinaloa. Por favor proporciona una dirección dentro de Culiacán o comparte tu ubicación GPS 📍."
+                        fb = "⚠️ Por el momento nuestro servicio de Gas a tu Puerta Gascytsa tiene cobertura exclusivamente en la ciudad de Culiacán, Sinaloa. Por favor proporciona una dirección o ubicación dentro de Culiacán 📍."
                         break
             elif not is_culiacan_mode and is_valid:
                 for pat in OUT_LOCATIONS_MAZATLAN:
@@ -299,7 +303,7 @@ async def validate_address_with_llm(
                         is_valid = False
                         is_joke = False
                         reason = "Fuera de cobertura (solo Mazatlán)"
-                        fb = "⚠️ Por el momento nuestro servicio de Gas a tu Puerta tiene cobertura exclusivamente en la ciudad de Mazatlán, Sinaloa. Por favor proporciona una dirección dentro de Mazatlán o comparte tu ubicación GPS 📍."
+                        fb = "⚠️ Por el momento nuestro servicio de Gas a tu Puerta tiene cobertura exclusivamente en la ciudad de Mazatlán, Sinaloa. Por favor proporciona una dirección o ubicación dentro de Mazatlán 📍."
                         break
 
             # Asegurar que el mensaje al usuario NUNCA mencione o intente adivinar otra ciudad

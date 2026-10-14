@@ -2166,6 +2166,7 @@ class FlowRouter:
                 p for p in repo.get_all_products(session.tenant_id)
                 if bool(getattr(p, "in_stock", True)) and "estacionario" not in p.name.lower() and p.id != "entrega-domicilio"
             ]
+            prods_desc = ", ".join(f"{p.name} (id: {p.id}, ${p.price})" for p in active_cylinders)
             city_lbl = _get_city_context_for_tenant(session.tenant_id)
             biz_lbl = "Gas a tu Puerta Gascytsa" if (session.tenant_id or "").lower() == "gascytsa" else "Petroil"
             llm_prompt = (
@@ -2494,8 +2495,9 @@ class FlowRouter:
                     state=session.state,
                 )
 
-            # 3. Si el usuario escribió una dirección completa directamente
-            if len(text.strip()) > 8 and any(k in text.lower() for k in ["calle", "av", "avenida", "#", "col", "colonia", "fracc", "casa", "lote", "misión", "misiones", "privada"]):
+            # 3. Si el usuario escribió una dirección directamente (ej. calle, fraccionamiento o ubicación)
+            is_generic_word = any(re.match(r"^\s*(?:" + re.escape(w) + r")\s*[\.!\?]?$", text.lower()) for w in ["hola", "buen dia", "buenas", "ayuda", "menu", "inicio"])
+            if len(text.strip()) >= 5 and not is_generic_word:
                 val_res = await validate_address_with_llm(
                     text.strip(),
                     tenant_id=session.tenant_id,
