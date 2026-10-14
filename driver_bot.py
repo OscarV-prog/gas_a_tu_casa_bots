@@ -2646,15 +2646,27 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error(f"Unhandled exception in driver_bot: {err}", exc_info=err)
 
 
-def main() -> None:
-    """Iniciar el Bot de Choferes de Telegram."""
-    settings = get_settings()
+def resolve_driver_token() -> str:
+    """Resuelve el token de Choferes buscando en variables de entorno, settings o backend remoto."""
     import os
-    token = settings.telegram_driver_bot_token or os.getenv('TELEGRAM_DRIVER_BOT_TOKEN')
+    from src.services.dynamic_settings import get_dynamic_setting
+    settings = get_settings()
+    return str(
+        os.getenv("TELEGRAM_DRIVER_BOT_TOKEN", "")
+        or os.getenv("DRIVER_BOT_TOKEN", "")
+        or os.getenv("TELEGRAM_CHOFERES", "")
+        or get_dynamic_setting("TELEGRAM_DRIVER_BOT_TOKEN", tenant_id="petroil", force_refresh=True)
+        or get_dynamic_setting("DRIVER_BOT_TOKEN", tenant_id="petroil", force_refresh=True)
+        or get_dynamic_setting("TELEGRAM_CHOFERES", tenant_id="petroil", force_refresh=True)
+        or settings.telegram_driver_bot_token
+        or ""
+    ).strip()
 
-    if not token:
-        print("❌ ERROR: TELEGRAM_DRIVER_BOT_TOKEN no está configurado en el archivo .env")
-        sys.exit(1)
+
+def main() -> None:
+    """Iniciar el Bot de Choferes de Telegram con auto-recuperación continua y supervisor de polling."""
+    import os
+    import time
 
     init_db()
 
@@ -2663,92 +2675,128 @@ def main() -> None:
     print(f"🏪 Tenant: Gas a Tu Puerta - Petroil ({TENANT_ID})")
     print("=" * 60)
 
-    request_config = HTTPXRequest(
-        connect_timeout=30.0,
-        read_timeout=30.0,
-        write_timeout=30.0,
-        pool_timeout=30.0,
-    )
+    consecutive_errors = 0
+    token = ""
+    while True:
+        try:
+            while not token:
+                token = resolve_driver_token()
+                if token:
+                    logger.info("✅ Token de Bot de Choferes detectado y configurado exitosamente.")
+                    break
+                logger.info(
+                    "[Choferes] Esperando configuración de token (TELEGRAM_DRIVER_BOT_TOKEN) en Dashboard o .env (reintentando en 15s)..."
+                )
+                time.sleep(15)
 
-    async def post_init(app: Application) -> None:
-        asyncio.create_task(monitor_dashboard_assigned_orders(app.bot))
+            request_config = HTTPXRequest(
+                connect_timeout=30.0,
+                read_timeout=30.0,
+                write_timeout=30.0,
+                pool_timeout=30.0,
+            )
 
-    application = (
-        Application.builder()
-        .token(token)
-        .request(request_config)
-        .get_updates_request(request_config)
-        .post_init(post_init)
-        .build()
-    )
+            async def post_init(app: Application) -> None:
+                asyncio.create_task(monitor_dashboard_assigned_orders(app.bot))
 
-    application.add_error_handler(error_handler)
+            application = (
+                Application.builder()
+                .token(token)
+                .request(request_config)
+                .get_updates_request(request_config)
+                .post_init(post_init)
+                .build()
+            )
 
-    # Flujo de Ingreso y Autenticación por Celular Asignado
-    registro_conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("start", start),
-            CommandHandler("login", pedir_telefono_ingreso),
-            CommandHandler("registro", pedir_telefono_ingreso),
-            CommandHandler("acceso", pedir_telefono_ingreso),
-            CommandHandler("cambiar_numero", pedir_telefono_ingreso),
-        ],
-        states={
-            PASO_TELEFONO_LOGIN: [
-                MessageHandler(filters.CONTACT, recibir_telefono_login),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_telefono_login),
-            ],
-        },
-        fallbacks=[CommandHandler("cancelar", cancelar_registro)],
-        allow_reentry=True,
-    )
-    application.add_handler(registro_conv)
+            application.add_error_handler(error_handler)
 
-    # Botones de Gestión de Turno
-    application.add_handler(MessageHandler(filters.Regex(r"^(🟢 Iniciar Turno|🟢 Reanudar Turno|/disponible)"), boton_disponible))
-    application.add_handler(MessageHandler(filters.Regex(r"^(⏸️ Pausar|/pausa|/ocupado)"), boton_pausa))
-    application.add_handler(MessageHandler(filters.Regex(r"^(🛑 Terminar Turno|/terminar_turno|/fin_turno)"), boton_terminar_turno))
+            # Flujo de Ingreso y Autenticación por Celular Asignado
+            registro_conv = ConversationHandler(
+                entry_points=[
+                    CommandHandler("start", start),
+                    CommandHandler("login", pedir_telefono_ingreso),
+                    CommandHandler("registro", pedir_telefono_ingreso),
+                    CommandHandler("acceso", pedir_telefono_ingreso),
+                    CommandHandler("cambiar_numero", pedir_telefono_ingreso),
+                ],
+                states={
+                    PASO_TELEFONO_LOGIN: [
+                        MessageHandler(filters.CONTACT, recibir_telefono_login),
+                        MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_telefono_login),
+                    ],
+                },
+                fallbacks=[CommandHandler("cancelar", cancelar_registro)],
+                allow_reentry=True,
+            )
+            application.add_handler(registro_conv)
 
-    # Botón de Medidor de Tanque / Pipa
-    application.add_handler(MessageHandler(filters.Regex(r"^(⛽ Medidor de Tanque|/carga|/tanque)"), boton_medidor_tanque))
+            # Botones de Gestión de Turno
+            application.add_handler(MessageHandler(filters.Regex(r"^(🟢 Iniciar Turno|🟢 Reanudar Turno|/disponible)"), boton_disponible))
+            application.add_handler(MessageHandler(filters.Regex(r"^(⏸️ Pausar|/pausa|/ocupado)"), boton_pausa))
+            application.add_handler(MessageHandler(filters.Regex(r"^(🛑 Terminar Turno|/terminar_turno|/fin_turno)"), boton_terminar_turno))
 
-    # Otros Botones del Teclado
-    application.add_handler(MessageHandler(filters.Regex(r"^(📋 Mis Pedidos Activos|/pedidos)"), boton_pedidos))
-    application.add_handler(MessageHandler(filters.Regex(r"^(👤 Mi Perfil|/perfil)"), boton_perfil))
-    application.add_handler(MessageHandler(filters.Regex(r"^(📍 Actualizar Ubicación GPS|/ubicacion)"), pedir_actualizar_ubicacion))
+            # Botón de Medidor de Tanque / Pipa
+            application.add_handler(MessageHandler(filters.Regex(r"^(⛽ Medidor de Tanque|/carga|/tanque)"), boton_medidor_tanque))
 
-    # Recepción de Fotografía (Reloj de tanque o medidor)
-    application.add_handler(MessageHandler(filters.PHOTO, recibir_foto_chofer))
+            # Otros Botones del Teclado
+            application.add_handler(MessageHandler(filters.Regex(r"^(📋 Mis Pedidos Activos|/pedidos)"), boton_pedidos))
+            application.add_handler(MessageHandler(filters.Regex(r"^(👤 Mi Perfil|/perfil)"), boton_perfil))
+            application.add_handler(MessageHandler(filters.Regex(r"^(📍 Actualizar Ubicación GPS|/ubicacion)"), pedir_actualizar_ubicacion))
 
-    # Recepción de Ubicación GPS (tanto mensajes directos como actualizaciones de live location en tiempo real)
-    application.add_handler(
-        MessageHandler(
-            filters.LOCATION | (filters.UpdateType.EDITED_MESSAGE & filters.LOCATION),
-            recibir_ubicacion_tiempo_real,
-        )
-    )
+            # Recepción de Fotografía (Reloj de tanque o medidor)
+            application.add_handler(MessageHandler(filters.PHOTO, recibir_foto_chofer))
 
-    # Recepción de mensajes de texto libre (lecturas de tanque o motivo de rechazo)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_texto_chofer))
+            # Recepción de Ubicación GPS (tanto mensajes directos como actualizaciones de live location en tiempo real)
+            application.add_handler(
+                MessageHandler(
+                    filters.LOCATION | (filters.UpdateType.EDITED_MESSAGE & filters.LOCATION),
+                    recibir_ubicacion_tiempo_real,
+                )
+            )
 
-    # Comando rápido para cancelar y liberar todos los pedidos activos asignados
-    application.add_handler(CommandHandler(["cancelar_activos", "limpiar_pedidos"], comando_cancelar_activos))
+            # Recepción de mensajes de texto libre (lecturas de tanque o motivo de rechazo)
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_texto_chofer))
 
-    # Comandos directos de Carga de Tanque / Pipa y Asistencia / Turno
-    application.add_handler(CommandHandler(["cargainicial", "carga_inicial", "iniciocarga"], comando_carga_inicial))
-    application.add_handler(CommandHandler(["cargafinal", "carga_final", "fincarga"], comando_carga_final))
-    application.add_handler(CommandHandler(["tanque", "carga", "medidor"], boton_medidor_tanque))
-    application.add_handler(CommandHandler(["turno", "jornada", "asistencia"], comando_turno))
+            # Comando rápido para cancelar y liberar todos los pedidos activos asignados
+            application.add_handler(CommandHandler(["cancelar_activos", "limpiar_pedidos"], comando_cancelar_activos))
 
-    # Botones interactivos (Aceptar / Entregar / Rechazar / Motivo de rechazo / Carga de tanque)
-    application.add_handler(CallbackQueryHandler(manejar_callback_pedidos))
+            # Comandos directos de Carga de Tanque / Pipa y Asistencia / Turno
+            application.add_handler(CommandHandler(["cargainicial", "carga_inicial", "iniciocarga"], comando_carga_inicial))
+            application.add_handler(CommandHandler(["cargafinal", "carga_final", "fincarga"], comando_carga_final))
+            application.add_handler(CommandHandler(["tanque", "carga", "medidor"], boton_medidor_tanque))
+            application.add_handler(CommandHandler(["turno", "jornada", "asistencia"], comando_turno))
 
-    print("✅ Bot de Choferes conectado con Telegram. Listo para registro y despachos en tiempo real.")
-    application.run_polling(
-        bootstrap_retries=10,
-        poll_interval=1.0,
-        timeout=30,
-    )
+            # Botones interactivos (Aceptar / Entregar / Rechazar / Motivo de rechazo / Carga de tanque)
+            application.add_handler(CallbackQueryHandler(manejar_callback_pedidos))
+
+            print("✅ Bot de Choferes conectado con Telegram. Listo para registro y despachos en tiempo real.")
+            application.run_polling(
+                bootstrap_retries=10,
+                poll_interval=1.0,
+                timeout=30,
+            )
+            consecutive_errors = 0
+
+        except KeyboardInterrupt:
+            print("\n🛑 Bot de Choferes detenido correctamente por el usuario (Ctrl+C).")
+            break
+        except Exception as e:
+            consecutive_errors += 1
+            err_str = str(e)
+            if "InvalidToken" in err_str or "Unauthorized" in err_str:
+                logger.error("❌ Token de Telegram para Choferes no autorizado o inválido (%s). Reintentando obtenerlo del Dashboard...", e)
+                token = ""
+                time.sleep(10)
+            elif sys.platform == "win32" and ("All connection attempts failed" in err_str or "ConnectError" in err_str or "ConnectTimeout" in err_str):
+                print("\n" + "!" * 70)
+                print("🚨 ERROR DE CONEXIÓN: La red Wi-Fi actual está bloqueando Telegram (api.telegram.org).")
+                print("👉 Solución rápida: Conecta tu computadora al Punto de Acceso / Datos Móviles de tu celular.")
+                print("   Las redes móviles no bloquean Telegram y el bot encenderá de inmediato.")
+                print("!" * 70 + "\n")
+                time.sleep(15)
+            else:
+                logger.error("Error en polling de Telegram Choferes: %s. Reintentando en 5s...", e)
+                time.sleep(min(30, 5 * consecutive_errors))
 
 
 if __name__ == "__main__":

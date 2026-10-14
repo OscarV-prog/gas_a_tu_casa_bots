@@ -32,26 +32,38 @@ class TestDynamicSettings(unittest.TestCase):
             {"key": "GOOGLE_MAPS_API_KEY", "value": "test_maps_key_789"},
         ]
 
-        # First fetch should call api_get
+        # First fetch should call api_get for petroil and gascytsa (2 calls)
         settings = fetch_remote_settings(force_refresh=True)
         self.assertEqual(settings.get("WHATSAPP_TOKEN"), "test_wa_token_123")
         self.assertEqual(settings.get("MESSENGER_PAGE_ACCESS_TOKEN"), "test_fb_token_456")
         self.assertEqual(settings.get("GOOGLE_MAPS_API_KEY"), "test_maps_key_789")
-        self.assertEqual(mock_api_get.call_count, 1)
+        self.assertEqual(mock_api_get.call_count, 2)
 
         # Second fetch within TTL should use cache without calling api_get again
         cached_settings = fetch_remote_settings(force_refresh=False)
         self.assertEqual(cached_settings.get("WHATSAPP_TOKEN"), "test_wa_token_123")
-        self.assertEqual(mock_api_get.call_count, 1)
+        self.assertEqual(mock_api_get.call_count, 2)
 
     @patch("src.services.api_client.api_get")
-    def test_get_dynamic_setting_prioritizes_remote_over_env(self, mock_api_get):
+    def test_get_dynamic_setting_prioritizes_env_over_remote(self, mock_api_get):
         mock_api_get.return_value = [
             {"key": "WHATSAPP_TOKEN", "value": "token_from_remote_api"},
         ]
 
         with patch.dict(os.environ, {"WHATSAPP_TOKEN": "token_from_local_env"}):
             val = get_dynamic_setting("WHATSAPP_TOKEN", force_refresh=True)
+            self.assertEqual(val, "token_from_local_env")
+
+    @patch("src.services.api_client.api_get")
+    def test_get_dynamic_setting_resolves_remote_when_env_unset(self, mock_api_get):
+        mock_api_get.return_value = [
+            {"key": "CUSTOM_REMOTE_KEY", "value": "token_from_remote_api"},
+        ]
+
+        env_clean = dict(os.environ)
+        env_clean.pop("CUSTOM_REMOTE_KEY", None)
+        with patch.dict(os.environ, env_clean, clear=True):
+            val = get_dynamic_setting("CUSTOM_REMOTE_KEY", force_refresh=True)
             self.assertEqual(val, "token_from_remote_api")
 
     @patch("src.services.api_client.api_get")
@@ -72,13 +84,19 @@ class TestDynamicSettings(unittest.TestCase):
             {"key": "TELEGRAM_DRIVER_BOT_TOKEN", "value": "live_tg_driver_555"},
         ]
 
-        invalidate_dynamic_settings_cache()
-        s = Settings()
-        self.assertEqual(s.whatsapp_token, "live_wa_token_999")
-        self.assertEqual(s.messenger_page_access_token, "live_msg_token_888")
-        self.assertEqual(s.maps_api_key, "live_maps_777")
-        self.assertEqual(s.telegram_bot_token, "live_tg_bot_666")
-        self.assertEqual(s.telegram_driver_bot_token, "live_tg_driver_555")
+        env_clean = {
+            k: v for k, v in os.environ.items()
+            if not any(token_k in k for token_k in ["WHATSAPP", "MESSENGER", "INSTAGRAM", "TELEGRAM", "MAPS"])
+        }
+
+        with patch.dict(os.environ, env_clean, clear=True):
+            invalidate_dynamic_settings_cache()
+            s = Settings()
+            self.assertEqual(s.whatsapp_token, "live_wa_token_999")
+            self.assertEqual(s.messenger_page_access_token, "live_msg_token_888")
+            self.assertEqual(s.maps_api_key, "live_maps_777")
+            self.assertEqual(s.telegram_bot_token, "live_tg_bot_666")
+            self.assertEqual(s.telegram_driver_bot_token, "live_tg_driver_555")
 
     @patch("src.services.api_client.api_get")
     def test_adapters_access_token_resolves_dynamic_tokens(self, mock_api_get):
@@ -88,14 +106,20 @@ class TestDynamicSettings(unittest.TestCase):
             {"key": "INSTAGRAM_ACCESS_TOKEN", "value": "ig_token_adapter_test"},
         ]
 
-        invalidate_dynamic_settings_cache()
-        wa_adapter = WhatsAppAdapter()
-        msg_adapter = MessengerAdapter()
-        ig_adapter = InstagramAdapter()
+        env_clean = {
+            k: v for k, v in os.environ.items()
+            if not any(token_k in k for token_k in ["WHATSAPP", "MESSENGER", "INSTAGRAM", "TELEGRAM", "MAPS"])
+        }
 
-        self.assertEqual(wa_adapter.access_token, "wa_token_adapter_test")
-        self.assertEqual(msg_adapter.access_token, "msg_token_adapter_test")
-        self.assertEqual(ig_adapter.access_token, "ig_token_adapter_test")
+        with patch.dict(os.environ, env_clean, clear=True):
+            invalidate_dynamic_settings_cache()
+            wa_adapter = WhatsAppAdapter()
+            msg_adapter = MessengerAdapter()
+            ig_adapter = InstagramAdapter()
+
+            self.assertEqual(wa_adapter.access_token, "wa_token_adapter_test")
+            self.assertEqual(msg_adapter.access_token, "msg_token_adapter_test")
+            self.assertEqual(ig_adapter.access_token, "ig_token_adapter_test")
 
     async def _async_test_post_meta_retry(self, mock_api_get):
         from unittest.mock import AsyncMock
