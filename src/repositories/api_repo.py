@@ -313,6 +313,10 @@ class ApiRepository:
         if not clean_phone:
             return None
 
+        from src.repositories.identity_store import identity_store
+        if identity_store.is_customer_deleted(clean_phone):
+            return None
+
         try:
             res = api_get("/customers", params={"tenantId": tenant_id}, timeout=5)
             matching_customers = []
@@ -414,13 +418,17 @@ class ApiRepository:
             res = api_get(f"/customers/{customer_id}/addresses", timeout=5)
             if isinstance(res, list) and res:
                 results = []
+                GENERIC_CITIES = {"mazatlan", "mazatlán", "culiacan", "culiacán", "sinaloa", "mexico", "méxico"}
                 for i, a in enumerate(res, 1):
                     if isinstance(a, dict) and a.get("address"):
+                        addr_str = str(a.get("address") or "").strip()
+                        if addr_str.lower() in GENERIC_CITIES:
+                            continue
                         results.append(
                             CustomerAddress(
                                 id=a.get("id") or i,
                                 customer_id=customer_id,
-                                address=a.get("address"),
+                                address=addr_str,
                                 alias=a.get("alias") or f"Dirección {i}",
                                 notes=a.get("notes") or "",
                                 is_default=bool(a.get("isDefault", i == 1)),
@@ -512,6 +520,17 @@ class ApiRepository:
             is_default=is_default,
         )
 
+    def save_customer(self, customer: Customer) -> Customer:
+        """Save or update customer from a Customer object."""
+        return self.save_or_update_customer(
+            tenant_id=customer.tenant_id,
+            channel=customer.channel,
+            channel_user_id=str(customer.channel_user_id or customer.id),
+            name=customer.name,
+            phone=customer.phone,
+            address=customer.address,
+        )
+
     def save_or_update_customer(
         self,
         tenant_id: str,
@@ -526,6 +545,10 @@ class ApiRepository:
         clean_phone = re.sub(r"\D", "", phone) if phone else ""
         if len(clean_phone) > 10:
             clean_phone = clean_phone[-10:]
+
+        from src.repositories.identity_store import identity_store
+        if clean_phone:
+            identity_store.unmark_customer_deleted(clean_phone)
 
         customer_type = (channel or "TELEGRAM").upper()
         lat = kwargs.get("latitude") or kwargs.get("delivery_lat")
@@ -585,6 +608,74 @@ class ApiRepository:
             addresses=[CustomerAddress(id=1, address=address, alias="Principal")] if address else [],
         )
 
+    def update_customer_address(
+        self,
+        customer_id: Any,
+        address_id: Any,
+        new_address: str,
+        new_alias: str | None = None,
+        phone: str = "",
+        old_address: str = "",
+    ) -> bool:
+        """Update an existing customer address in PostgreSQL API and SQLite."""
+        from src.repositories.identity_store import identity_store
+
+        clean_p = re.sub(r"\D", "", str(phone or ""))
+        if len(clean_p) > 10:
+            clean_p = clean_p[-10:]
+
+        clean_addr = resolve_gps_address_to_name(new_address.strip())
+        target_text = (old_address or "").strip()
+        target_uuid = str(address_id or "").strip()
+
+        # Discover UUID if address_id is integer or index
+        try:
+            direct_addrs = api_get(f"/customers/{customer_id}/addresses", timeout=5)
+            if isinstance(direct_addrs, list):
+                for a in direct_addrs:
+                    if isinstance(a, dict):
+                        aid = str(a.get("id") or "")
+                        atext = (a.get("address") or "").strip()
+                        if aid == target_uuid or (target_text and atext.lower() == target_text.lower()):
+                            target_uuid = aid
+                            if not target_text:
+                                target_text = atext
+                            break
+        except Exception:
+            pass
+
+        updated_via_api = False
+        if target_uuid and len(target_uuid) > 10 and "-" in target_uuid:
+            try:
+                payload = {"address": clean_addr}
+                if new_alias:
+                    payload["alias"] = new_alias
+                api_patch(f"/customers/{customer_id}/addresses/{target_uuid}", payload, timeout=5)
+                updated_via_api = True
+                logger.info(f"[ApiRepository] Address {target_uuid} updated via API to {clean_addr}")
+            except Exception as e:
+                logger.debug(f"[ApiRepository] api_patch for address failed ({e}), replacing address...")
+
+        if not updated_via_api:
+            if target_uuid and len(target_uuid) > 10 and "-" in target_uuid:
+                try:
+                    api_delete(f"/customers/{customer_id}/addresses/{target_uuid}", timeout=5)
+                except Exception:
+                    pass
+            self.add_customer_address(customer_id, clean_addr, alias=new_alias or "Dirección")
+
+        if target_text and clean_p:
+            identity_store.mark_address_deleted(clean_p, target_text)
+        if clean_p:
+            identity_store.unmark_address_deleted(clean_p, clean_addr)
+
+        if self.fallback_repo and hasattr(self.fallback_repo, "update_customer_address"):
+            try:
+                self.fallback_repo.update_customer_address(customer_id, address_id, clean_addr, new_alias=new_alias, phone=phone, old_address=old_address)
+            except Exception:
+                pass
+        return True
+
     def delete_customer_address(
         self,
         customer_id: Any,
@@ -642,6 +733,90 @@ class ApiRepository:
                 pass
         return True
 
+    def delete_customer(
+        self,
+        tenant_id: str,
+        customer_id: Any = None,
+        phone: str = "",
+        channel: str = "",
+        channel_user_id: Any = None,
+    ) -> bool:
+        """Completely delete customer profile and all their saved addresses from PostgreSQL API and SQLite."""
+        from src.repositories.identity_store import identity_store
+
+        clean_p = re.sub(r"\D", "", str(phone or ""))
+        if len(clean_p) > 10:
+            clean_p = clean_p[-10:]
+
+        if clean_p:
+            identity_store.mark_customer_deleted(clean_p)
+
+        # 1. Localizar TODOS los registros de cliente en la API para este teléfono (tanto con +52 como a 10 dígitos)
+        try:
+            res = api_get("/customers", timeout=5)
+            target_customers = []
+            if isinstance(res, list):
+                for c in res:
+                    c_id = c.get("id")
+                    c_phone = re.sub(r"\D", "", str(c.get("phone", "")))
+                    c_phone_10 = c_phone[-10:] if len(c_phone) >= 10 else c_phone
+
+                    matches_id = customer_id and (str(c_id) == str(customer_id))
+                    matches_phone = clean_p and (c_phone_10 == clean_p)
+                    if matches_id or matches_phone:
+                        target_customers.append(c)
+
+            # Para cada cliente coincidente, eliminar todas sus direcciones en la API
+            for c in target_customers:
+                cid = c.get("id")
+                addr_ids = set()
+                for a in (c.get("addresses") or []):
+                    if isinstance(a, dict) and a.get("id"):
+                        addr_ids.add(str(a["id"]))
+                        if a.get("address"):
+                            identity_store.mark_address_deleted(clean_p, str(a["address"]))
+
+                try:
+                    direct_addrs = api_get(f"/customers/{cid}/addresses", timeout=5)
+                    if isinstance(direct_addrs, list):
+                        for da in direct_addrs:
+                            if isinstance(da, dict) and da.get("id"):
+                                addr_ids.add(str(da["id"]))
+                                if da.get("address"):
+                                    identity_store.mark_address_deleted(clean_p, str(da["address"]))
+                except Exception:
+                    pass
+
+                for aid in addr_ids:
+                    try:
+                        api_delete(f"/customers/{cid}/addresses/{aid}", timeout=5)
+                        logger.info(f"🗑️ [ApiRepo] Address #{aid} deleted for customer #{cid}")
+                    except Exception as e_addr:
+                        logger.debug(f"[ApiRepo] Error deleting address {aid}: {e_addr}")
+
+                if c.get("address"):
+                    identity_store.mark_address_deleted(clean_p, str(c["address"]))
+
+                # Intentar eliminar el cliente directamente
+                try:
+                    api_delete(f"/customers/{cid}", timeout=5)
+                except Exception:
+                    pass
+
+        except Exception as e:
+            logger.debug(f"[ApiRepo] Error deleting customer from API: {e}")
+
+        # 2. Eliminar también de SQLite
+        try:
+            from src.repositories import get_sqlite_repository
+            sqlite_repo = get_sqlite_repository()
+            if sqlite_repo:
+                sqlite_repo.delete_customer(tenant_id, customer_id=customer_id, phone=clean_p, channel=channel, channel_user_id=channel_user_id)
+        except Exception as e_sql:
+            logger.debug(f"[ApiRepo] Error deleting customer from SQLite: {e_sql}")
+
+        return True
+
     def _parse_api_customer(self, data: dict, tenant_id: str, phone: str) -> Customer:
         from src.repositories.identity_store import identity_store
 
@@ -649,10 +824,13 @@ class ApiRepository:
         name = data.get("name") or data.get("customerName") or "Cliente"
         raw_addrs = data.get("addresses") or []
         addrs = []
+        GENERIC_CITIES = {"mazatlan", "mazatlán", "culiacan", "culiacán", "sinaloa", "mexico", "méxico"}
         if isinstance(raw_addrs, list) and raw_addrs:
             for i, a in enumerate(raw_addrs, 1):
                 if isinstance(a, dict):
                     addr_str = (a.get("address") or "").strip()
+                    if addr_str.lower() in GENERIC_CITIES:
+                        continue
                     if addr_str and not identity_store.is_address_deleted(phone, addr_str):
                         addrs.append(
                             CustomerAddress(
@@ -668,6 +846,8 @@ class ApiRepository:
                         )
                 elif isinstance(a, str):
                     addr_str = a.strip()
+                    if addr_str.lower() in GENERIC_CITIES:
+                        continue
                     if addr_str and not identity_store.is_address_deleted(phone, addr_str):
                         addrs.append(CustomerAddress(id=i, customer_id=cid, address=addr_str, alias=f"Dirección {i}"))
 
@@ -679,6 +859,8 @@ class ApiRepository:
                     for i, a in enumerate(direct_addrs, 1):
                         if isinstance(a, dict) and a.get("address"):
                             addr_str = (a.get("address") or "").strip()
+                            if addr_str.lower() in GENERIC_CITIES:
+                                continue
                             if addr_str and not identity_store.is_address_deleted(phone, addr_str):
                                 addrs.append(
                                     CustomerAddress(
@@ -696,12 +878,13 @@ class ApiRepository:
                 pass
 
         default_addr = (data.get("address") or "").strip()
-        if default_addr and identity_store.is_address_deleted(phone, default_addr):
+        if default_addr in ("Mazatlán", "Mazatlan", "Culiacán", "Culiacan", "Sinaloa") or identity_store.is_address_deleted(phone, default_addr):
             default_addr = ""
 
-        # Solo si la libreta de direcciones está totalmente vacía y default_addr no está eliminada, usarla
+        # Solo si la libreta de direcciones está totalmente vacía y default_addr no está eliminada y es una calle real, usarla
         if not addrs and default_addr and not identity_store.is_address_deleted(phone, default_addr):
-            addrs.append(CustomerAddress(id=1, customer_id=cid, address=default_addr, alias="Principal", is_default=True))
+            if any(k in default_addr.lower() for k in ["calle", "av", "avenida", "fracc", "col", "blvd", "num", "#", "1", "2", "3", "4", "5", "6", "7", "8", "9"]):
+                addrs.append(CustomerAddress(id=1, customer_id=cid, address=default_addr, alias="Principal", is_default=True))
 
         active_default = default_addr or (addrs[0].address if addrs else "")
 

@@ -137,6 +137,19 @@ def get_or_create_session(
         sess.channel = channel
     if channel_user_id:
         sess.channel_user_id = channel_user_id
+
+    # Auto-vincular teléfono y nombre si están guardados en identity_store
+    if not sess.draft_order.customer_phone and sess.channel and sess.channel_user_id:
+        from src.repositories.identity_store import identity_store
+        mapped_phone = identity_store.get_phone_for_channel_user(sess.channel, str(sess.channel_user_id))
+        if mapped_phone and not identity_store.is_customer_deleted(mapped_phone):
+            sess.draft_order.customer_phone = mapped_phone
+            if not sess.draft_order.customer_name:
+                repo = get_repository()
+                cust = repo.get_customer_by_phone(sess.tenant_id, mapped_phone)
+                if cust and cust.name:
+                    sess.draft_order.customer_name = cust.name
+
     return sess
 
 
@@ -1049,6 +1062,26 @@ class FlowRouter:
     """Motor determinista de enrutamiento conversacional con fallback selectivo."""
 
     @classmethod
+    def _get_known_phone_for_session(cls, session: FlowSession, repo: Any) -> str | None:
+        """Determina si el usuario ya tiene un teléfono vinculado en la sesión o en la BD."""
+        draft = session.draft_order
+        if draft and draft.customer_phone:
+            return draft.customer_phone
+        if session.channel and session.channel_user_id:
+            from src.repositories.identity_store import identity_store
+            p = identity_store.get_phone_for_channel_user(session.channel, session.channel_user_id)
+            if p:
+                return p
+        if hasattr(repo, "get_customer") and session.channel and session.channel_user_id:
+            try:
+                cust = repo.get_customer(session.tenant_id, session.channel, str(session.channel_user_id))
+                if cust and cust.phone:
+                    return cust.phone
+            except Exception:
+                pass
+        return None
+
+    @classmethod
     async def process_event(
         cls,
         session_id: str,
@@ -1079,7 +1112,19 @@ class FlowRouter:
             lng = float(location["longitude"])
             resolved_name = reverse_geocode(lat, lng)
 
-            # Validación de ubicación compartida con Inteligencia Artificial
+            # Validación de ubicación física a Mazatlán (< 35km) y semántica con Inteligencia Artificial
+            if session.tenant_id == "petroil":
+                from src.services.geocoding import calculate_distance_km, DEFAULT_LAT, DEFAULT_LNG
+                dist = calculate_distance_km(lat, lng, DEFAULT_LAT, DEFAULT_LNG)
+                if dist > 35.0:
+                    telemetry.record_message(channel=channel, is_llm=False)
+                    return FlowResponse(
+                        text="⚠️ Por el momento nuestro servicio de Gas a tu Puerta tiene cobertura exclusivamente en la ciudad de Mazatlán, Sinaloa. Por favor proporciona una dirección o ubicación dentro de Mazatlán 📍:",
+                        state=session.state,
+                        is_llm=False,
+                        action_performed="ask_new_customer_address",
+                    )
+
             target_city_lbl = _get_city_context_for_tenant(session.tenant_id)
             gps_val = await validate_address_with_llm(
                 f"{resolved_name} (GPS: {lat:.6f}, {lng:.6f})",
@@ -1093,7 +1138,7 @@ class FlowRouter:
                     text=clean_fb,
                     state=session.state,
                     is_llm=True,
-                    action_performed=None,
+                    action_performed="ask_new_customer_address",
                 )
 
             # 2.1 Verificar si quien envía la ubicación es un CHOFER en turno activo
@@ -1102,8 +1147,6 @@ class FlowRouter:
             is_in_order_flow = (
                 session.state not in (FlowState.INITIAL, FlowState.COMPLETED, FlowState.CANCELLED)
                 or bool(session.draft_order.items)
-                or bool(session.draft_order.customer_phone)
-                or bool(session.draft_order.customer_name)
                 or bool(session.cart)
             )
 
@@ -1143,50 +1186,51 @@ class FlowRouter:
                     )
                     return FlowResponse(text=resp_text, state=session.state, is_llm=False, action_performed=None)
 
-            # 2.2 Verificar si el cliente ya tiene un PEDIDO ACTIVO o FINALIZADO
+            # 2.2 Verificar si el cliente ya tiene un PEDIDO ACTIVO o FINALIZADO (solo si NO está creando un nuevo pedido)
             active_order = None
-            if session.draft_order.created_order_id:
-                active_order = repo.get_order_by_id(session.tenant_id, session.draft_order.created_order_id)
-                if active_order and active_order.status not in ("created", "confirmed", "assigned", "in_route", "scheduled", "en_ruta", "programado"):
-                    active_order = None
+            if not is_in_order_flow:
+                if session.draft_order.created_order_id:
+                    active_order = repo.get_order_by_id(session.tenant_id, session.draft_order.created_order_id)
+                    if active_order and active_order.status not in ("created", "confirmed", "assigned", "in_route", "scheduled", "en_ruta", "programado"):
+                        active_order = None
 
-            if not active_order:
-                phone_cand = session.draft_order.customer_phone or ""
-                if not phone_cand and channel_user_id:
-                    clean_dig = re.sub(r"\D", "", str(channel_user_id))
-                    if len(clean_dig) >= 10:
-                        phone_cand = clean_dig[-10:]
-                if not phone_cand and hasattr(repo, "get_customer"):
-                    try:
-                        cust = repo.get_customer(session.tenant_id, channel, str(channel_user_id))
-                        if cust and cust.phone:
-                            phone_cand = cust.phone
-                    except Exception:
-                        pass
-                if phone_cand and hasattr(repo, "get_orders_by_customer_phone"):
-                    try:
-                        user_orders = repo.get_orders_by_customer_phone(session.tenant_id, phone_cand, limit=5)
-                        active_order = next((o for o in user_orders if o.status in ("created", "confirmed", "assigned", "in_route", "scheduled", "en_ruta", "programado")), None)
-                    except Exception:
-                        pass
+                if not active_order:
+                    phone_cand = session.draft_order.customer_phone or ""
+                    if not phone_cand and channel_user_id:
+                        clean_dig = re.sub(r"\D", "", str(channel_user_id))
+                        if len(clean_dig) >= 10:
+                            phone_cand = clean_dig[-10:]
+                    if not phone_cand and hasattr(repo, "get_customer"):
+                        try:
+                            cust = repo.get_customer(session.tenant_id, channel, str(channel_user_id))
+                            if cust and cust.phone:
+                                phone_cand = cust.phone
+                        except Exception:
+                            pass
+                    if phone_cand and hasattr(repo, "get_orders_by_customer_phone"):
+                        try:
+                            user_orders = repo.get_orders_by_customer_phone(session.tenant_id, phone_cand, limit=5)
+                            active_order = next((o for o in user_orders if o.status in ("created", "confirmed", "assigned", "in_route", "scheduled", "en_ruta", "programado")), None)
+                        except Exception:
+                            pass
 
-            if active_order or session.state == FlowState.COMPLETED:
-                ord_id = active_order.id if active_order else (session.draft_order.created_order_id or "")
-                if ord_id and hasattr(repo, "update_order_delivery_coords"):
-                    repo.update_order_delivery_coords(session.tenant_id, ord_id, lat, lng, None)
-                session.draft_order.delivery_lat = lat
-                session.draft_order.delivery_lng = lng
-                curr_act_addr = (session.draft_order.delivery_address or "").strip()
-                if not curr_act_addr or curr_act_addr.lower().startswith("ubicaci") or bool(re.match(r"^[-0-9\.\,\s]+$", curr_act_addr)):
-                    session.draft_order.delivery_address = resolved_name
-                logger.info(f"📍 GPS de entrega actualizado para pedido #{ord_id}: ({lat}, {lng})")
+                if active_order or session.state == FlowState.COMPLETED:
+                    ord_id = active_order.id if active_order else (session.draft_order.created_order_id or "")
+                    if ord_id and hasattr(repo, "update_order_delivery_coords"):
+                        repo.update_order_delivery_coords(session.tenant_id, ord_id, lat, lng, None)
+                    session.draft_order.delivery_lat = lat
+                    session.draft_order.delivery_lng = lng
+                    curr_act_addr = (session.draft_order.delivery_address or "").strip()
+                    if not curr_act_addr or curr_act_addr.lower().startswith("ubicaci") or bool(re.match(r"^[-0-9\.\,\s]+$", curr_act_addr)):
+                        session.draft_order.delivery_address = resolved_name
+                    logger.info(f"📍 GPS de entrega actualizado para pedido #{ord_id}: ({lat}, {lng})")
 
-                display_addr = session.draft_order.delivery_address or resolved_name
-                resp_text = (
-                    f"📍 **¡Ubicación GPS recibida con éxito!**\n**{display_addr}**\n\n"
-                    f"Hemos registrado las coordenadas para tu pedido activo. Tu repartidor podrá guiarse directamente a este punto. 🚚✨"
-                )
-                return FlowResponse(text=resp_text, state=session.state, is_llm=False, action_performed=None)
+                    display_addr = session.draft_order.delivery_address or resolved_name
+                    resp_text = (
+                        f"📍 **¡Ubicación GPS recibida con éxito!**\n**{display_addr}**\n\n"
+                        f"Hemos registrado las coordenadas para tu pedido activo. Tu repartidor podrá guiarse directamente a este punto. 🚚✨"
+                    )
+                    return FlowResponse(text=resp_text, state=session.state, is_llm=False, action_performed=None)
 
             # 2.3 Captura de dirección de entrega para el pedido del cliente
             session.draft_order.delivery_lat = lat
@@ -1194,14 +1238,21 @@ class FlowRouter:
             session.draft_order.delivery_address = resolved_name
 
             # Guardar o actualizar la dirección en la cuenta del cliente en la BD para pedidos futuros
-            if session.draft_order.customer_name or session.draft_order.customer_phone:
+            phone_val = session.draft_order.customer_phone
+            if not phone_val and session.channel and session.channel_user_id:
+                from src.repositories.identity_store import identity_store
+                phone_val = identity_store.get_phone_for_channel_user(session.channel, str(session.channel_user_id))
+                if phone_val:
+                    session.draft_order.customer_phone = phone_val
+
+            if session.draft_order.customer_name or phone_val:
                 try:
                     cust = repo.save_or_update_customer(
                         tenant_id=session.tenant_id,
                         channel=session.channel,
-                        channel_user_id=session.channel_user_id or session.draft_order.customer_phone,
+                        channel_user_id=session.channel_user_id or phone_val,
                         name=session.draft_order.customer_name or "Cliente",
-                        phone=session.draft_order.customer_phone,
+                        phone=phone_val,
                         address=resolved_name,
                         latitude=lat,
                         longitude=lng,
@@ -1212,6 +1263,9 @@ class FlowRouter:
                             address=resolved_name,
                             notes=session.draft_order.notes or "",
                         )
+                    if phone_val:
+                        from src.repositories.identity_store import identity_store
+                        identity_store.unmark_address_deleted(phone_val, resolved_name)
                 except Exception as e:
                     logger.debug(f"[FlowRouter] Error guardando cliente con GPS en repo: {e}")
 
@@ -1552,7 +1606,28 @@ class FlowRouter:
                         state=session.state,
                         action_performed="ask_new_customer_address",
                     )
-            elif curr in (FlowState.WAITING_FOR_ADDRESS_SELECTION, FlowState.WAITING_FOR_NEW_CUSTOMER_ADDRESS, FlowState.WAITING_FOR_NEW_CUSTOMER_NAME):
+            elif curr == FlowState.WAITING_FOR_NEW_CUSTOMER_ADDRESS:
+                phone_val = draft.customer_phone or (identity_store.get_phone_for_channel_user(session.channel, session.channel_user_id) if session.channel and session.channel_user_id else None)
+                cust = repo.get_customer_by_phone(session.tenant_id, phone_val) if phone_val else None
+                addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if (cust and cust.address) else [])
+                if phone_val:
+                    addrs = [a for a in addrs if not identity_store.is_address_deleted(phone_val, a.address)]
+                addrs = [a for a in addrs if a.address and a.address.strip().lower() not in ("mazatlán", "mazatlan", "culiacán", "culiacan", "sinaloa", "mexico", "méxico")]
+                if addrs:
+                    session.state = FlowState.WAITING_FOR_ADDRESS_SELECTION
+                    return FlowResponse(
+                        text="Regresamos a tus direcciones registradas. 📍\n\n¿A cuál de tus direcciones guardadas deseas que enviemos tu pedido?",
+                        state=session.state,
+                        action_performed="show_address_buttons",
+                    )
+                else:
+                    session.state = FlowState.WAITING_FOR_PHONE
+                    return FlowResponse(
+                        text="Regresamos al paso anterior. 📱\n\nPor favor indícame tu **número celular a 10 dígitos**:",
+                        state=session.state,
+                        action_performed="ask_phone",
+                    )
+            elif curr in (FlowState.WAITING_FOR_ADDRESS_SELECTION, FlowState.WAITING_FOR_NEW_CUSTOMER_NAME):
                 session.state = FlowState.WAITING_FOR_PHONE
                 return FlowResponse(
                     text="Regresamos al paso anterior. 📱\n\nPor favor indícame tu **número celular a 10 dígitos**:",
@@ -1612,9 +1687,18 @@ class FlowRouter:
         # 1. Tipo de servicio (Inicia un pedido 100% fresco sin mezclar datos del pedido anterior)
         if data.startswith("client_svc:"):
             svc = data.split(":")[1]
+            prev_phone = cls._get_known_phone_for_session(session, repo)
             session.draft_order = DraftOrder()
             session.cart = {}
             draft = session.draft_order
+            if prev_phone:
+                draft.customer_phone = prev_phone
+                try:
+                    cust_prev = repo.get_customer_by_phone(session.tenant_id, prev_phone) if hasattr(repo, "get_customer_by_phone") else None
+                    if cust_prev and cust_prev.name:
+                        draft.customer_name = cust_prev.name
+                except Exception:
+                    pass
             if svc == "cilindro":
                 session.state = FlowState.WAITING_FOR_PRODUCT_OR_QUANTITY
                 draft.service_type = "cilindro"
@@ -1691,11 +1775,18 @@ class FlowRouter:
 
             session.cart = {}
 
-            # Paso 4: Solicitar número celular a 10 dígitos SIEMPRE tras confirmar productos
+            # Si ya se conoce el teléfono del cliente (por vinculación previa), avanzar directo a dirección
+            known_phone = draft.customer_phone or cls._get_known_phone_for_session(session, repo)
+            if known_phone:
+                draft.customer_phone = known_phone
+                return await cls._advance_after_phone(session, known_phone, repo)
+
+            # Paso 4: Solicitar número celular a 10 dígitos si no se conoce
             session.state = FlowState.WAITING_FOR_PHONE
             return FlowResponse(
                 text="¡Excelente selección! 🛒\n\nPara continuar con tu pedido, por favor compárteme tu **número celular** (a 10 dígitos) para buscar tu cuenta:",
                 state=session.state,
+                action_performed="ask_phone",
             )
 
         # 3. Callbacks de Eliminación y Gestión de Direcciones
@@ -1826,13 +1917,22 @@ class FlowRouter:
             else:
                 phone_val = (
                     draft.customer_phone
-                    or (identity_store.get_phone_for_channel_user(session.channel, session.channel_user_id) if session.channel and session.channel_user_id else None)
+                    or (identity_store.get_phone_for_channel_user(session.channel, str(session.channel_user_id)) if session.channel and session.channel_user_id else None)
                 )
                 cust = repo.get_customer_by_phone(session.tenant_id, phone_val) if phone_val else None
                 if not cust and not phone_val and session.channel_user_id:
-                    cust = repo.get_customer(session.tenant_id, session.channel, session.channel_user_id)
+                    cust = repo.get_customer(session.tenant_id, session.channel, str(session.channel_user_id))
 
-                addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if (cust and cust.address) else [])
+                addrs = cust.addresses if (cust and cust.addresses) else []
+                if not addrs and cust and hasattr(repo, "get_customer_addresses") and cust.id:
+                    direct = repo.get_customer_addresses(cust.id)
+                    if direct:
+                        addrs = list(direct)
+                if not addrs and cust and cust.address:
+                    addrs = [CustomerAddress(id=1, address=cust.address, alias="Principal")]
+                if phone_val:
+                    addrs = [a for a in addrs if not identity_store.is_address_deleted(phone_val, a.address)]
+                addrs = [a for a in addrs if a.address and a.address.strip().lower() not in ("mazatlán", "mazatlan", "culiacán", "culiacan", "sinaloa", "mexico", "méxico")]
 
                 # Si estábamos en modo de eliminación y se pulsó un botón client_addr:X
                 if getattr(session, "_is_deleting_address", False):
@@ -2090,6 +2190,10 @@ class FlowRouter:
                 telemetry.record_message(channel=session.channel, is_llm=False)
                 draft.service_type = "cilindro"
                 draft.items = cyl_items
+                known_phone = draft.customer_phone or cls._get_known_phone_for_session(session, repo)
+                if known_phone:
+                    draft.customer_phone = known_phone
+                    return await cls._advance_after_phone(session, known_phone, repo)
                 session.state = FlowState.WAITING_FOR_PHONE
                 items_str = ", ".join(f"{it['quantity']}x {it['product_name']}" for it in cyl_items)
                 return FlowResponse(
@@ -2124,6 +2228,10 @@ class FlowRouter:
                 telemetry.record_message(channel=session.channel, is_llm=False)
                 draft.service_type = "estacionario"
                 draft.items = est_items
+                known_phone = draft.customer_phone or cls._get_known_phone_for_session(session, repo)
+                if known_phone:
+                    draft.customer_phone = known_phone
+                    return await cls._advance_after_phone(session, known_phone, repo)
                 session.state = FlowState.WAITING_FOR_PHONE
                 st_q = est_items[0]["quantity"]
                 st_p = est_items[0]["unit_price"]
@@ -2203,6 +2311,10 @@ class FlowRouter:
                         "quantity": qty,
                         "unit_price": matched_p.price,
                     }]
+                    known_phone = draft.customer_phone or cls._get_known_phone_for_session(session, repo)
+                    if known_phone:
+                        draft.customer_phone = known_phone
+                        return await cls._advance_after_phone(session, known_phone, repo)
                     session.state = FlowState.WAITING_FOR_PHONE
                     return FlowResponse(
                         text=f"¡Anotado! 📝 Has seleccionado: **{qty}x {matched_p.name}** (${qty * matched_p.price:,.2f} MXN).\n\nPor favor indícame tu **número celular** (10 dígitos) para continuar:",
@@ -2234,8 +2346,10 @@ class FlowRouter:
             if est_items:
                 telemetry.record_message(channel=session.channel, is_llm=False)
                 draft.items = est_items
-                if draft.customer_phone:
-                    return await cls._advance_after_phone(session, draft.customer_phone, repo)
+                known_phone = draft.customer_phone or cls._get_known_phone_for_session(session, repo)
+                if known_phone:
+                    draft.customer_phone = known_phone
+                    return await cls._advance_after_phone(session, known_phone, repo)
 
                 session.state = FlowState.WAITING_FOR_PHONE
                 st_q = est_items[0]["quantity"]
@@ -2277,6 +2391,10 @@ class FlowRouter:
                         "quantity": liters,
                         "unit_price": unit_price,
                     }]
+                    known_phone = draft.customer_phone or cls._get_known_phone_for_session(session, repo)
+                    if known_phone:
+                        draft.customer_phone = known_phone
+                        return await cls._advance_after_phone(session, known_phone, repo)
                     session.state = FlowState.WAITING_FOR_PHONE
                     return FlowResponse(
                         text=f"¡Anotado! 🚛 **{liters:g} L {st_name}** (${amt_val:,.2f} MXN).\n\nPor favor indícame tu **número celular** (10 dígitos) para buscar tu cuenta:",
@@ -2356,12 +2474,21 @@ class FlowRouter:
 
             phone_val = (
                 draft.customer_phone
-                or (identity_store.get_phone_for_channel_user(session.channel, session.channel_user_id) if session.channel and session.channel_user_id else None)
+                or (identity_store.get_phone_for_channel_user(session.channel, str(session.channel_user_id)) if session.channel and session.channel_user_id else None)
             )
             cust = repo.get_customer_by_phone(session.tenant_id, phone_val) if phone_val else None
             if not cust and not phone_val and session.channel_user_id:
-                cust = repo.get_customer(session.tenant_id, session.channel, session.channel_user_id)
-            addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if (cust and cust.address) else [])
+                cust = repo.get_customer(session.tenant_id, session.channel, str(session.channel_user_id))
+            addrs = cust.addresses if (cust and cust.addresses) else []
+            if not addrs and cust and hasattr(repo, "get_customer_addresses") and cust.id:
+                direct = repo.get_customer_addresses(cust.id)
+                if direct:
+                    addrs = list(direct)
+            if not addrs and cust and cust.address:
+                addrs = [CustomerAddress(id=1, address=cust.address, alias="Principal")]
+            if phone_val:
+                addrs = [a for a in addrs if not identity_store.is_address_deleted(phone_val, a.address)]
+            addrs = [a for a in addrs if a.address and a.address.strip().lower() not in ("mazatlán", "mazatlan", "culiacán", "culiacan", "sinaloa", "mexico", "méxico")]
             # 0.5. Flujo de eliminación de dirección guardada
             is_del_kw = any(k in text.lower() for k in ["borrar", "eliminar", "quitar", "borra", "elimina", "🗑️", "del_addr"])
             pending_del_aid = getattr(session, "_pending_delete_address_id", None)
@@ -2560,6 +2687,30 @@ class FlowRouter:
                         draft.delivery_lng = None
                 except Exception:
                     pass
+                # Guardar cliente en base de datos con la nueva dirección
+                try:
+                    cust_p = repo.save_or_update_customer(
+                        tenant_id=session.tenant_id,
+                        channel=session.channel,
+                        channel_user_id=session.channel_user_id or draft.customer_phone,
+                        name=draft.customer_name or "Cliente",
+                        phone=draft.customer_phone,
+                        address=draft.delivery_address,
+                        latitude=draft.delivery_lat,
+                        longitude=draft.delivery_lng,
+                    )
+                    if cust_p and hasattr(repo, "add_customer_address"):
+                        repo.add_customer_address(
+                            customer_id=cust_p.id,
+                            address=draft.delivery_address,
+                            notes=draft.notes or "",
+                        )
+                    if draft.customer_phone:
+                        from src.repositories.identity_store import identity_store
+                        identity_store.unmark_address_deleted(draft.customer_phone, draft.delivery_address)
+                except Exception as e:
+                    logger.debug(f"[FlowRouter] Error guardando cliente con nueva dirección en repo: {e}")
+
                 session.state = FlowState.WAITING_FOR_SCHEDULE
                 return FlowResponse(
                     text=f"📍 Dirección verificada: **{draft.delivery_address}**\n\n¿Para **qué día y horario** deseas tu entrega?\nSelecciona una opción en los botones o indícanos tu horario preferido:",
@@ -2636,6 +2787,25 @@ class FlowRouter:
 
             telemetry.record_message(channel=session.channel, is_llm=False)
             draft.customer_name = clean_name.title()
+            if draft.customer_phone:
+                try:
+                    cust_to_update = repo.get_customer_by_phone(session.tenant_id, draft.customer_phone)
+                    if cust_to_update:
+                        cust_to_update.name = draft.customer_name
+                        repo.save_customer(cust_to_update)
+                except Exception:
+                    pass
+
+            # Si ya se tenía dirección de entrega (estaba editando o confirmando), volver al resumen de confirmación
+            if draft.delivery_address:
+                session.state = FlowState.WAITING_FOR_CONFIRMATION
+                summary_text = build_order_summary_text(draft)
+                return FlowResponse(
+                    text=f"✅ Tu nombre ha sido actualizado a **{draft.customer_name}**.\n\n{summary_text}",
+                    state=session.state,
+                    action_performed="show_confirmation",
+                )
+
             session.state = FlowState.WAITING_FOR_NEW_CUSTOMER_ADDRESS
             return FlowResponse(
                 text=f"¡Mucho gusto, **{draft.customer_name}**! 🤝\n\nPor favor compárteme tu **dirección de entrega completa** (calle, número, colonia y referencias como color de portón/fachada) o comparte tu **ubicación GPS** 📍:",
@@ -2674,8 +2844,33 @@ class FlowRouter:
                         action_performed="show_service_buttons",
                     )
 
-            # 1.1 Si la dirección ya fue registrada por GPS (o previamente) y el usuario solo asiente/confirma ("ok", "okey", "listo", "ya")
+            # 1.1 Si el usuario se arrepiente y pide regresar / atrás / cancelar
             t_clean_addr = text.lower().strip()
+            if t_clean_addr in ("atras", "atrás", "volver", "regresar", "cancelar", "cancel", "salir") or any(re.search(r"^\s*(?:" + re.escape(w) + r")\s*[\.!\?]?$", t_clean_addr) for w in ["atras", "atrás", "volver", "regresar", "cancelar", "cancel", "salir"]):
+                phone_val = draft.customer_phone or (identity_store.get_phone_for_channel_user(session.channel, session.channel_user_id) if session.channel and session.channel_user_id else None)
+                cust = repo.get_customer_by_phone(session.tenant_id, phone_val) if phone_val else None
+                addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if (cust and cust.address) else [])
+                if phone_val:
+                    addrs = [a for a in addrs if not identity_store.is_address_deleted(phone_val, a.address)]
+                addrs = [a for a in addrs if a.address and a.address.strip().lower() not in ("mazatlán", "mazatlan", "culiacán", "culiacan", "sinaloa", "mexico", "méxico")]
+                if addrs:
+                    session.state = FlowState.WAITING_FOR_ADDRESS_SELECTION
+                    return FlowResponse(
+                        text="Regresamos a tus direcciones registradas. 📍\n\n¿A cuál de tus direcciones guardadas deseas que enviemos tu pedido?",
+                        state=session.state,
+                        action_performed="show_address_buttons",
+                    )
+                else:
+                    session.draft_order = DraftOrder()
+                    session.cart = {}
+                    session.state = FlowState.INITIAL
+                    return FlowResponse(
+                        text="ℹ️ **Operación cancelada.** Con gusto te atendemos de nuevo.\n\n¿Qué tipo de servicio necesitas hoy?",
+                        state=session.state,
+                        action_performed="show_service_buttons",
+                    )
+
+            # 1.2 Si la dirección ya fue registrada por GPS (o previamente) y el usuario solo asiente/confirma ("ok", "okey", "listo", "ya")
             es_asentimiento = any(re.search(r"^\s*(?:" + re.escape(w) + r")\s*[\.!\?]?$", t_clean_addr) for w in [
                 "ok", "okey", "okay", "listo", "ya", "ya quedo", "ya quedó", "sale", "va", "vale", "bien", "esta bien", "está bien", "perfecto"
             ])
@@ -2749,6 +2944,9 @@ class FlowRouter:
                         address=draft.delivery_address,
                         notes=draft.notes or "",
                     )
+                if draft.customer_phone:
+                    from src.repositories.identity_store import identity_store
+                    identity_store.unmark_address_deleted(draft.customer_phone, draft.delivery_address)
             except Exception as e:
                 logger.debug(f"[FlowRouter] Error guardando cliente en repo: {e}")
 

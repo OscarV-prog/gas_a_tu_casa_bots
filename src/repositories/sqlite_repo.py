@@ -547,6 +547,69 @@ class SqliteRepository(ProductRepository):
                 updated_at=now_iso,
             )
 
+    def update_customer_address(
+        self,
+        customer_id: int | str,
+        address_id: int | str,
+        new_address: str,
+        new_alias: str | None = None,
+        phone: str | None = None,
+        old_address: str | None = None,
+    ) -> bool:
+        """Update an existing delivery address for a customer in SQLite."""
+        clean_addr = resolve_gps_address_to_name(new_address.strip())
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with get_db_connection() as conn:
+            aid = None
+            row = None
+            if str(address_id).isdigit():
+                cur = conn.execute(
+                    "SELECT * FROM customer_addresses WHERE id = ? AND customer_id = ?",
+                    (int(address_id), customer_id),
+                )
+                row = cur.fetchone()
+                if row:
+                    aid = row["id"]
+            if not row and old_address:
+                cur = conn.execute(
+                    "SELECT * FROM customer_addresses WHERE customer_id = ? AND LOWER(TRIM(address)) = LOWER(?)",
+                    (customer_id, old_address.strip()),
+                )
+                row = cur.fetchone()
+                if row:
+                    aid = row["id"]
+            if not row and str(address_id).isdigit():
+                cur = conn.execute(
+                    "SELECT * FROM customer_addresses WHERE id = ?",
+                    (int(address_id),),
+                )
+                row = cur.fetchone()
+                if row:
+                    aid = row["id"]
+
+            if aid:
+                if new_alias:
+                    conn.execute(
+                        "UPDATE customer_addresses SET address = ?, alias = ?, updated_at = ? WHERE id = ?",
+                        (clean_addr, new_alias, now_iso, aid),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE customer_addresses SET address = ?, updated_at = ? WHERE id = ?",
+                        (clean_addr, now_iso, aid),
+                    )
+                if row and row["is_default"]:
+                    conn.execute(
+                        "UPDATE customers SET address = ?, updated_at = ? WHERE id = ?",
+                        (clean_addr, now_iso, customer_id),
+                    )
+                conn.commit()
+                return True
+            else:
+                self.add_customer_address(customer_id, clean_addr, alias=new_alias or "Dirección")
+                return True
+        return False
+
     def delete_customer_address(self, customer_id: int | str, address_id: int | str, phone: str | None = None, address_text: str | None = None) -> bool:
         """Delete a delivery address for a customer from SQLite."""
         with get_db_connection() as conn:
@@ -604,6 +667,57 @@ class SqliteRepository(ProductRepository):
     # Customers
     # ------------------------------------------------------------------
 
+    def delete_customer(
+        self,
+        tenant_id: str,
+        customer_id: int | str | None = None,
+        phone: str | None = None,
+        channel: str | None = None,
+        channel_user_id: str | None = None,
+    ) -> bool:
+        """Completely delete customer profile and their saved addresses from SQLite."""
+        clean_phone = re.sub(r"\D", "", str(phone or ""))
+        clean_10 = clean_phone[-10:] if len(clean_phone) >= 10 else clean_phone
+
+        with get_db_connection() as conn:
+            target_ids = []
+            if customer_id and str(customer_id).isdigit():
+                target_ids.append(int(customer_id))
+            if clean_10:
+                rows = conn.execute("SELECT id, phone FROM customers WHERE tenant_id = ?", (tenant_id,)).fetchall()
+                for r in rows:
+                    r_phone = re.sub(r"\D", "", r["phone"] or "")
+                    if r_phone[-10:] == clean_10:
+                        target_ids.append(r["id"])
+            if channel and channel_user_id:
+                rows = conn.execute(
+                    "SELECT id FROM customers WHERE tenant_id = ? AND channel = ? AND channel_user_id = ?",
+                    (tenant_id, channel, str(channel_user_id)),
+                ).fetchall()
+                for r in rows:
+                    target_ids.append(r["id"])
+
+            target_ids = list(set(target_ids))
+            if not target_ids:
+                return False
+
+            for tid in target_ids:
+                conn.execute("DELETE FROM customer_addresses WHERE customer_id = ?", (tid,))
+                conn.execute("DELETE FROM customers WHERE id = ?", (tid,))
+                logger.info(f"🗑️ [SQLiteRepo] Customer #{tid} deleted successfully.")
+            return True
+
+    def save_customer(self, customer: Customer) -> Customer:
+        """Save or update customer from a Customer object."""
+        return self.save_or_update_customer(
+            tenant_id=customer.tenant_id,
+            channel=customer.channel,
+            channel_user_id=str(customer.channel_user_id or customer.id),
+            name=customer.name,
+            phone=customer.phone,
+            address=customer.address,
+        )
+
     def save_or_update_customer(
         self,
         tenant_id: str,
@@ -613,6 +727,7 @@ class SqliteRepository(ProductRepository):
         phone: str = "",
         address: str = "",
         notes: str = "",
+        **kwargs: Any,
     ) -> Customer:
         """Save or update customer profile in SQLite, managing multiple addresses across channels."""
         now_iso = datetime.now(timezone.utc).isoformat()

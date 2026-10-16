@@ -17,6 +17,7 @@ from telegram import (
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     Update,
 )
 from telegram.constants import ChatAction
@@ -34,7 +35,7 @@ from src.config.settings import get_settings
 from src.config.tenant_config import get_tenant
 from src.database import init_db
 from src.graphs.sales_graph import compile_sales_graph
-from src.models.customer import CustomerAddress
+from src.models.customer import Customer, CustomerAddress
 from src.repositories import get_repository
 from src.services.audio_transcription import transcribe_audio_file
 from src.services.flow_router import FlowResponse, FlowState, flow_router, get_or_create_session
@@ -55,7 +56,7 @@ TENANT_ID = "gascytsa"
 tenant = get_tenant(TENANT_ID)
 graph = compile_sales_graph()
 
-# Token del bot de clientes (Gascytsa)
+# Token del bot de clientes (Gascytsa - Culiacán)
 settings = get_settings()
 
 
@@ -87,13 +88,36 @@ def get_markup_for_flow_response(flow_res: FlowResponse, phone: str = "", user_i
         return None
 
     # Los estados que requieren texto libre del usuario NUNCA deben mostrar botones interactivos
+    # EXCEPTO cuando se solicita nueva dirección, donde se debe permitir regresar
     if flow_res.state in (
         FlowState.WAITING_FOR_PHONE,
         FlowState.WAITING_FOR_NEW_CUSTOMER_NAME,
-        FlowState.WAITING_FOR_NEW_CUSTOMER_ADDRESS,
         FlowState.WAITING_FOR_STATIONARY_DETAILS,
     ):
         return None
+
+    if flow_res.state == FlowState.WAITING_FOR_NEW_CUSTOMER_ADDRESS or flow_res.action_performed in ("ask_new_address", "ask_new_customer_address"):
+        repo = get_repository()
+        from src.repositories.identity_store import identity_store
+        eff_phone = phone
+        if not eff_phone and user_id:
+            eff_phone = identity_store.get_phone_for_channel_user("telegram", str(user_id)) or ""
+        cust = repo.get_customer_by_phone(TENANT_ID, eff_phone) if eff_phone else None
+        if not cust and user_id:
+            cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
+        addrs = cust.addresses if (cust and cust.addresses) else []
+        if not addrs and cust and hasattr(repo, "get_customer_addresses") and cust.id:
+            addrs = repo.get_customer_addresses(cust.id)
+        if eff_phone:
+            addrs = [a for a in addrs if not identity_store.is_address_deleted(eff_phone, a.address)]
+        addrs = [a for a in addrs if a.address and a.address.strip().lower() not in ("mazatlán", "mazatlan", "culiacán", "culiacan", "sinaloa", "mexico", "méxico")]
+        if addrs:
+            return InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Volver a mis direcciones", callback_data="client_addr_back")]
+            ])
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Cancelar pedido", callback_data="client_confirm:cancel")]
+        ])
 
     if flow_res.action_performed == "show_service_buttons" or flow_res.state == FlowState.INITIAL:
         return get_botones_tipo_servicio()
@@ -101,10 +125,19 @@ def get_markup_for_flow_response(flow_res: FlowResponse, phone: str = "", user_i
         return get_botones_productos_cilindros()
     elif flow_res.action_performed == "show_delete_address_buttons":
         repo = get_repository()
-        cust = repo.get_customer_by_phone(TENANT_ID, phone) if phone else None
-        if not cust and not phone and user_id:
+        from src.repositories.identity_store import identity_store
+        eff_phone = phone
+        if not eff_phone and user_id:
+            eff_phone = identity_store.get_phone_for_channel_user("telegram", str(user_id)) or ""
+        cust = repo.get_customer_by_phone(TENANT_ID, eff_phone) if eff_phone else None
+        if not cust and user_id:
             cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
         addrs = cust.addresses if (cust and cust.addresses) else []
+        if not addrs and cust and hasattr(repo, "get_customer_addresses") and cust.id:
+            addrs = repo.get_customer_addresses(cust.id)
+        if eff_phone:
+            addrs = [a for a in addrs if not identity_store.is_address_deleted(eff_phone, a.address)]
+        addrs = [a for a in addrs if a.address and a.address.strip().lower() not in ("mazatlán", "mazatlan", "culiacán", "culiacan", "sinaloa", "mexico", "méxico")]
         if addrs:
             return get_botones_eliminar_direcciones(addrs)
         return None
@@ -117,10 +150,21 @@ def get_markup_for_flow_response(flow_res: FlowResponse, phone: str = "", user_i
         ])
     elif flow_res.action_performed == "show_address_buttons" or flow_res.state == FlowState.WAITING_FOR_ADDRESS_SELECTION:
         repo = get_repository()
-        cust = repo.get_customer_by_phone(TENANT_ID, phone) if phone else None
-        if not cust and not phone and user_id:
+        from src.repositories.identity_store import identity_store
+        eff_phone = phone
+        if not eff_phone and user_id:
+            eff_phone = identity_store.get_phone_for_channel_user("telegram", str(user_id)) or ""
+        cust = repo.get_customer_by_phone(TENANT_ID, eff_phone) if eff_phone else None
+        if not cust and user_id:
             cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
-        addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if cust and cust.address else [])
+        addrs = cust.addresses if (cust and cust.addresses) else []
+        if not addrs and cust and hasattr(repo, "get_customer_addresses") and cust.id:
+            addrs = repo.get_customer_addresses(cust.id)
+        if not addrs and cust and cust.address:
+            addrs = [CustomerAddress(id=1, address=cust.address, alias="Principal")]
+        if eff_phone:
+            addrs = [a for a in addrs if not identity_store.is_address_deleted(eff_phone, a.address)]
+        addrs = [a for a in addrs if a.address and a.address.strip().lower() not in ("mazatlán", "mazatlan", "culiacán", "culiacan", "sinaloa", "mexico", "méxico")]
         if addrs:
             return get_botones_direcciones_cliente(addrs)
         return None
@@ -138,6 +182,25 @@ def get_markup_for_flow_response(flow_res: FlowResponse, phone: str = "", user_i
         if match_order:
             return get_botones_pedido_activo(match_order.group(1))
     return detectar_botones_mensaje(flow_res.text, phone=phone, channel_user_id=str(user_id))
+
+
+def get_botones_menu_principal() -> InlineKeyboardMarkup:
+    """Botones interactivos del menú principal para usuarios identificados."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📦 Hacer un Pedido", callback_data="menu:hacer_pedido")],
+        [InlineKeyboardButton("⚙️ Mi Cuenta", callback_data="menu:mi_cuenta")],
+    ])
+
+
+def get_teclado_registro() -> ReplyKeyboardMarkup:
+    """Teclado nativo con solicitud de contacto para vinculación inicial de dispositivo."""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("📱 Compartir mi número", request_contact=True)],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
 
 
 def get_teclado_cliente() -> ReplyKeyboardMarkup:
@@ -167,19 +230,164 @@ def get_botones_editar_opciones() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
+                InlineKeyboardButton("👤 Cambiar Mi Nombre", callback_data="account:edit_name"),
                 InlineKeyboardButton("⏰ Cambiar Horario", callback_data="client_edit:schedule"),
+            ],
+            [
                 InlineKeyboardButton("📍 Cambiar Dirección", callback_data="client_edit:address"),
-            ],
-            [
                 InlineKeyboardButton("💳 Cambiar Forma de Pago", callback_data="client_edit:payment"),
-                InlineKeyboardButton("📦 Cambiar Producto", callback_data="client_edit:product"),
             ],
             [
+                InlineKeyboardButton("📦 Cambiar Producto", callback_data="client_edit:product"),
                 InlineKeyboardButton("📱 Cambiar Teléfono", callback_data="client_edit:phone"),
+            ],
+            [
                 InlineKeyboardButton("🔙 Volver al Resumen", callback_data="client_edit:back"),
             ],
         ]
     )
+
+
+def get_registered_customer(user_id: str | int) -> Any | None:
+    """Obtiene el cliente registrado si ya tiene cuenta vinculada a este Telegram ID."""
+    repo = get_repository()
+    uid_str = str(user_id)
+    from src.repositories.identity_store import identity_store
+    mapped_phone = identity_store.get_phone_for_channel_user("telegram", uid_str)
+    if mapped_phone:
+        if identity_store.is_customer_deleted(mapped_phone):
+            return None
+        cust_by_phone = repo.get_customer_by_phone(TENANT_ID, mapped_phone)
+        if cust_by_phone:
+            return cust_by_phone
+    cust = repo.get_customer(TENANT_ID, "telegram", uid_str)
+    if cust and cust.phone:
+        if identity_store.is_customer_deleted(cust.phone):
+            return None
+        return cust
+    return None
+
+
+async def mostrar_menu_principal(update: Update, context: ContextTypes.DEFAULT_TYPE, name: str, phone: str) -> None:
+    """Muestra el menú principal al usuario registrado."""
+    target = update.message or (update.callback_query.message if update.callback_query else None)
+    if not target:
+        return
+    markup = get_botones_menu_principal()
+    text = (
+        f"👋 ¡Hola, **{name}**!\n"
+        f"📱 *Teléfono vinculado:* `{phone}`\n\n"
+        "¿Qué deseas hacer hoy?\n"
+        "Selecciona una opción a continuación:"
+    )
+    if update.callback_query:
+        try:
+            await update.callback_query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
+        except Exception:
+            await safe_reply_text(target, text, reply_markup=markup)
+    else:
+        await safe_reply_text(target, text, reply_markup=markup)
+
+
+async def mostrar_pantalla_cuenta(update: Update, context: ContextTypes.DEFAULT_TYPE, cust: Any) -> None:
+    """Muestra la pantalla de gestión de cuenta del cliente."""
+    context.user_data.pop("awaiting_account_new_address", None)
+    context.user_data.pop("awaiting_account_edit_address", None)
+    context.user_data.pop("editing_address_id", None)
+    context.user_data.pop("editing_address_idx", None)
+    context.user_data.pop("editing_address_old_text", None)
+    target = update.message or (update.callback_query.message if update.callback_query else None)
+    if not target:
+        return
+    repo = get_repository()
+    phone = cust.phone if cust else context.user_data.get("phone", "")
+    cust_full = repo.get_customer_by_phone(TENANT_ID, phone) if phone else cust
+    addrs = cust_full.addresses if (cust_full and cust_full.addresses) else []
+    if not addrs and cust_full and hasattr(repo, "get_customer_addresses") and cust_full.id:
+        addrs = repo.get_customer_addresses(cust_full.id)
+    from src.repositories.identity_store import identity_store
+    if phone:
+        addrs = [a for a in addrs if not identity_store.is_address_deleted(phone, a.address)]
+    addrs = [a for a in addrs if a.address.strip().lower() not in ("mazatlán", "mazatlan", "culiacán", "culiacan", "sinaloa")]
+    num_addrs = len(addrs)
+    text = (
+        "⚙️ **Gestión de Mi Cuenta**\n\n"
+        f"👤 **Nombre:** {cust.name}\n"
+        f"📱 **Teléfono registrado:** `{cust.phone}`\n"
+        f"📍 **Direcciones guardadas:** {num_addrs}\n\n"
+        "Elige la acción que deseas realizar:"
+    )
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Editar Mi Nombre", callback_data="account:edit_name")],
+        [InlineKeyboardButton("📍 Mis Direcciones Guardadas", callback_data="account:manage_addresses")],
+        [InlineKeyboardButton("🗑️ Dar de Baja Mi Cuenta", callback_data="account:delete_account")],
+        [InlineKeyboardButton("🔙 Volver al Menú Principal", callback_data="menu:main")],
+    ])
+    if update.callback_query:
+        try:
+            await update.callback_query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
+        except Exception:
+            await safe_reply_text(target, text, reply_markup=markup)
+    else:
+        await safe_reply_text(target, text, reply_markup=markup)
+
+
+async def mostrar_pantalla_direcciones_cuenta(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: str | int) -> None:
+    """Muestra y gestiona las direcciones guardadas desde la pantalla de cuenta."""
+    context.user_data.pop("awaiting_account_new_address", None)
+    context.user_data.pop("awaiting_account_edit_address", None)
+    context.user_data.pop("editing_address_id", None)
+    context.user_data.pop("editing_address_idx", None)
+    context.user_data.pop("editing_address_old_text", None)
+    target = update.message or (update.callback_query.message if update.callback_query else None)
+    if not target:
+        return
+    repo = get_repository()
+    cust = get_registered_customer(user_id)
+    phone = cust.phone if cust else context.user_data.get("phone", "")
+    cust_full = repo.get_customer_by_phone(TENANT_ID, phone) if phone else cust
+    addrs = cust_full.addresses if (cust_full and cust_full.addresses) else []
+    if not addrs and cust_full and hasattr(repo, "get_customer_addresses") and cust_full.id:
+        addrs = repo.get_customer_addresses(cust_full.id)
+    from src.repositories.identity_store import identity_store
+    if phone:
+        addrs = [a for a in addrs if not identity_store.is_address_deleted(phone, a.address)]
+    addrs = [a for a in addrs if a.address.strip().lower() not in ("mazatlán", "mazatlan", "culiacán", "culiacan", "sinaloa")]
+
+    botones = []
+    if addrs:
+        texto = (
+            "📍 **Mis Direcciones Guardadas**\n\n"
+            "Selecciona una dirección en los botones para ver detalles o elige una acción:"
+        )
+
+        for i, a in enumerate(addrs, 1):
+            clean_addr = resolve_gps_address_to_name(a.address.strip())
+            clean_addr = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_addr, flags=re.I).strip()
+            short_addr = f"{i}. 📍 {clean_addr}"
+            if len(short_addr) > 40:
+                short_addr = short_addr[:37] + "..."
+            botones.append([InlineKeyboardButton(short_addr, callback_data=f"account_addr:view:{a.id}:{i}")])
+
+        botones.append([InlineKeyboardButton("➕ Agregar Nueva Dirección", callback_data="account_addr:add")])
+    else:
+        texto = (
+            "📍 **Mis Direcciones Guardadas**\n\n"
+            "_Aún no tienes direcciones registradas en tu cuenta._\n\n"
+            "Puedes registrar una nueva dirección a continuación:"
+        )
+        botones.append([InlineKeyboardButton("➕ Agregar Nueva Dirección", callback_data="account_addr:add")])
+
+    botones.append([InlineKeyboardButton("🔙 Volver a Mi Cuenta", callback_data="menu:mi_cuenta")])
+
+    markup = InlineKeyboardMarkup(botones)
+    if update.callback_query:
+        try:
+            await update.callback_query.edit_message_text(texto, reply_markup=markup, parse_mode="Markdown")
+        except Exception:
+            await safe_reply_text(target, texto, reply_markup=markup)
+    else:
+        await safe_reply_text(target, texto, reply_markup=markup)
 
 
 
@@ -564,22 +772,35 @@ def detectar_botones_mensaje(respuesta: str, phone: str = "", channel_user_id: s
     ])
     if es_pregunta_direccion:
         repo = get_repository()
+        from src.repositories.identity_store import identity_store
+        eff_phone = phone
+        if not eff_phone and channel_user_id:
+            eff_phone = identity_store.get_phone_for_channel_user("telegram", str(channel_user_id)) or ""
         cust = None
-        if phone:
-            cust = repo.get_customer_by_phone(TENANT_ID, phone)
+        if eff_phone:
+            cust = repo.get_customer_by_phone(TENANT_ID, eff_phone)
         elif channel_user_id:
             cust = repo.get_customer(TENANT_ID, "telegram", str(channel_user_id))
-        if not cust and not phone:
+        if not cust and not eff_phone:
             match_resp_phone = re.search(r"\b(\d{10})\b", respuesta)
             if match_resp_phone:
-                cust = repo.get_customer_by_phone(TENANT_ID, match_resp_phone.group(1))
+                eff_phone = match_resp_phone.group(1)
+                cust = repo.get_customer_by_phone(TENANT_ID, eff_phone)
 
         addrs: list[CustomerAddress] = []
-        if cust and not addrs:
+        if cust:
             if cust.addresses:
                 addrs = list(cust.addresses)
-            elif cust.address:
+            elif hasattr(repo, "get_customer_addresses") and cust.id:
+                direct_addrs = repo.get_customer_addresses(cust.id)
+                if direct_addrs:
+                    addrs = list(direct_addrs)
+            if not addrs and cust.address:
                 addrs = [CustomerAddress(id=1, address=cust.address, alias="Principal")]
+
+        if eff_phone:
+            addrs = [a for a in addrs if not identity_store.is_address_deleted(eff_phone, a.address)]
+        addrs = [a for a in addrs if a.address and a.address.strip().lower() not in ("mazatlán", "mazatlan", "culiacán", "culiacan", "sinaloa", "mexico", "méxico")]
 
         # Si no se obtuvieron de la BD directamente, extraer las direcciones numeradas del propio mensaje
         if not addrs:
@@ -853,8 +1074,52 @@ def optimizar_respuesta_con_botones(respuesta: str, markup: InlineKeyboardMarkup
 
 
 
+async def recibir_contacto_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Procesar el contacto nativo compartido por el usuario para vincular su dispositivo."""
+    if not update.message or not update.message.contact:
+        return
+    if not update.effective_user or not update.effective_chat:
+        return
+
+    user = update.effective_user
+    user_id = user.id
+    raw_phone = update.message.contact.phone_number or ""
+    digits = re.sub(r"\D", "", raw_phone)
+    if digits.startswith("521") and len(digits) == 13:
+        phone = digits[3:]
+    elif digits.startswith("52") and len(digits) == 12:
+        phone = digits[2:]
+    elif len(digits) >= 10:
+        phone = digits[-10:]
+    else:
+        phone = digits
+
+    if len(phone) != 10:
+        await safe_reply_text(
+            update.message,
+            "⚠️ El número compartido no parece ser un número válido de 10 dígitos. Por favor escríbelo directamente en el chat:"
+        )
+        return
+
+    repo = get_repository()
+    context.user_data["phone"] = phone
+    context.user_data["awaiting_registration_name"] = True
+
+    from src.repositories.identity_store import identity_store
+    identity_store.bind_channel_user_phone("telegram", str(user_id), phone)
+    if hasattr(repo, "bind_telegram_user_phone"):
+        repo.bind_telegram_user_phone(str(user_id), phone)
+
+    await update.message.reply_text(
+        f"📱 ¡Número registrado con éxito! (`{phone}`)\n\n"
+        "Ahora, por favor **escribe tu nombre completo** para tu cuenta (ej. *Juan Pérez*):",
+        reply_markup=ReplyKeyboardRemove(),
+        parse_mode="Markdown",
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manejar comando /start e iniciar flujo de bienvenida sin llamadas a LLM."""
+    """Manejar comando /start: onboarding de dispositivo si no está registrado o menú principal."""
     if not update.effective_user or not update.message:
         return
 
@@ -862,31 +1127,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id if update.effective_chat else user_id
     thread_id = f"telegram:{TENANT_ID}:{chat_id}"
 
-    repo = get_repository()
-    bound_cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
-    if bound_cust and bound_cust.phone:
-        context.user_data["phone"] = bound_cust.phone
-        if hasattr(repo, "bind_telegram_user_phone"):
-            repo.bind_telegram_user_phone(str(user_id), bound_cust.phone)
-
-    # Reiniciar sesión para un pedido nuevo desde cero
+    # Reiniciar sesión para un flujo limpio
     from src.services.flow_router import clear_session
     clear_session(thread_id)
     context.user_data.pop("awaiting_rating_comment_order_id", None)
     context.user_data.pop("awaiting_rating_time", None)
     context.user_data.pop("carrito_cilindros", None)
+    context.user_data.pop("awaiting_account_name_edit", None)
 
-    flow_res = await flow_router.process_event(
-        session_id=thread_id,
-        text="/start",
-        channel="telegram",
-        channel_user_id=str(user_id),
-        tenant_id=TENANT_ID,
-    )
+    cust = get_registered_customer(user_id)
+    if not cust or not cust.phone:
+        texto_onboarding = (
+            "👋 ¡Bienvenido a **Gas a Tu Puerta - Petroil**! ⛽\n\n"
+            "Para brindarte un servicio personalizado y seguro (1 cuenta por dispositivo), "
+            "por favor pulsa el botón **'📱 Compartir mi número'** abajo para vincular tu cuenta:\n\n"
+            "_💡 También puedes escribir tu número celular a 10 dígitos directamente en el chat._"
+        )
+        await update.message.reply_text(
+            texto_onboarding,
+            reply_markup=get_teclado_registro(),
+            parse_mode="Markdown",
+        )
+        return
 
-    markup_start = get_botones_tipo_servicio()
-    respuesta = optimizar_respuesta_con_botones(flow_res.text, markup_start)
-    await safe_reply_text(update.message, respuesta, reply_markup=markup_start)
+    context.user_data["phone"] = cust.phone
+    repo = get_repository()
+    if hasattr(repo, "bind_telegram_user_phone"):
+        repo.bind_telegram_user_phone(str(user_id), cust.phone)
+
+    await mostrar_menu_principal(update, context, cust.name or "Cliente", cust.phone)
 
 
 async def safe_reply_text(message, text: str, reply_markup=None) -> Any:
@@ -908,12 +1177,12 @@ async def safe_reply_text(message, text: str, reply_markup=None) -> Any:
 
 MENSAJE_SEGURIDAD_ATENCION = (
     "Entiendo, pero no puedo decodificar, ejecutar ni procesar payloads de ese tipo. 🙅‍♂️\n\n"
-    "Mi función como asistente de **Gas a tu Puerta Gascytsa** es únicamente de atención al cliente:\n\n"
+    "Mi función como asistente de **Gas a Tu Puerta - Petroil** es únicamente de atención al cliente:\n\n"
     "- 🟢 **Realizar un pedido** de gas (cilindro o tanque estacionario)\n"
     "- 🔵 **Consultar el estatus** de tu pedido (folio o teléfono)\n"
     "- ❌ **Cancelar** un pedido tuyo\n\n"
     "No tengo capacidad ni autorización para ejecutar código, decodificar datos ni acceder a la base de datos de forma arbitraria.\n\n"
-    "¿Te gustaría que te ayude con tu pedido de gas en Culiacán? 😊"
+    "¿Te gustaría que te ayude con tu pedido de gas? 😊"
 )
 
 
@@ -982,33 +1251,285 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     thread_id = f"telegram:{TENANT_ID}:{chat_id}"
+    repo = get_repository()
 
-    # 3. Control de seguridad y vinculación de teléfono con el usuario de Telegram
-    if len(found_phones) == 1:
-        digits = re.sub(r"\D", "", found_phones[0])
-        if len(digits) == 10:
-            context.user_data["phone"] = digits
-            from src.repositories.identity_store import identity_store
-            identity_store.bind_channel_user_phone("telegram", str(user_id), digits)
-            if hasattr(repo, "bind_telegram_user_phone"):
-                repo.bind_telegram_user_phone(str(user_id), digits)
-    elif len(found_phones) > 1:
-        context.user_data.pop("phone", None)
-    elif not context.user_data.get("phone"):
-        bound_cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
-        if bound_cust and bound_cust.phone:
-            context.user_data["phone"] = bound_cust.phone
-            if hasattr(repo, "bind_telegram_user_phone"):
-                repo.bind_telegram_user_phone(str(user_id), bound_cust.phone)
-        elif user_id:
-            from src.repositories.identity_store import identity_store
-            mapped_phone = identity_store.get_phone_for_channel_user("telegram", str(user_id))
-            if mapped_phone:
-                context.user_data["phone"] = mapped_phone
+    # 2.4 Si el usuario recién registró su número y está ingresando su nombre deseado
+    if context.user_data.get("awaiting_registration_name"):
+        clean_name = texto_usuario.strip()
+        digits_in_name = re.sub(r"\D", "", clean_name)
+        if len(digits_in_name) >= 7 or len(clean_name) < 2 or clean_name.startswith("/"):
+            await safe_reply_text(
+                update.message,
+                "⚠️ Por favor escribe tu nombre completo (ej. *Juan Pérez*):",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            return
 
-    phone_ctx = context.user_data.get("phone", "")
-    if phone_ctx and hasattr(repo, "bind_telegram_user_phone"):
-        repo.bind_telegram_user_phone(str(user_id), phone_ctx)
+        context.user_data.pop("awaiting_registration_name", None)
+        registered_phone = context.user_data.get("phone", "")
+        if not registered_phone:
+            from src.repositories.identity_store import identity_store
+            registered_phone = identity_store.get_phone_for_channel_user("telegram", str(user_id)) or ""
+
+        cust = repo.save_or_update_customer(
+            tenant_id=TENANT_ID,
+            channel="telegram",
+            channel_user_id=str(user_id),
+            name=clean_name,
+            phone=registered_phone,
+        )
+        from src.repositories.identity_store import identity_store
+        identity_store.unmark_customer_deleted(registered_phone)
+
+        sess = flow_router.get_session(thread_id)
+        if sess and sess.draft_order:
+            sess.draft_order.customer_name = clean_name
+            sess.draft_order.customer_phone = registered_phone
+
+        await update.message.reply_text(
+            f"✅ ¡Tu cuenta ha sido vinculada con éxito!\n\n"
+            f"👤 **Nombre:** {clean_name}\n"
+            f"📱 **Teléfono:** `{registered_phone}`",
+            reply_markup=ReplyKeyboardRemove(),
+            parse_mode="Markdown",
+        )
+        await mostrar_menu_principal(update, context, clean_name, registered_phone)
+        return
+
+    # 2.5 Si el cliente estaba en proceso de editar su nombre de cuenta
+    if context.user_data.get("awaiting_account_name_edit"):
+        context.user_data.pop("awaiting_account_name_edit", None)
+        new_name = texto_usuario.strip()
+        cust = get_registered_customer(user_id)
+        if cust:
+            cust = repo.save_or_update_customer(
+                tenant_id=TENANT_ID,
+                channel="telegram",
+                channel_user_id=str(user_id),
+                name=new_name,
+                phone=cust.phone,
+            )
+            sess = flow_router.get_session(thread_id)
+            if sess and sess.draft_order:
+                sess.draft_order.customer_name = new_name
+            await safe_reply_text(
+                update.message,
+                f"✅ Tu nombre ha sido actualizado a: **{new_name}**.",
+            )
+            await mostrar_pantalla_cuenta(update, context, cust)
+            return
+
+    # 2.6 Si el cliente estaba agregando una nueva dirección desde Mi Cuenta
+    if context.user_data.get("awaiting_account_new_address"):
+        if texto_lower in ("/menu", "menu", "cancelar", "/cancelar", "cancel", "atras", "atrás", "volver", "regresar", "salir"):
+            context.user_data.pop("awaiting_account_new_address", None)
+            await mostrar_pantalla_direcciones_cuenta(update, context, user_id)
+            return
+
+        from src.services.address_validator import validate_address_with_llm
+        from src.services.geocoding import geocode_address
+        from src.services.flow_router import _get_city_context_for_tenant
+        val_res = await validate_address_with_llm(
+            texto_usuario.strip(),
+            tenant_id=TENANT_ID,
+            city_context=_get_city_context_for_tenant(TENANT_ID),
+        )
+        if not val_res.is_valid:
+            clean_fb = val_res.user_feedback if str(val_res.user_feedback).startswith("⚠️") else f"⚠️ {val_res.user_feedback}"
+            markup_cancel = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Regresar", callback_data="account:manage_addresses")]
+            ])
+            await safe_reply_text(
+                update.message,
+                f"{clean_fb}\n\nPor favor escribe tu dirección completa (calle, número y colonia) o comparte tu ubicación GPS 📍:",
+                reply_markup=markup_cancel,
+            )
+            return
+
+        context.user_data.pop("awaiting_account_new_address", None)
+        cust = get_registered_customer(user_id)
+        phone = cust.phone if cust else context.user_data.get("phone", "")
+        cust_full = repo.get_customer_by_phone(TENANT_ID, phone) if phone else cust
+
+        clean_user_addr = re.sub(r"^(?:mi\s+direcci[oó]n\s+es\s+|es\s+en\s+|vivo\s+en\s+)", "", texto_usuario.strip(), flags=re.IGNORECASE).strip()
+        clean_addr = clean_user_addr or val_res.normalized_address
+        clean_addr = resolve_gps_address_to_name(clean_addr)
+        clean_addr = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_addr, flags=re.I).strip()
+
+        from src.services.geocoding import calculate_distance_km, CULIACAN_LAT, CULIACAN_LNG
+        geo_lat, geo_lng, _ = geocode_address(
+            clean_addr,
+            city_context=_get_city_context_for_tenant(TENANT_ID),
+            fallback_to_default=False,
+        )
+        if geo_lat and geo_lng:
+            dist = calculate_distance_km(geo_lat, geo_lng, CULIACAN_LAT, CULIACAN_LNG)
+            if dist > 35.0:
+                markup_cancel = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Regresar", callback_data="account:manage_addresses")]
+                ])
+                await safe_reply_text(
+                    update.message,
+                    "⚠️ Por el momento nuestro servicio de Gas a tu Puerta Gascytsa tiene cobertura exclusivamente en la ciudad de Culiacán, Sinaloa. Por favor proporciona una dirección o ubicación dentro de Culiacán 📍:",
+                    reply_markup=markup_cancel,
+                )
+                return
+
+        if not cust_full and phone:
+            cust_full = repo.save_or_update_customer(
+                tenant_id=TENANT_ID,
+                channel="telegram",
+                channel_user_id=str(user_id),
+                name=(cust.name if cust else "Cliente"),
+                phone=phone,
+                address=clean_addr,
+            )
+        target_cust_id = cust_full.id if (cust_full and cust_full.id) else (cust.id if (cust and cust.id) else str(user_id))
+        repo.add_customer_address(target_cust_id, clean_addr)
+        from src.repositories.identity_store import identity_store
+        if phone:
+            identity_store.unmark_address_deleted(phone, clean_addr)
+
+        await safe_reply_text(
+            update.message,
+            f"✅ **¡Dirección guardada con éxito en tu cuenta!**\n\n📍 `{clean_addr}`"
+        )
+        await mostrar_pantalla_direcciones_cuenta(update, context, user_id)
+        return
+
+    # 2.7 Si el cliente estaba editando una dirección existente desde Mi Cuenta
+    if context.user_data.get("awaiting_account_edit_address"):
+        addr_id = context.user_data.get("editing_address_id", "")
+        idx = context.user_data.get("editing_address_idx", "1")
+        old_text = context.user_data.get("editing_address_old_text", "")
+        markup_cancel = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Regresar", callback_data=f"account_addr:view:{addr_id}:{idx}")]
+        ])
+
+        if texto_lower in ("/menu", "menu", "cancelar", "/cancelar", "cancel", "atras", "atrás", "volver", "regresar", "salir"):
+            context.user_data.pop("awaiting_account_edit_address", None)
+            context.user_data.pop("editing_address_id", None)
+            context.user_data.pop("editing_address_idx", None)
+            context.user_data.pop("editing_address_old_text", None)
+            await mostrar_pantalla_direcciones_cuenta(update, context, user_id)
+            return
+
+        from src.services.address_validator import validate_address_with_llm
+        from src.services.geocoding import geocode_address
+        from src.services.flow_router import _get_city_context_for_tenant
+        val_res = await validate_address_with_llm(
+            texto_usuario.strip(),
+            tenant_id=TENANT_ID,
+            city_context=_get_city_context_for_tenant(TENANT_ID),
+        )
+        if not val_res.is_valid:
+            clean_fb = val_res.user_feedback if str(val_res.user_feedback).startswith("⚠️") else f"⚠️ {val_res.user_feedback}"
+            await safe_reply_text(
+                update.message,
+                f"{clean_fb}\n\nPor favor escribe la nueva dirección completa (calle, número y colonia) o comparte tu ubicación GPS 📍:",
+                reply_markup=markup_cancel,
+            )
+            return
+
+        clean_user_addr = re.sub(r"^(?:mi\s+direcci[oó]n\s+es\s+|es\s+en\s+|vivo\s+en\s+)", "", texto_usuario.strip(), flags=re.IGNORECASE).strip()
+        clean_addr = clean_user_addr or val_res.normalized_address
+        clean_addr = resolve_gps_address_to_name(clean_addr)
+        clean_addr = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_addr, flags=re.I).strip()
+
+        from src.services.geocoding import calculate_distance_km, CULIACAN_LAT, CULIACAN_LNG
+        geo_lat, geo_lng, _ = geocode_address(
+            clean_addr,
+            city_context=_get_city_context_for_tenant(TENANT_ID),
+            fallback_to_default=False,
+        )
+        if geo_lat and geo_lng:
+            dist = calculate_distance_km(geo_lat, geo_lng, CULIACAN_LAT, CULIACAN_LNG)
+            if dist > 35.0:
+                await safe_reply_text(
+                    update.message,
+                    "⚠️ Por el momento nuestro servicio de Gas a tu Puerta Gascytsa tiene cobertura exclusivamente en la ciudad de Culiacán, Sinaloa. Por favor proporciona una dirección o ubicación dentro de Culiacán 📍:",
+                    reply_markup=markup_cancel,
+                )
+                return
+
+        context.user_data.pop("awaiting_account_edit_address", None)
+        context.user_data.pop("editing_address_id", None)
+        context.user_data.pop("editing_address_idx", None)
+        context.user_data.pop("editing_address_old_text", None)
+
+        cust = get_registered_customer(user_id)
+        phone = cust.phone if cust else context.user_data.get("phone", "")
+        cust_full = repo.get_customer_by_phone(TENANT_ID, phone) if phone else cust
+        target_cust_id = cust_full.id if (cust_full and cust_full.id) else (cust.id if (cust and cust.id) else str(user_id))
+
+        if hasattr(repo, "update_customer_address"):
+            repo.update_customer_address(target_cust_id, addr_id, clean_addr, phone=phone, old_address=old_text)
+        else:
+            repo.delete_customer_address(target_cust_id, addr_id, phone=phone, address_text=old_text)
+            repo.add_customer_address(target_cust_id, clean_addr)
+
+        from src.repositories.identity_store import identity_store
+        if phone:
+            if old_text:
+                identity_store.mark_address_deleted(phone, old_text)
+            identity_store.unmark_address_deleted(phone, clean_addr)
+
+        await safe_reply_text(
+            update.message,
+            f"✅ **¡Dirección #{idx} actualizada con éxito!**\n\n📍 `{clean_addr}`"
+        )
+        await mostrar_pantalla_direcciones_cuenta(update, context, user_id)
+        return
+
+    # 3. Control de seguridad y onboarding obligatorio de dispositivo (1 cuenta por dispositivo)
+    cust = get_registered_customer(user_id)
+    if not cust or not cust.phone:
+        # Si el usuario no registrado escribió su número celular a 10 dígitos:
+        digits_10 = ""
+        if len(found_phones) == 1:
+            digits_10 = re.sub(r"\D", "", found_phones[0])
+        else:
+            raw_digits = re.sub(r"\D", "", texto_usuario)
+            if len(raw_digits) == 10:
+                digits_10 = raw_digits
+
+        if digits_10 and len(digits_10) == 10:
+            from src.repositories.identity_store import identity_store
+            identity_store.bind_channel_user_phone("telegram", str(user_id), digits_10)
+            if hasattr(repo, "bind_telegram_user_phone"):
+                repo.bind_telegram_user_phone(str(user_id), digits_10)
+            context.user_data["phone"] = digits_10
+            context.user_data["awaiting_registration_name"] = True
+
+            await update.message.reply_text(
+                f"📱 ¡Número registrado con éxito! (`{digits_10}`)\n\n"
+                "Ahora, por favor **escribe tu nombre completo** para tu cuenta (ej. *Juan Pérez*):",
+                reply_markup=ReplyKeyboardRemove(),
+                parse_mode="Markdown",
+            )
+            return
+        else:
+            await update.message.reply_text(
+                "👋 ¡Hola! Para poder atenderte, necesitamos vincular tu número de teléfono a tu cuenta (1 cuenta por dispositivo).\n\n"
+                "Por favor presiona el botón **'📱 Compartir mi número'** abajo o escribe tus 10 dígitos:",
+                reply_markup=get_teclado_registro(),
+                parse_mode="Markdown",
+            )
+            return
+
+    # Usuario ya registrado: verificar si solicita el menú o gestión de cuenta
+    if texto_lower in ("/menu", "menu", "menú", "opciones", "/opciones"):
+        await mostrar_menu_principal(update, context, cust.name or "Cliente", cust.phone)
+        return
+
+    if any(k == texto_lower for k in ["mi cuenta", "cuenta", "perfil", "mis datos", "ver mi cuenta"]):
+        await mostrar_pantalla_cuenta(update, context, cust)
+        return
+
+    # Asegurar teléfono en context.user_data y repositorio
+    context.user_data["phone"] = cust.phone
+    if hasattr(repo, "bind_telegram_user_phone"):
+        repo.bind_telegram_user_phone(str(user_id), cust.phone)
 
     try:
         try:
@@ -1082,9 +1603,148 @@ async def recibir_ubicacion_cliente(
     loc = update.message.location
     lat = loc.latitude
     lng = loc.longitude
-    chat_id = update.effective_chat.id
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
     thread_id = f"telegram:{TENANT_ID}:{chat_id}"
+    repo = get_repository()
+
+    # Si el cliente estaba agregando una nueva dirección desde Mi Cuenta mediante GPS
+    if context.user_data.get("awaiting_account_new_address"):
+        from src.services.geocoding import calculate_distance_km, CULIACAN_LAT, CULIACAN_LNG
+        from src.services.address_validator import validate_address_with_llm
+        from src.services.flow_router import _get_city_context_for_tenant
+
+        # 1. Validación de distancia física a Culiacán (< 35km)
+        dist = calculate_distance_km(lat, lng, CULIACAN_LAT, CULIACAN_LNG)
+        if dist > 35.0:
+            markup_cancel = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Regresar", callback_data="account:manage_addresses")]
+            ])
+            await safe_reply_text(
+                update.message,
+                "⚠️ Por el momento nuestro servicio de Gas a tu Puerta Gascytsa tiene cobertura exclusivamente en la ciudad de Culiacán, Sinaloa. Por favor proporciona una dirección o ubicación dentro de Culiacán 📍:",
+                reply_markup=markup_cancel,
+            )
+            return
+
+        address_name = reverse_geocode(lat, lng) or f"Ubicación GPS ({lat:.5f}, {lng:.5f})"
+        clean_addr = resolve_gps_address_to_name(address_name)
+        clean_addr = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_addr, flags=re.I).strip()
+
+        # 2. Validación semántica y cartográfica de la ubicación
+        target_city_ctx = _get_city_context_for_tenant(TENANT_ID)
+        gps_val = await validate_address_with_llm(
+            f"{clean_addr} (GPS: {lat:.6f}, {lng:.6f})",
+            tenant_id=TENANT_ID,
+            city_context=target_city_ctx,
+        )
+        if not gps_val.is_valid:
+            clean_fb = gps_val.user_feedback if str(gps_val.user_feedback).startswith("⚠️") else f"⚠️ {gps_val.user_feedback}"
+            markup_cancel = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Regresar", callback_data="account:manage_addresses")]
+            ])
+            await safe_reply_text(
+                update.message,
+                f"{clean_fb}\n\nPor favor proporciona una ubicación o dirección dentro de Culiacán 📍:",
+                reply_markup=markup_cancel,
+            )
+            return
+
+        context.user_data.pop("awaiting_account_new_address", None)
+        cust = get_registered_customer(user_id)
+        phone = cust.phone if cust else context.user_data.get("phone", "")
+        cust_full = repo.get_customer_by_phone(TENANT_ID, phone) if phone else cust
+
+        if not cust_full and phone:
+            cust_full = repo.save_or_update_customer(
+                tenant_id=TENANT_ID,
+                channel="telegram",
+                channel_user_id=str(user_id),
+                name=(cust.name if cust else "Cliente"),
+                phone=phone,
+                address=clean_addr,
+            )
+        target_cust_id = cust_full.id if (cust_full and cust_full.id) else (cust.id if (cust and cust.id) else str(user_id))
+        repo.add_customer_address(target_cust_id, clean_addr)
+        from src.repositories.identity_store import identity_store
+        if phone:
+            identity_store.unmark_address_deleted(phone, clean_addr)
+        await safe_reply_text(
+            update.message,
+            f"✅ **¡Dirección guardada con éxito en tu cuenta!**\n\n📍 `{clean_addr}`"
+        )
+        await mostrar_pantalla_direcciones_cuenta(update, context, user_id)
+        return
+
+    # Si el cliente estaba editando una dirección desde Mi Cuenta mediante GPS
+    if context.user_data.get("awaiting_account_edit_address"):
+        addr_id = context.user_data.get("editing_address_id", "")
+        idx = context.user_data.get("editing_address_idx", "1")
+        old_text = context.user_data.get("editing_address_old_text", "")
+        markup_cancel = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Regresar", callback_data=f"account_addr:view:{addr_id}:{idx}")]
+        ])
+
+        from src.services.geocoding import calculate_distance_km, CULIACAN_LAT, CULIACAN_LNG
+        from src.services.address_validator import validate_address_with_llm
+        from src.services.flow_router import _get_city_context_for_tenant
+
+        dist = calculate_distance_km(lat, lng, CULIACAN_LAT, CULIACAN_LNG)
+        if dist > 35.0:
+            await safe_reply_text(
+                update.message,
+                "⚠️ Por el momento nuestro servicio de Gas a tu Puerta Gascytsa tiene cobertura exclusivamente en la ciudad de Culiacán, Sinaloa. Por favor proporciona una dirección o ubicación dentro de Culiacán 📍:",
+                reply_markup=markup_cancel,
+            )
+            return
+
+        address_name = reverse_geocode(lat, lng) or f"Ubicación GPS ({lat:.5f}, {lng:.5f})"
+        clean_addr = resolve_gps_address_to_name(address_name)
+        clean_addr = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_addr, flags=re.I).strip()
+
+        target_city_ctx = _get_city_context_for_tenant(TENANT_ID)
+        gps_val = await validate_address_with_llm(
+            f"{clean_addr} (GPS: {lat:.6f}, {lng:.6f})",
+            tenant_id=TENANT_ID,
+            city_context=target_city_ctx,
+        )
+        if not gps_val.is_valid:
+            clean_fb = gps_val.user_feedback if str(gps_val.user_feedback).startswith("⚠️") else f"⚠️ {gps_val.user_feedback}"
+            await safe_reply_text(
+                update.message,
+                f"{clean_fb}\n\nPor favor proporciona una ubicación o dirección dentro de Culiacán 📍:",
+                reply_markup=markup_cancel,
+            )
+            return
+
+        context.user_data.pop("awaiting_account_edit_address", None)
+        context.user_data.pop("editing_address_id", None)
+        context.user_data.pop("editing_address_idx", None)
+        context.user_data.pop("editing_address_old_text", None)
+
+        cust = get_registered_customer(user_id)
+        phone = cust.phone if cust else context.user_data.get("phone", "")
+        cust_full = repo.get_customer_by_phone(TENANT_ID, phone) if phone else cust
+        target_cust_id = cust_full.id if (cust_full and cust_full.id) else (cust.id if (cust and cust.id) else str(user_id))
+
+        if hasattr(repo, "update_customer_address"):
+            repo.update_customer_address(target_cust_id, addr_id, clean_addr, phone=phone, old_address=old_text)
+        else:
+            repo.delete_customer_address(target_cust_id, addr_id, phone=phone, address_text=old_text)
+            repo.add_customer_address(target_cust_id, clean_addr)
+
+        from src.repositories.identity_store import identity_store
+        if phone:
+            if old_text:
+                identity_store.mark_address_deleted(phone, old_text)
+            identity_store.unmark_address_deleted(phone, clean_addr)
+
+        await safe_reply_text(
+            update.message,
+            f"✅ **¡Dirección #{idx} actualizada con éxito!**\n\n📍 `{clean_addr}`"
+        )
+        await mostrar_pantalla_direcciones_cuenta(update, context, user_id)
+        return
 
     try:
         try:
@@ -1222,6 +1882,311 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
         mapped_phone = identity_store.get_phone_for_channel_user("telegram", str(user_id))
         if mapped_phone:
             context.user_data["phone"] = mapped_phone
+
+    # 0. Menú Principal y Gestión de Cuenta de Dispositivo
+    if data == "menu:main":
+        cust = get_registered_customer(user_id)
+        name = cust.name if cust else "Cliente"
+        phone = cust.phone if cust else context.user_data.get("phone", "")
+        await mostrar_menu_principal(update, context, name, phone)
+        return
+
+    if data == "menu:mi_cuenta":
+        cust = get_registered_customer(user_id)
+        if not cust:
+            cust = Customer(
+                id=f"cust-{user_id}",
+                tenant_id=TENANT_ID,
+                channel="telegram",
+                channel_user_id=str(user_id),
+                name="Cliente",
+                phone=context.user_data.get("phone", ""),
+                addresses=[]
+            )
+        await mostrar_pantalla_cuenta(update, context, cust)
+        return
+
+    if data == "menu:hacer_pedido":
+        from src.services.flow_router import clear_session
+        clear_session(thread_id)
+        sess = flow_router.get_session(thread_id)
+        cust = get_registered_customer(user_id)
+        if cust:
+            sess.draft_order.customer_phone = cust.phone
+            sess.draft_order.customer_name = cust.name
+            context.user_data["phone"] = cust.phone
+
+        markup_svc = get_botones_tipo_servicio()
+        text_svc = (
+            "🛻 **Nuevo Pedido de Gas**\n\n"
+            "¿Qué tipo de servicio necesitas hoy?\n"
+            "Selecciona una opción a continuación:"
+        )
+        try:
+            await query.edit_message_text(text_svc, reply_markup=markup_svc, parse_mode="Markdown")
+        except Exception:
+            await context.bot.send_message(chat_id=chat_id, text=text_svc, reply_markup=markup_svc, parse_mode="Markdown")
+        return
+
+    if data == "account:edit_name":
+        context.user_data["awaiting_account_name_edit"] = True
+        cust = get_registered_customer(user_id)
+        curr_name = cust.name if cust else "Cliente"
+        text_name = (
+            f"✏️ Tu nombre actual registrado es: **{curr_name}**\n\n"
+            "Por favor escribe en el chat tu **nuevo nombre completo**:"
+        )
+        try:
+            await query.edit_message_text(text_name, parse_mode="Markdown")
+        except Exception:
+            await context.bot.send_message(chat_id=chat_id, text=text_name, parse_mode="Markdown")
+        return
+
+    if data == "account:manage_addresses":
+        await mostrar_pantalla_direcciones_cuenta(update, context, user_id)
+        return
+
+    if data.startswith("account_addr:view:"):
+        parts = data.split(":")
+        addr_id = parts[2]
+        idx = parts[3] if len(parts) > 3 else "1"
+        cust = get_registered_customer(user_id)
+        phone = cust.phone if cust else context.user_data.get("phone", "")
+        cust_full = repo.get_customer_by_phone(TENANT_ID, phone) if phone else cust
+
+        target_addr = None
+        if cust_full and cust_full.addresses:
+            target_addr = next((a for a in cust_full.addresses if str(a.id) == str(addr_id)), None)
+            if not target_addr and idx.isdigit():
+                i_idx = int(idx) - 1
+                if 0 <= i_idx < len(cust_full.addresses):
+                    target_addr = cust_full.addresses[i_idx]
+
+        addr_str = target_addr.address if target_addr else f"Dirección #{idx}"
+        alias = (target_addr.alias if target_addr else "") or f"Dirección {idx}"
+        clean_addr = resolve_gps_address_to_name(addr_str.strip())
+        clean_addr = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_addr, flags=re.I).strip()
+
+        markup_view = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ Editar esta dirección", callback_data=f"account_addr:edit:{addr_id}:{idx}")],
+            [InlineKeyboardButton("🗑️ Eliminar esta dirección", callback_data=f"account_addr:del:{addr_id}:{idx}")],
+            [InlineKeyboardButton("🔙 Volver a Mis Direcciones", callback_data="account:manage_addresses")],
+        ])
+        text_view = (
+            f"📍 **Detalle de Dirección #{idx}**\n\n"
+            f"🏠 **{alias}:**\n`{clean_addr}`\n\n"
+            "¿Qué acción deseas realizar con esta dirección?"
+        )
+        try:
+            await query.edit_message_text(text_view, reply_markup=markup_view, parse_mode="Markdown")
+        except Exception:
+            await context.bot.send_message(chat_id=chat_id, text=text_view, reply_markup=markup_view, parse_mode="Markdown")
+        return
+
+    if data.startswith("account_addr:edit:"):
+        parts = data.split(":")
+        addr_id = parts[2]
+        idx = parts[3] if len(parts) > 3 else "1"
+        cust = get_registered_customer(user_id)
+        phone = cust.phone if cust else context.user_data.get("phone", "")
+        cust_full = repo.get_customer_by_phone(TENANT_ID, phone) if phone else cust
+
+        target_addr = None
+        if cust_full and cust_full.addresses:
+            target_addr = next((a for a in cust_full.addresses if str(a.id) == str(addr_id)), None)
+            if not target_addr and idx.isdigit():
+                i_idx = int(idx) - 1
+                if 0 <= i_idx < len(cust_full.addresses):
+                    target_addr = cust_full.addresses[i_idx]
+
+        addr_str = target_addr.address if target_addr else f"Dirección #{idx}"
+        alias = (target_addr.alias if target_addr else "") or f"Dirección {idx}"
+        clean_addr = resolve_gps_address_to_name(addr_str.strip())
+        clean_addr = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_addr, flags=re.I).strip()
+
+        context.user_data["awaiting_account_edit_address"] = True
+        context.user_data["editing_address_id"] = addr_id
+        context.user_data["editing_address_idx"] = idx
+        context.user_data["editing_address_old_text"] = addr_str
+
+        markup_edit = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Regresar", callback_data=f"account_addr:view:{addr_id}:{idx}")]
+        ])
+        text_edit = (
+            f"✏️ **Editar Dirección #{idx}**\n\n"
+            f"📍 **Dirección actual:**\n`{clean_addr}`\n\n"
+            "Por favor escribe en el chat la **nueva dirección completa** (Calle, Número, Colonia y Referencias) "
+            "o comparte tu nueva ubicación GPS desde el menú 📎 de Telegram:\n\n"
+            "_💡 Ejemplo: Av. Insurgentes 123, Col. Centro, portón blanco._"
+        )
+        try:
+            await query.edit_message_text(text_edit, reply_markup=markup_edit, parse_mode="Markdown")
+        except Exception:
+            await context.bot.send_message(chat_id=chat_id, text=text_edit, reply_markup=markup_edit, parse_mode="Markdown")
+        return
+
+    if data == "account_addr:add":
+        context.user_data["awaiting_account_new_address"] = True
+        text_add = (
+            "📍 **Agregar Nueva Dirección**\n\n"
+            "Por favor escribe en el chat la dirección completa (Calle, Número, Colonia y Referencias) "
+            "o comparte tu ubicación GPS desde el menú 📎 de Telegram:\n\n"
+            "_💡 Ejemplo: Av. Insurgentes 123, Col. Centro, portón blanco._"
+        )
+        markup_cancel = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Regresar", callback_data="account:manage_addresses")]
+        ])
+        try:
+            await query.edit_message_text(text_add, reply_markup=markup_cancel, parse_mode="Markdown")
+        except Exception:
+            await context.bot.send_message(chat_id=chat_id, text=text_add, reply_markup=markup_cancel, parse_mode="Markdown")
+        return
+
+    if data in ("account_addr:del_menu", "account_addr_del_menu"):
+        cust = get_registered_customer(user_id)
+        phone = cust.phone if cust else context.user_data.get("phone", "")
+        cust_full = repo.get_customer_by_phone(TENANT_ID, phone) if phone else cust
+        addrs = cust_full.addresses if (cust_full and cust_full.addresses) else []
+        if not addrs and cust_full and hasattr(repo, "get_customer_addresses") and cust_full.id:
+            addrs = repo.get_customer_addresses(cust_full.id)
+        from src.repositories.identity_store import identity_store
+        if phone:
+            addrs = [a for a in addrs if not identity_store.is_address_deleted(phone, a.address)]
+        addrs = [a for a in addrs if a.address and a.address.strip().lower() not in ("mazatlán", "mazatlan", "culiacán", "culiacan", "sinaloa", "mexico", "méxico")]
+
+        if not addrs:
+            await query.answer("No tienes direcciones guardadas para eliminar.", show_alert=True)
+            await mostrar_pantalla_direcciones_cuenta(update, context, user_id)
+            return
+
+        botones_del = []
+        for i, a in enumerate(addrs, 1):
+            clean_addr = resolve_gps_address_to_name(a.address.strip())
+            clean_addr = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_addr, flags=re.I).strip()
+            short_addr = f"🗑️ {i}. {clean_addr}"
+            if len(short_addr) > 42:
+                short_addr = short_addr[:39] + "..."
+            botones_del.append([InlineKeyboardButton(short_addr, callback_data=f"account_addr:del:{a.id}:{i}")])
+
+        botones_del.append([InlineKeyboardButton("🔙 Volver a Mis Direcciones", callback_data="account:manage_addresses")])
+        markup_del = InlineKeyboardMarkup(botones_del)
+        text_del_menu = "🗑️ **Eliminar Dirección Guardada**\n\nSelecciona la dirección que deseas borrar de tu cuenta:"
+        try:
+            await query.edit_message_text(text_del_menu, reply_markup=markup_del, parse_mode="Markdown")
+        except Exception:
+            await context.bot.send_message(chat_id=chat_id, text=text_del_menu, reply_markup=markup_del, parse_mode="Markdown")
+        return
+
+    if data.startswith("account_addr:del:"):
+        parts = data.split(":")
+        addr_id = parts[2]
+        idx = parts[3] if len(parts) > 3 else "1"
+        cust = get_registered_customer(user_id)
+        phone = cust.phone if cust else context.user_data.get("phone", "")
+        cust_full = repo.get_customer_by_phone(TENANT_ID, phone) if phone else cust
+
+        target_addr = None
+        if cust_full and cust_full.addresses:
+            target_addr = next((a for a in cust_full.addresses if str(a.id) == str(addr_id)), None)
+            if not target_addr and idx.isdigit():
+                i_idx = int(idx) - 1
+                if 0 <= i_idx < len(cust_full.addresses):
+                    target_addr = cust_full.addresses[i_idx]
+
+        addr_str = target_addr.address if target_addr else f"Dirección #{idx}"
+        clean_addr = resolve_gps_address_to_name(addr_str.strip())
+        clean_addr = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_addr, flags=re.I).strip()
+
+        markup_confirm = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗑️ Sí, eliminar dirección", callback_data=f"account_addr:del_confirm:{addr_id}:{idx}")],
+            [InlineKeyboardButton("❌ Cancelar", callback_data=f"account_addr:view:{addr_id}:{idx}")],
+        ])
+        text_del_addr = (
+            "⚠️ **¿Confirmas que deseas eliminar esta dirección de tu cuenta?**\n\n"
+            f"📍 `{clean_addr}`\n\n"
+            "Esta dirección ya no aparecerá en tus opciones guardadas."
+        )
+        try:
+            await query.edit_message_text(text_del_addr, reply_markup=markup_confirm, parse_mode="Markdown")
+        except Exception:
+            await context.bot.send_message(chat_id=chat_id, text=text_del_addr, reply_markup=markup_confirm, parse_mode="Markdown")
+        return
+
+    if data.startswith("account_addr:del_confirm:"):
+        parts = data.split(":")
+        addr_id = parts[2]
+        idx = parts[3] if len(parts) > 3 else "1"
+        cust = get_registered_customer(user_id)
+        phone = cust.phone if cust else context.user_data.get("phone", "")
+        cust_full = repo.get_customer_by_phone(TENANT_ID, phone) if phone else cust
+        cust_id = cust_full.id if (cust_full and cust_full.id) else (cust.id if (cust and cust.id) else str(user_id))
+
+        addr_text = ""
+        if cust_full and cust_full.addresses:
+            for a in cust_full.addresses:
+                if str(a.id) == str(addr_id):
+                    addr_text = a.address
+                    break
+
+        if hasattr(repo, "delete_customer_address"):
+            repo.delete_customer_address(cust_id, addr_id, phone=phone, address_text=addr_text)
+
+        from src.repositories.identity_store import identity_store
+        if addr_text and phone:
+            identity_store.mark_address_deleted(phone, addr_text)
+
+        try:
+            await query.answer("✅ Dirección eliminada correctamente", show_alert=False)
+        except Exception:
+            pass
+        await mostrar_pantalla_direcciones_cuenta(update, context, user_id)
+        return
+
+    if data == "account:delete_account":
+        markup_confirm = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚠️ Sí, eliminar mi cuenta definitivamente", callback_data="account:confirm_delete")],
+            [InlineKeyboardButton("❌ Cancelar", callback_data="menu:mi_cuenta")],
+        ])
+        text_del = (
+            "⚠️ **¿Estás seguro de que deseas dar de baja tu cuenta?**\n\n"
+            "Esta acción borrará por completo tu perfil, tu número vinculado y todas tus direcciones guardadas de nuestra base de datos.\n\n"
+            "Para volver a ordenar en el futuro, deberás registrarte nuevamente."
+        )
+        try:
+            await query.edit_message_text(text_del, reply_markup=markup_confirm, parse_mode="Markdown")
+        except Exception:
+            await context.bot.send_message(chat_id=chat_id, text=text_del, reply_markup=markup_confirm, parse_mode="Markdown")
+        return
+
+    if data == "account:confirm_delete":
+        from src.repositories.identity_store import identity_store
+        cust = get_registered_customer(user_id)
+        phone_to_del = (cust.phone if cust else "") or context.user_data.get("phone", "")
+        if not phone_to_del:
+            phone_to_del = identity_store.get_phone_for_channel_user("telegram", str(user_id)) or ""
+
+        # 1. Eliminar cliente y todas sus direcciones de la API Centralizada y de SQLite
+        repo.delete_customer(TENANT_ID, phone=phone_to_del, channel="telegram", channel_user_id=str(user_id))
+
+        # 2. Desvincular en identity_store
+        identity_store.unbind_channel_user("telegram", str(user_id), phone=phone_to_del)
+
+        # 3. Limpiar estado en memoria
+        context.user_data.clear()
+        from src.services.flow_router import clear_session
+        clear_session(thread_id)
+
+        text_deleted = (
+            "🗑️ **Tu cuenta ha sido eliminada por completo.**\n\n"
+            "Hemos borrado tu registro, tus direcciones y tu vinculación de dispositivo.\n"
+            "Si deseas volver a usar el servicio en el futuro, solo pulsa /start y registra tu número nuevamente.\n\n"
+            "¡Gracias por habernos acompañado!"
+        )
+        try:
+            await query.edit_message_text(text_deleted, parse_mode="Markdown")
+        except Exception:
+            await context.bot.send_message(chat_id=chat_id, text=text_deleted, parse_mode="Markdown")
+        return
 
     # 1. Tipo de servicio
     if data.startswith("client_svc:"):
@@ -1500,6 +2465,7 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
         return
 
     if data in ("client_addr_back", "client_addr:cancel_del", "client_addr_cancel_del", "del_addr_cancel"):
+        sess = flow_router.get_session(thread_id)
         user_id = query.from_user.id if query.from_user else (update.effective_user.id if update.effective_user else 0)
         phone = context.user_data.get("phone", "")
         if not phone and user_id:
@@ -1512,12 +2478,22 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
             cust = repo.get_customer(TENANT_ID, "telegram", str(user_id))
 
         addrs = cust.addresses if (cust and cust.addresses) else []
+        if not addrs and cust and hasattr(repo, "get_customer_addresses") and cust.id:
+            addrs = repo.get_customer_addresses(cust.id)
+        if phone:
+            from src.repositories.identity_store import identity_store
+            addrs = [a for a in addrs if not identity_store.is_address_deleted(phone, a.address)]
+        addrs = [a for a in addrs if a.address and a.address.strip().lower() not in ("mazatlán", "mazatlan", "culiacán", "culiacan", "sinaloa", "mexico", "méxico")]
         if addrs:
+            if sess:
+                sess.state = FlowState.WAITING_FOR_ADDRESS_SELECTION
             texto_resp = "¿A cuál de tus direcciones registradas deseas que enviemos tu pedido o prefieres ingresar una nueva?"
             markup_resp = get_botones_direcciones_cliente(addrs)
         else:
-            texto_resp = "Por favor escribe tu dirección de entrega o comparte tu ubicación GPS:"
-            markup_resp = None
+            if sess:
+                sess.state = FlowState.INITIAL
+            texto_resp = "🛻 **Nuevo Pedido de Gas**\n\n¿Qué tipo de servicio necesitas hoy?\nSelecciona una opción a continuación:"
+            markup_resp = get_botones_tipo_servicio()
 
         try:
             await query.edit_message_text(
@@ -2008,12 +2984,12 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
 
 
 def main() -> None:
-    """Iniciar el bot de Telegram para Gascytsa con auto-recuperación continua y supervisor de polling."""
+    """Iniciar el bot de Telegram para Gascytsa (Culiacán) con auto-recuperación continua y supervisor de polling."""
     global TELEGRAM_BOT_TOKEN
     import time
 
     print("=" * 60)
-    print("🤖 Iniciando Bot de Telegram para Ventas de Gas (Gascytsa - Culiacán)")
+    print("🤖 Iniciando Bot de Telegram de PRODUCCIÓN - Gascytsa (Culiacán)")
     print(f"🏪 Tenant: {tenant.business_name} ({tenant.tenant_id})")
     print(f"🧠 Agente: {tenant.agent.name}")
     print("=" * 60)
@@ -2057,8 +3033,12 @@ def main() -> None:
 
             application = builder.build()
 
-            # Comando /start
+            # Comando /start y /menu
             application.add_handler(CommandHandler("start", start))
+            application.add_handler(CommandHandler("menu", start))
+
+            # Recepción de contacto para registro de dispositivo
+            application.add_handler(MessageHandler(filters.CONTACT, recibir_contacto_cliente))
 
             # Recepción de ubicación GPS / tiempo real
             application.add_handler(MessageHandler(filters.LOCATION, recibir_ubicacion_cliente))
@@ -2077,7 +3057,7 @@ def main() -> None:
                 )
             )
 
-            print("✅ Bot Gascytsa conectado con Telegram. Esperando mensajes y pedidos...")
+            print("✅ Bot Gascytsa (Culiacán) conectado con Telegram. Esperando mensajes y pedidos...")
             application.run_polling(
                 bootstrap_retries=10,
                 poll_interval=1.0,

@@ -19,6 +19,21 @@ DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 CACHE_FILE = DATA_DIR / "channel_identity_cache.json"
 
 
+def _normalize_addr(addr: str) -> str:
+    """Normalize address string for precise comparison (removes accents, emojis, prefixes, extra spaces)."""
+    if not addr or not isinstance(addr, str):
+        return ""
+    import unicodedata
+    nfkd = unicodedata.normalize("NFKD", addr)
+    no_accents = "".join([c for c in nfkd if not unicodedata.combining(c)])
+    s = no_accents.lower().strip()
+    # Strip emojis, brackets, numbers at start (e.g. "[Principal]", "1.", "📍")
+    s = re.sub(r"^(?:\[.*?\]|\d+\.|\-|\•|📍|\U0001F4CD|\s)+", "", s)
+    s = re.sub(r"[^\w\s]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
 class IdentityStore:
     """Thread-safe and process-safe identity and order-channel mapping store."""
 
@@ -61,6 +76,7 @@ class IdentityStore:
                     self._chat_live_locations = data.get("chat_live_locations", {})
                     self._deleted_addresses = data.get("deleted_addresses", {})
                     self._order_cancellations = data.get("order_cancellations", {})
+                    self._deleted_customers = data.get("deleted_customers", [])
         except Exception as e:
             logger.debug(f"[IdentityStore] Error loading identity cache: {e}")
 
@@ -78,12 +94,51 @@ class IdentityStore:
                 "chat_live_locations": self._chat_live_locations,
                 "deleted_addresses": self._deleted_addresses,
                 "order_cancellations": self._order_cancellations,
+                "deleted_customers": getattr(self, "_deleted_customers", []),
             }
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
             temp_file.replace(CACHE_FILE)
         except Exception as e:
             logger.debug(f"[IdentityStore] Error saving identity cache: {e}")
+
+    def mark_customer_deleted(self, phone: str) -> None:
+        """Mark a customer as explicitly deleted for their phone number."""
+        clean_p = re.sub(r"\D", "", str(phone or ""))
+        if len(clean_p) > 10:
+            clean_p = clean_p[-10:]
+        if not clean_p:
+            return
+        self._load()
+        if not hasattr(self, "_deleted_customers") or not isinstance(self._deleted_customers, list):
+            self._deleted_customers = []
+        if clean_p not in self._deleted_customers:
+            self._deleted_customers.append(clean_p)
+            self._save()
+
+    def is_customer_deleted(self, phone: str) -> bool:
+        """Check if a customer account has been deleted."""
+        clean_p = re.sub(r"\D", "", str(phone or ""))
+        if len(clean_p) > 10:
+            clean_p = clean_p[-10:]
+        if not clean_p:
+            return False
+        self._load()
+        deleted = getattr(self, "_deleted_customers", [])
+        return clean_p in deleted
+
+    def unmark_customer_deleted(self, phone: str) -> None:
+        """If a customer re-registers, unmark them from deleted customers."""
+        clean_p = re.sub(r"\D", "", str(phone or ""))
+        if len(clean_p) > 10:
+            clean_p = clean_p[-10:]
+        if not clean_p:
+            return
+        self._load()
+        deleted = getattr(self, "_deleted_customers", [])
+        if clean_p in deleted:
+            deleted.remove(clean_p)
+            self._save()
 
     def mark_address_deleted(self, phone: str, address_text: str) -> None:
         """Mark an address as explicitly deleted by the user for their phone number."""
@@ -99,15 +154,42 @@ class IdentityStore:
             self._save()
 
     def is_address_deleted(self, phone: str, address_text: str) -> bool:
-        """Check if an address has been deleted by the user."""
+        """Check if an address has been explicitly deleted by the user."""
         clean_p = re.sub(r"\D", "", str(phone or ""))
         if len(clean_p) > 10:
             clean_p = clean_p[-10:]
         if not clean_p or not address_text:
             return False
-        addr_key = address_text.strip().lower()
+
+        target_norm = _normalize_addr(address_text)
+        if not target_norm:
+            return False
+
         curr = self._deleted_addresses.get(clean_p, [])
-        return any(d == addr_key or d in addr_key or addr_key in d for d in curr)
+        for d in curr:
+            d_norm = _normalize_addr(d)
+            if not d_norm:
+                continue
+
+            # Generic city names (e.g. 'mazatlan', 'culiacan') must NEVER match a real street address!
+            if d_norm in ("mazatlan", "culiacan", "sinaloa", "mexico"):
+                if target_norm == d_norm:
+                    return True
+                continue
+
+            # Exact normalized match
+            if d_norm == target_norm:
+                return True
+
+            # If both have significant length and street numbers, match only if both street and number match
+            if len(d_norm) >= 12 and len(target_norm) >= 12:
+                if target_norm.startswith(d_norm) or d_norm.startswith(target_norm):
+                    d_nums = re.findall(r"\b\d+\b", d_norm)
+                    t_nums = re.findall(r"\b\d+\b", target_norm)
+                    if d_nums == t_nums and len(d_nums) > 0:
+                        return True
+
+        return False
 
     def unmark_address_deleted(self, phone: str, address_text: str) -> None:
         """If a user re-adds an address, unmark it."""
@@ -116,11 +198,17 @@ class IdentityStore:
             clean_p = clean_p[-10:]
         if not clean_p or not address_text:
             return
-        addr_key = address_text.strip().lower()
+
+        target_norm = _normalize_addr(address_text)
         curr = self._deleted_addresses.get(clean_p, [])
-        if addr_key in curr:
-            curr.remove(addr_key)
-            self._save()
+        to_remove = [
+            d for d in curr
+            if _normalize_addr(d) == target_norm
+            or _normalize_addr(d) in ("mazatlan", "culiacan", "sinaloa", "mexico")
+        ]
+        for r in to_remove:
+            curr.remove(r)
+        self._save()
 
     def bind_telegram_user_phone(self, telegram_user_id: str | int, phone: str) -> None:
         """Bind customer's phone number to their Telegram Chat ID."""
@@ -159,6 +247,24 @@ class IdentityStore:
                     "phone": clean_digits[-10:] if len(clean_digits) >= 10 else clean_digits,
                 }
                 self._save()
+
+    def unbind_channel_user(self, channel: str, channel_user_id: str | int, phone: str | None = None) -> None:
+        """Unbind a customer's channel user ID and phone from IdentityStore."""
+        self._load()
+        uid_str = str(channel_user_id).strip()
+        if str(channel).lower() == "telegram":
+            linked_phone = self._tg_to_phone.pop(uid_str, None)
+            self._phone_to_tg.pop(uid_str, None)
+            target_phone = phone or linked_phone
+            if target_phone:
+                clean_p = re.sub(r"\D", "", str(target_phone))
+                if len(clean_p) >= 10:
+                    self._phone_to_tg.pop(clean_p[-10:], None)
+                    self._phone_to_tg.pop(clean_p, None)
+        else:
+            self._order_channels.pop(uid_str, None)
+        self._save()
+        logger.info(f"🗑️ [IdentityStore] Unbound {channel} user {uid_str}")
 
     def get_telegram_chat_id(self, phone_or_user_id: str | int | None) -> str | None:
         """Resolve a phone number or user ID to a Telegram Chat ID."""
