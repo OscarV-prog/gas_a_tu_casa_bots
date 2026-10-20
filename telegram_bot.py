@@ -58,11 +58,20 @@ graph = compile_sales_graph()
 
 # Token del bot de clientes Mazatlán (Producción)
 settings = get_settings()
-TELEGRAM_BOT_TOKEN = (
-    os.getenv("TELEGRAM_BOT_TOKEN")
-    or settings.telegram_bot_token
-    or ""
-).strip()
+
+
+def resolve_mazatlan_token() -> str:
+    """Resuelve el token de Mazatlán buscando en variables de entorno, settings o backend remoto."""
+    from src.services.dynamic_settings import get_dynamic_setting
+    return str(
+        os.getenv("TELEGRAM_BOT_TOKEN", "")
+        or get_dynamic_setting("TELEGRAM_BOT_TOKEN", tenant_id=TENANT_ID, force_refresh=True)
+        or settings.telegram_bot_token
+        or ""
+    ).strip()
+
+
+TELEGRAM_BOT_TOKEN = resolve_mazatlan_token()
 os.environ["IS_PRODUCTION_RUNNER"] = "true"
 
 # Inicializar base de datos SQLite
@@ -2993,106 +3002,130 @@ async def _track_user_bot_pref(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 def main() -> None:
-    """Iniciar el bot de Telegram de producción para Mazatlán."""
-    if not TELEGRAM_BOT_TOKEN:
-        print("❌ ERROR: TELEGRAM_BOT_TOKEN no está configurado.")
-        sys.exit(1)
+    """Iniciar el bot de Telegram para Mazatlán (Petroil Gas) con auto-recuperación continua y supervisor de polling."""
+    global TELEGRAM_BOT_TOKEN
+    import time
 
     print("=" * 60)
     print("🤖 Iniciando Bot de Telegram de PRODUCCIÓN - Mazatlán (Petroil Gas)")
     print(f"🏪 Tenant: {tenant.business_name} ({tenant.tenant_id})")
     print(f"🧠 Agente: {tenant.agent.name}")
-    print(f"🔑 Token de Mazatlán: {TELEGRAM_BOT_TOKEN[:10]}...")
     print("=" * 60)
 
-    telegram_proxy = os.getenv("TELEGRAM_PROXY_URL")
-    telegram_base_url = os.getenv("TELEGRAM_BASE_URL")
-
-    request_kwargs: dict[str, Any] = {
-        "connect_timeout": 30.0,
-        "read_timeout": 30.0,
-        "write_timeout": 30.0,
-        "pool_timeout": 30.0,
-    }
-    if telegram_proxy:
-        request_kwargs["proxy_url"] = telegram_proxy
-
-    request_config = HTTPXRequest(**request_kwargs)
-
-    async def _start_prod_bot_sync(app: Application) -> None:
-        """Sincronizador en segundo plano para escuchar asignaciones de chofer y GPS en Mazatlán."""
-        async def _sync_worker():
-            import asyncio
-            from src.services.pwa_sync_service import poll_order_updates_once
-            logger.info("📡 [ProdBot] Sincronizador de pedidos PWA iniciado para Mazatlán...")
-            await asyncio.sleep(2.0)
-            while True:
-                try:
-                    await poll_order_updates_once(tenant_id=TENANT_ID)
-                except asyncio.CancelledError:
+    consecutive_errors = 0
+    while True:
+        try:
+            # 1. Resolver token dinámicamente si aún no está disponible
+            while not TELEGRAM_BOT_TOKEN:
+                TELEGRAM_BOT_TOKEN = resolve_mazatlan_token()
+                if TELEGRAM_BOT_TOKEN:
+                    logger.info("✅ Token de Telegram Mazatlán detectado y configurado exitosamente.")
                     break
-                except Exception as e:
-                    logger.debug(f"[ProdBot Sync] Error en ciclo de sincronización: {e}")
-                await asyncio.sleep(3.0)
+                logger.info(
+                    "[Mazatlán] Esperando configuración de token (TELEGRAM_BOT_TOKEN) en Dashboard o .env (reintentando en 15s)..."
+                )
+                time.sleep(15)
 
-        import asyncio
-        asyncio.create_task(_sync_worker())
+            telegram_proxy = os.getenv("TELEGRAM_PROXY_URL")
+            telegram_base_url = os.getenv("TELEGRAM_BASE_URL")
 
-    builder = (
-        Application.builder()
-        .token(TELEGRAM_BOT_TOKEN)
-        .request(request_config)
-        .get_updates_request(request_config)
-        .post_init(_start_prod_bot_sync)
-    )
-    if telegram_base_url:
-        builder = builder.base_url(telegram_base_url)
+            request_kwargs: dict[str, Any] = {
+                "connect_timeout": 30.0,
+                "read_timeout": 30.0,
+                "write_timeout": 30.0,
+                "pool_timeout": 30.0,
+            }
+            if telegram_proxy:
+                request_kwargs["proxy_url"] = telegram_proxy
 
-    application = builder.build()
+            request_config = HTTPXRequest(**request_kwargs)
 
-    # Rastrear origen de bot para todas las interacciones de los usuarios
-    application.add_handler(TypeHandler(Update, _track_user_bot_pref), group=-1)
+            async def _start_prod_bot_sync(app: Application) -> None:
+                """Sincronizador en segundo plano para escuchar asignaciones de chofer y GPS en Mazatlán."""
+                async def _sync_worker():
+                    import asyncio
+                    from src.services.pwa_sync_service import poll_order_updates_once
+                    logger.info("📡 [ProdBot] Sincronizador de pedidos PWA iniciado para Mazatlán...")
+                    await asyncio.sleep(2.0)
+                    while True:
+                        try:
+                            await poll_order_updates_once(tenant_id=TENANT_ID)
+                        except asyncio.CancelledError:
+                            break
+                        except Exception as e:
+                            logger.debug(f"[ProdBot Sync] Error en ciclo de sincronización: {e}")
+                        await asyncio.sleep(3.0)
 
-    # Comando /start y /menu
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("menu", start))
+                import asyncio
+                asyncio.create_task(_sync_worker())
 
-    # Recepción de contacto para registro de dispositivo
-    application.add_handler(MessageHandler(filters.CONTACT, recibir_contacto_cliente))
+            builder = (
+                Application.builder()
+                .token(TELEGRAM_BOT_TOKEN)
+                .request(request_config)
+                .get_updates_request(request_config)
+                .post_init(_start_prod_bot_sync)
+            )
+            if telegram_base_url:
+                builder = builder.base_url(telegram_base_url)
 
-    # Recepción de ubicación GPS / tiempo real
-    application.add_handler(MessageHandler(filters.LOCATION, recibir_ubicacion_cliente))
+            application = builder.build()
 
-    # Recepción de notas de voz y archivos de audio
-    application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, recibir_voz_cliente))
+            # Rastrear origen de bot para todas las interacciones de los usuarios
+            application.add_handler(TypeHandler(Update, _track_user_bot_pref), group=-1)
 
-    # Botones interactivos (Cancelar pedido)
-    application.add_handler(CallbackQueryHandler(manejar_callback_cliente))
+            # Comando /start y /menu
+            application.add_handler(CommandHandler("start", start))
+            application.add_handler(CommandHandler("menu", start))
 
-    # Mensajes de texto normales
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            responder,
-        )
-    )
+            # Recepción de contacto para registro de dispositivo
+            application.add_handler(MessageHandler(filters.CONTACT, recibir_contacto_cliente))
 
-    print("✅ Bot de Mazatlán conectado con Telegram. Esperando mensajes y pedidos...")
-    try:
-        application.run_polling(
-            bootstrap_retries=10,
-            poll_interval=1.0,
-            timeout=30,
-        )
-    except Exception as e:
-        err_str = str(e)
-        if sys.platform == "win32" and ("All connection attempts failed" in err_str or "ConnectError" in err_str or "ConnectTimeout" in err_str):
-            print("\n" + "!" * 70)
-            print("🚨 ERROR DE CONEXIÓN: La red Wi-Fi actual está bloqueando Telegram (api.telegram.org).")
-            print("👉 Solución rápida: Conecta tu computadora al Punto de Acceso / Datos Móviles de tu celular.")
-            print("   Las redes móviles no bloquean Telegram y el bot encenderá de inmediato.")
-            print("!" * 70 + "\n")
-        raise
+            # Recepción de ubicación GPS / tiempo real
+            application.add_handler(MessageHandler(filters.LOCATION, recibir_ubicacion_cliente))
+
+            # Recepción de notas de voz y archivos de audio
+            application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, recibir_voz_cliente))
+
+            # Botones interactivos (Cancelar pedido)
+            application.add_handler(CallbackQueryHandler(manejar_callback_cliente))
+
+            # Mensajes de texto normales
+            application.add_handler(
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    responder,
+                )
+            )
+
+            print("✅ Bot de Mazatlán conectado con Telegram. Esperando mensajes y pedidos...")
+            application.run_polling(
+                bootstrap_retries=10,
+                poll_interval=1.0,
+                timeout=30,
+            )
+            consecutive_errors = 0
+
+        except KeyboardInterrupt:
+            print("\n🛑 Bot de Mazatlán detenido correctamente por el usuario (Ctrl+C).")
+            break
+        except Exception as e:
+            consecutive_errors += 1
+            err_str = str(e)
+            if "InvalidToken" in err_str or "Unauthorized" in err_str:
+                logger.error("❌ Token de Telegram para Mazatlán no autorizado o inválido (%s). Reintentando obtenerlo del Dashboard...", e)
+                TELEGRAM_BOT_TOKEN = ""
+                time.sleep(10)
+            elif sys.platform == "win32" and ("All connection attempts failed" in err_str or "ConnectError" in err_str or "ConnectTimeout" in err_str):
+                print("\n" + "!" * 70)
+                print("🚨 ERROR DE CONEXIÓN: La red Wi-Fi actual está bloqueando Telegram (api.telegram.org).")
+                print("👉 Solución rápida: Conecta tu computadora al Punto de Acceso / Datos Móviles de tu celular.")
+                print("   Las redes móviles no bloquean Telegram y el bot encenderá de inmediato.")
+                print("!" * 70 + "\n")
+                time.sleep(15)
+            else:
+                logger.error("Error en polling de Telegram Mazatlán: %s. Reintentando en 5s...", e)
+                time.sleep(min(30, 5 * consecutive_errors))
 
 
 if __name__ == "__main__":
