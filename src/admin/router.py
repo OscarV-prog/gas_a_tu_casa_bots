@@ -317,7 +317,7 @@ async def create_order_admin(
                     f"{d_phone_str}\n"
                     f"El operador está preparando tu unidad y te avisaremos en cuanto inicie su recorrido hacia tu domicilio. ⛽"
                 )
-                background_tasks.add_task(notify_client, recipient_id, msg_asignacion, None, order.channel)
+                background_tasks.add_task(notify_client, recipient_id, msg_asignacion, None, order.channel, tenant_id, None, order.id)
     else:
         logger.info(f"[admin/router] Pedido #{order.id} creado sin chofer asignado. Queda en espera de asignación manual en Dashboard.")
 
@@ -548,7 +548,7 @@ async def reassign_order_driver(
                 f"Te avisaremos en cuanto vaya en camino a tu domicilio. ⛽"
             )
 
-        background_tasks.add_task(notify_client, recipient_id, client_msg, None, target_order.channel)
+        background_tasks.add_task(notify_client, recipient_id, client_msg, None, target_order.channel, tenant_id, None, target_order.id)
 
     return {"success": True, "order_id": order_id, "driver_id": driver.id, "driver_name": driver.name, "reassigned": is_reassignment}
 

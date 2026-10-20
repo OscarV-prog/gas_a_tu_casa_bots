@@ -27,6 +27,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 from telegram.request import HTTPXRequest
@@ -62,6 +63,7 @@ TELEGRAM_BOT_TOKEN = (
     or settings.telegram_bot_token
     or ""
 ).strip()
+os.environ["IS_PRODUCTION_RUNNER"] = "true"
 
 # Inicializar base de datos SQLite
 init_db()
@@ -1536,6 +1538,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             channel="telegram",
             channel_user_id=str(user_id),
             tenant_id=TENANT_ID,
+            bot_token=TELEGRAM_BOT_TOKEN,
         )
 
         flow_session = flow_router.get_session(thread_id)
@@ -1750,6 +1753,7 @@ async def recibir_ubicacion_cliente(
             channel="telegram",
             channel_user_id=str(user_id),
             tenant_id=TENANT_ID,
+            bot_token=TELEGRAM_BOT_TOKEN,
         )
 
         flow_session = flow_router.get_session(thread_id)
@@ -1821,6 +1825,7 @@ async def recibir_voz_cliente(
             channel="telegram",
             channel_user_id=str(user_id),
             tenant_id=TENANT_ID,
+            bot_token=TELEGRAM_BOT_TOKEN,
         )
 
         flow_session = flow_router.get_session(thread_id)
@@ -2190,6 +2195,7 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
             channel="telegram",
             channel_user_id=str(user_id),
             tenant_id=TENANT_ID,
+            bot_token=TELEGRAM_BOT_TOKEN,
         )
 
         if data == "client_svc:cilindro":
@@ -2278,6 +2284,7 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
             channel="telegram",
             channel_user_id=str(user_id),
             tenant_id=TENANT_ID,
+            bot_token=TELEGRAM_BOT_TOKEN,
         )
 
         phone_ctx = context.user_data.get("phone", "")
@@ -2514,6 +2521,7 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
             channel="telegram",
             channel_user_id=str(user_id),
             tenant_id=TENANT_ID,
+            bot_token=TELEGRAM_BOT_TOKEN,
         )
 
         phone_ctx = context.user_data.get("phone", "")
@@ -2545,6 +2553,7 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
             channel="telegram",
             channel_user_id=str(user_id),
             tenant_id=TENANT_ID,
+            bot_token=TELEGRAM_BOT_TOKEN,
         )
 
         phone_ctx = context.user_data.get("phone", "")
@@ -2576,6 +2585,7 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
             channel="telegram",
             channel_user_id=str(user_id),
             tenant_id=TENANT_ID,
+            bot_token=TELEGRAM_BOT_TOKEN,
         )
 
         phone_ctx = context.user_data.get("phone", "")
@@ -2605,6 +2615,7 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
             channel="telegram",
             channel_user_id=str(user_id),
             tenant_id=TENANT_ID,
+            bot_token=TELEGRAM_BOT_TOKEN,
         )
 
         phone_ctx = context.user_data.get("phone", "")
@@ -2637,6 +2648,7 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
             channel="telegram",
             channel_user_id=str(user_id),
             tenant_id=TENANT_ID,
+            bot_token=TELEGRAM_BOT_TOKEN,
         )
 
         phone_ctx = context.user_data.get("phone", "")
@@ -2669,6 +2681,7 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
             channel="telegram",
             channel_user_id=str(user_id),
             tenant_id=TENANT_ID,
+            bot_token=TELEGRAM_BOT_TOKEN,
         )
 
         phone_ctx = context.user_data.get("phone", "")
@@ -2972,6 +2985,13 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
 
 
 
+async def _track_user_bot_pref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Registra la preferencia de bot (tenant y token) para cualquier interacción del usuario."""
+    if update.effective_user:
+        from src.repositories.identity_store import identity_store
+        identity_store.set_user_bot_preference(str(update.effective_user.id), tenant_id=TENANT_ID, bot_token=TELEGRAM_BOT_TOKEN)
+
+
 def main() -> None:
     """Iniciar el bot de Telegram de producción para Mazatlán."""
     if not TELEGRAM_BOT_TOKEN:
@@ -2999,16 +3019,39 @@ def main() -> None:
 
     request_config = HTTPXRequest(**request_kwargs)
 
+    async def _start_prod_bot_sync(app: Application) -> None:
+        """Sincronizador en segundo plano para escuchar asignaciones de chofer y GPS en Mazatlán."""
+        async def _sync_worker():
+            import asyncio
+            from src.services.pwa_sync_service import poll_order_updates_once
+            logger.info("📡 [ProdBot] Sincronizador de pedidos PWA iniciado para Mazatlán...")
+            await asyncio.sleep(2.0)
+            while True:
+                try:
+                    await poll_order_updates_once(tenant_id=TENANT_ID)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.debug(f"[ProdBot Sync] Error en ciclo de sincronización: {e}")
+                await asyncio.sleep(3.0)
+
+        import asyncio
+        asyncio.create_task(_sync_worker())
+
     builder = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
         .request(request_config)
         .get_updates_request(request_config)
+        .post_init(_start_prod_bot_sync)
     )
     if telegram_base_url:
         builder = builder.base_url(telegram_base_url)
 
     application = builder.build()
+
+    # Rastrear origen de bot para todas las interacciones de los usuarios
+    application.add_handler(TypeHandler(Update, _track_user_bot_pref), group=-1)
 
     # Comando /start y /menu
     application.add_handler(CommandHandler("start", start))

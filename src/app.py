@@ -101,6 +101,8 @@ async def sync_platform_settings():
 @app.on_event("startup")
 async def on_startup():
     """Start background synchronization workers on server startup."""
+    import os
+    os.environ["IS_PRODUCTION_RUNNER"] = "true"
     from src.services.pwa_sync_service import start_pwa_sync_service
     start_pwa_sync_service(interval_seconds=4.0, tenant_id="petroil")
 

@@ -1132,6 +1132,8 @@ class SqliteRepository(ProductRepository):
         delivery_lat: float | None = None,
         delivery_lng: float | None = None,
         scheduled_for: str | None = None,
+        bot_token: str = "",
+        **kwargs: Any,
     ) -> Order:
         """Create a new customer order and order items in SQLite."""
         now_dt = get_local_now()

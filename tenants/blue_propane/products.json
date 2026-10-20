@@ -1,0 +1,67 @@
+[
+  {
+    "id": "d5fe2759-a3a1-4fe4-95e9-48ad0f7209a2",
+    "name": "Cilindro de Gas 20 kg",
+    "description": "Cilindro portátil de 20 kilogramos con sello de garantía y válvula de seguridad en Hermosillo.",
+    "price": 455.0,
+    "currency": "MXN",
+    "category": "Cilindros",
+    "in_stock": true,
+    "unit": "pieza",
+    "tags": ["20 kg", "20kg", "cilindro", "gas lp", "hogar"]
+  },
+  {
+    "id": "11013011-8a51-4602-8824-a6bf7d80426d",
+    "name": "Cilindro de Gas 30 kg",
+    "description": "Cilindro de 30 kilogramos ideal para hogares de alto consumo y negocios en Hermosillo.",
+    "price": 712.5,
+    "currency": "MXN",
+    "category": "Cilindros",
+    "in_stock": true,
+    "unit": "pieza",
+    "tags": ["30 kg", "30kg", "cilindro", "gas lp", "hogar", "negocio"]
+  },
+  {
+    "id": "390f09c5-3f21-4d72-b5c9-b9c4199ed7db",
+    "name": "Cilindro de Gas 45 kg",
+    "description": "Cilindro industrial/comercial de 45 kilogramos para uso intensivo en Hermosillo.",
+    "price": 1068.0,
+    "currency": "MXN",
+    "category": "Cilindros",
+    "in_stock": true,
+    "unit": "pieza",
+    "tags": ["45 kg", "45kg", "cilindro", "gas lp", "industrial", "comercial"]
+  },
+  {
+    "id": "2777c073-4c9b-4935-bef2-a9f2ec6b03c9",
+    "name": "Gas LP Estacionario (Litro)",
+    "description": "Suministro de Gas LP para tanque estacionario residencial, comercial e industrial en Hermosillo.",
+    "price": 12.85,
+    "currency": "MXN",
+    "category": "Tanque estacionario",
+    "in_stock": true,
+    "unit": "litro",
+    "tags": ["tanque", "estacionario", "recarga", "gas lp", "litro"]
+  },
+  {
+    "id": "e50bab8e-43d3-42dc-a97d-22c999e0a982",
+    "name": "Regulador de Gas LP de 2 Vías",
+    "description": "Regulador de presión para tanque estacionario o cilindro con manguera reforzada.",
+    "price": 350.0,
+    "currency": "MXN",
+    "category": "Accesorios",
+    "in_stock": true,
+    "unit": "pieza",
+    "tags": ["regulador", "accesorios", "valvula", "manguera"]
+  },
+  {
+    "id": "entrega-domicilio",
+    "name": "Entrega a Domicilio",
+    "description": "Servicio de entrega de Gas LP a domicilio dentro de la zona de cobertura en Hermosillo.",
+    "price": 0,
+    "currency": "MXN",
+    "category": "Servicio",
+    "in_stock": true,
+    "tags": ["entrega", "domicilio", "envío", "servicio"]
+  }
+]

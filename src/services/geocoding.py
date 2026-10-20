@@ -22,6 +22,10 @@ DEFAULT_LNG = -106.421500
 CULIACAN_LAT = 24.809060
 CULIACAN_LNG = -107.394020
 
+# Center for Hermosillo, Sonora, Mexico (Catedral Metropolitana de Hermosillo / Plaza Zaragoza)
+HERMOSILLO_LAT = 29.072967
+HERMOSILLO_LNG = -110.955919
+
 
 def clean_address_for_geocoding(address: str) -> list[str]:
     """Generate multiple cleaned variations of an address to maximize geocoding hit rate.
@@ -134,15 +138,26 @@ def verify_address_city_grounding(
     if not raw or len(raw) < 5:
         return False, "La dirección es demasiado corta para ser un domicilio real.", {}
 
+    is_hermosillo = any(k in target_city.lower() for k in ("hermosillo", "blue_propane"))
     is_culiacan = "culiac" in target_city.lower()
-    target_city_name = "Culiacán" if is_culiacan else "Mazatlán"
-    service_name = "Gas a tu Puerta Gascytsa" if is_culiacan else "Gas a tu Puerta"
-    alt_city_name = "Mazatlán" if is_culiacan else "Culiacán"
-
-    t_lat = CULIACAN_LAT if is_culiacan else DEFAULT_LAT
-    t_lng = CULIACAN_LNG if is_culiacan else DEFAULT_LNG
-    alt_lat = DEFAULT_LAT if is_culiacan else CULIACAN_LAT
-    alt_lng = DEFAULT_LNG if is_culiacan else CULIACAN_LNG
+    if is_hermosillo:
+        target_city_name = "Hermosillo"
+        service_name = "Gas a tu Puerta Hermosillo"
+        alt_city_name = "Culiacán"
+        t_lat, t_lng = HERMOSILLO_LAT, HERMOSILLO_LNG
+        alt_lat, alt_lng = CULIACAN_LAT, CULIACAN_LNG
+    elif is_culiacan:
+        target_city_name = "Culiacán"
+        service_name = "Gas a tu Puerta Gascytsa"
+        alt_city_name = "Mazatlán"
+        t_lat, t_lng = CULIACAN_LAT, CULIACAN_LNG
+        alt_lat, alt_lng = DEFAULT_LAT, DEFAULT_LNG
+    else:
+        target_city_name = "Mazatlán"
+        service_name = "Gas a tu Puerta"
+        alt_city_name = "Culiacán"
+        t_lat, t_lng = DEFAULT_LAT, DEFAULT_LNG
+        alt_lat, alt_lng = CULIACAN_LAT, CULIACAN_LNG
 
     cache_key = f"{raw.lower()}::{target_city_name.lower()}"
     if cache_key in _grounding_cache:
@@ -318,18 +333,32 @@ def geocode_address(
 
     settings = get_settings()
     city = city_context or settings.default_city or "Mazatlán"
+    is_hermosillo = any(k in city.lower() for k in ("hermosillo", "blue_propane"))
     is_culiacan = "culiac" in city.lower()
-    target_lat = CULIACAN_LAT if is_culiacan else DEFAULT_LAT
-    target_lng = CULIACAN_LNG if is_culiacan else DEFAULT_LNG
-    alt_lat = DEFAULT_LAT if is_culiacan else CULIACAN_LAT
-    alt_lng = DEFAULT_LNG if is_culiacan else CULIACAN_LNG
-    opposing_city_kw = "mazatl" if is_culiacan else "culiac"
+    if is_hermosillo:
+        target_lat = HERMOSILLO_LAT
+        target_lng = HERMOSILLO_LNG
+        alt_lat = CULIACAN_LAT
+        alt_lng = CULIACAN_LNG
+        opposing_city_kw = "mazatl|culiac"
+    elif is_culiacan:
+        target_lat = CULIACAN_LAT
+        target_lng = CULIACAN_LNG
+        alt_lat = DEFAULT_LAT
+        alt_lng = DEFAULT_LNG
+        opposing_city_kw = "mazatl|hermosillo"
+    else:
+        target_lat = DEFAULT_LAT
+        target_lng = DEFAULT_LNG
+        alt_lat = CULIACAN_LAT
+        alt_lng = CULIACAN_LNG
+        opposing_city_kw = "culiac|hermosillo"
     max_dist_km = 35.0
 
     clean_key = f"{address.strip().lower()}::{city.strip().lower()}"
     if clean_key in _geocode_cache:
         cached_lat, cached_lng, cached_name = _geocode_cache[clean_key]
-        if not fallback_to_default and cached_lat in (DEFAULT_LAT, CULIACAN_LAT):
+        if not fallback_to_default and cached_lat in (DEFAULT_LAT, CULIACAN_LAT, HERMOSILLO_LAT):
             pass  # Don't return cached fallback center
         else:
             return _geocode_cache[clean_key]
@@ -496,7 +525,12 @@ def reverse_geocode(lat: float, lng: float) -> str:
     if lat is None or lng is None:
         return ""
 
-    default_city = "Culiacán" if calculate_distance_km(lat, lng, CULIACAN_LAT, CULIACAN_LNG) < 70.0 else "Mazatlán"
+    if calculate_distance_km(lat, lng, HERMOSILLO_LAT, HERMOSILLO_LNG) < 70.0:
+        default_city = "Hermosillo"
+    elif calculate_distance_km(lat, lng, CULIACAN_LAT, CULIACAN_LNG) < 70.0:
+        default_city = "Culiacán"
+    else:
+        default_city = "Mazatlán"
 
     # Provider 1: ESRI ArcGIS World Reverse Geocoder (High-precision house numbers and street addresses in Mexico)
     try:

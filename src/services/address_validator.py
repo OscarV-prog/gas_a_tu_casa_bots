@@ -72,6 +72,26 @@ OUT_LOCATIONS_CULIACAN = [
 ]
 
 
+# Ciudades, municipios, estados y países fuera de cobertura para Hermosillo (Gas a tu Puerta Hermosillo)
+OUT_LOCATIONS_HERMOSILLO = [
+    # Colonias, sectores y avenidas de Mazatlán
+    r"\b(?:zona\s+dorada|marina\s+mazatl[aá]n|s[aá]balo\s+country|las\s+misiones|misi[oó]n\s+san\s+javier|misi[oó]n\s+santo\s+tom[aá]s|misi[oó]n\s+loreto|real\s+del\s+valle|pradera\s+dorada|el\s+conchi|flores\s+mag[oó]n|palos\s+prietos|ferrocarrilera|lomas\s+del\s+mar|playa\s+sur|jacarandas|villa\s+verde|valles\s+del\s+ejido|urbi\s+villa\s+del\s+real|santa\s+teresa|alarc[oó]n|infonavit\s+playas|cerro\s+del\s+vig[ií]a|montuosa|jaripillo|francisco\s+villa|l[oó]pez\s+mateos|sirena|urias|cerritos|el\s+venadillo|av\.?\s+del\s+mar|av\.?\s+camar[oó]n\s+s[aá]balo|camar[oó]n\s+s[aá]balo|av\.?\s+rafael\s+buelna|rafael\s+buelna|ej[eé]rcito\s+mexicano|paseo\s+claussen|olas\s+altas)\b",
+    # Colonias, sectores y avenidas de Culiacán
+    r"\b(?:colinas\s+de\s+san\s+miguel|tres\s+r[ií]os|desarrollo\s+urbano\s+tres\s+r[ií]os|las\s+quintas\s+culiac[aá]n|infonavit\s+humaya|humaya|r[ií]o\s+humaya|sector\s+humaya|valle\s+alto|barrancos|infonavit\s+barrancos|pedro\s+infante|blvd\.?\s*pedro\s+infante|enrique\s+s[aá]nchez\s+alonso|lola\s+beltr[aá]n|rolando\s+arjona|la\s+conquista|stanza\s+toscana|stanza\s+florencia|stanza|bachigualato|nakayama|alturas\s+del\s+sur|isla\s+musala|aguaruto|costa\s+rica|eldorado|quil[aá]|limita\s+de\s+iturbe|prol\.?\s*[aá]lvaro\s+obreg[oó]n|avenida\s+[aá]lvaro\s+obreg[oó]n|av\.?\s+[aá]lvaro\s+obreg[oó]n|[aá]lvaro\s+obreg[oó]n\s+(?:norte|sur|\d+)|calzada\s+heroico\s+colegio\s+militar|montebello|santa\s+fe\s+culiac[aá]n|san\s+rafael\s+culiac[aá]n|villa\s+universidad|plaza\s+cuatro\s+r[ií]os|plaza\s+ceiba|forum\s+culiac[aá]n|parque\s+las\s+riberas|estadio\s+tomateros|jard[ií]n\s+bot[aá]nico\s+culiac[aá]n)\b",
+    r"\b(?:cerro\s+de\s+la\s+campana|campana\s+culiac[aá]n|tierra\s+blanca|chapultepec\s+culiac[aá]n|ciudades\s+hermanas|blvd\.?\s*ciudades\s+hermanas|el\s+palmito|palmito|palmito\s+viejo|culiacancito|portalegre|portalegre\s+elite|cedros|los\s+cedros|chula\s+vista|chulavista|emiliano\s+zapata|blvd\.?\s*emiliano\s+zapata|calzada\s+aeropuerto|blvd\.?\s*aeropuerto|aeropuerto\s+culiac[aá]n|plaza\s+fiesta|plaza\s+san\s+isidro|plaza\s+sendero\s+culiac[aá]n|loma\s+linda|guadalupe\s+victoria|10\s+de\s+mayo|diez\s+de\s+mayo|las\s+coloradas|la\s+campiña|campiña|interlomas|universitarios|blvd\.?\s*universitarios|malecon\s+nuevo|malec[oó]n\s+nuevo|malecon\s+viejo|malec[oó]n\s+viejo|diego\s+valad[eé]s|colinas\s+del\s+humaya|plutarco\s+el[ií]as\s+calles|jorge\s+almada|recursos\s+hidr[aá]ulicos|vallado|infonavit\s+el\s+vallado|campo\s+el\s+diez|el\s+diez|costita|la\s+costita|bellavista|los\s+pinos)\b",
+    # Municipios de Sinaloa
+    r"\b(?:culiac[aá]n|cln|mazatl[aá]n|maza|navolato|los\s+mochis|mochis|guasave|escuinapa|concordia|el\s+rosario|el\s+fuerte|choix|guam[uú]chil|salvador\s+alvarado|elota|la\s+cruz\s+de\s+elota|san\s+ignacio|badiraguato|angostura|mocorito|sinaloa\s+de\s+leyva)\b",
+    # Otros municipios de Sonora fuera de Hermosillo
+    r"\b(?:guaymas|san\s+carlos|empalme|ciudad\s+obreg[oó]n|cd\.?\s*obreg[oó]n|cajeme|nogales|navojoa|san\s+luis\s+r[ií]o\s+colorado|slrc|puerto\s+pe[ñn]asco|pe[ñn]asco|agua\s+prieta|caborca|cananea|humpac|ur[eé]s|moctezuma|bav[ií]acora|sahuaripa|alamos|magdalena\s+de\s+kino|santa\s+ana|sonoyta)\b",
+    # Otras ciudades de México
+    r"\b(?:guadalajara|zapopan|tlaquepaque|tonal[aá]|monterrey|san\s+pedro|apodaca|guadalupe\s+nl|cdmx|ciudad\s+de\s+m[eé]xico|distrito\s+federal|df|edomex|estado\s+de\s+m[eé]xico|tijuana|mexicali|cd\.?\s*durango|ciudad\s+durango|g[oó]mez\s+palacio|tepic|bah[ií]a\s+de\s+banderas|le[oó]n\s+gto|ciudad\s+le[oó]n|guanajuato\s+capital|puebla|quer[eé]taro|canc[uú]n|m[eé]rida|veracruz|xalapa|oaxaca|cd\.?\s*chihuahua|ciudad\s+chihuahua|cd\.?\s*ju[aá]rez|ciudad\s+ju[aá]rez|saltillo|torre[oó]n|aguascalientes|san\s+luis\s+potos[ií]|morelia|colima|manzanillo|cuernavaca|toluca|pachuca|villahermosa|campeche|chetumal|tuxtla|chilpancingo|acapulco)\b",
+    # Otros estados cuando se especifican como ubicación/jurisdicción (excluyendo Sonora)
+    r"(?:,\s*(?:sinaloa|jalisco|nuevo\s+le[oó]n|nayarit|coahuila|zacatecas|michoac[aá]n|baja\s+california|durango|chihuahua)\b|\bestado\s+de\s+(?:sinaloa|jalisco|nuevo\s+le[oó]n|nayarit|coahuila|zacatecas|michoac[aá]n|baja\s+california|durango|chihuahua)\b|\ben\s+(?:sinaloa|jalisco|nuevo\s+le[oó]n|nayarit|coahuila|zacatecas|michoac[aá]n|baja\s+california|durango|chihuahua)\b|(?:sinaloa|jalisco|nuevo\s+le[oó]n|nayarit|coahuila|zacatecas|michoac[aá]n|baja\s+california|durango|chihuahua)$)",
+    # Otros países
+    r"\b(?:estados\s+unidos|eeuu|usa|united\s+states|texas|california|arizona|espa[ñn]a|colombia|argentina|venezuela|chile|per[uú])\b",
+]
+
+
 def _fast_heuristic_check(
     text: str,
     is_culiacan_only: bool = False,
@@ -87,9 +107,14 @@ def _fast_heuristic_check(
         if re.search(pat, t_clean, re.IGNORECASE):
             return False, "La dirección ingresada no parece ser un domicilio válido o existente. Por favor proporciona una dirección real (calle, número y colonia) o comparte tu ubicación GPS 📍."
 
-    is_culiacan = is_culiacan_only or (target_city and "culiac" in target_city.lower())
+    is_hermosillo = (target_city and any(k in target_city.lower() for k in ("hermosillo", "blue_propane")))
+    is_culiacan = not is_hermosillo and (is_culiacan_only or (target_city and "culiac" in target_city.lower()))
 
-    if is_culiacan:
+    if is_hermosillo:
+        for pat in OUT_LOCATIONS_HERMOSILLO:
+            if re.search(pat, t_clean, re.IGNORECASE):
+                return False, "⚠️ Por el momento nuestro servicio de Gas a tu Puerta Hermosillo tiene cobertura exclusivamente en la ciudad de Hermosillo, Sonora. Por favor proporciona una dirección o ubicación dentro de Hermosillo 📍."
+    elif is_culiacan:
         for pat in OUT_LOCATIONS_CULIACAN:
             if re.search(pat, t_clean, re.IGNORECASE):
                 return False, "⚠️ Por el momento nuestro servicio de Gas a tu Puerta Gascytsa tiene cobertura exclusivamente en la ciudad de Culiacán, Sinaloa. Por favor proporciona una dirección o ubicación dentro de Culiacán 📍."
@@ -109,9 +134,11 @@ async def validate_address_with_llm(
 ) -> AddressValidationResult:
     """Analiza semánticamente si una dirección es real, plausible y entregable en la ciudad objetivo."""
     raw = (address_text or "").strip()
-    is_culiacan_mode = (tenant_id == "gascytsa") or ("culiac" in (city_context or "").lower())
-    target_city_name = "Culiacán" if is_culiacan_mode else "Mazatlán"
-    service_name = "Gas a tu Puerta Gascytsa" if is_culiacan_mode else "Gas a tu Puerta"
+    is_hermosillo_mode = (tenant_id in ("hermosillo", "blue_propane")) or any(k in (city_context or "").lower() for k in ("hermosillo", "blue_propane"))
+    is_culiacan_mode = not is_hermosillo_mode and ((tenant_id == "gascytsa") or ("culiac" in (city_context or "").lower()))
+    target_city_name = "Hermosillo" if is_hermosillo_mode else ("Culiacán" if is_culiacan_mode else "Mazatlán")
+    target_state_name = "Sonora" if is_hermosillo_mode else "Sinaloa"
+    service_name = "Gas a tu Puerta Hermosillo" if is_hermosillo_mode else ("Gas a tu Puerta Gascytsa" if is_culiacan_mode else "Gas a tu Puerta")
 
     if not raw:
         return AddressValidationResult(
@@ -164,7 +191,39 @@ async def validate_address_with_llm(
         )
 
     # 3. Análisis semántico y delimitación estricta con IA (LLM)
-    if is_culiacan_mode:
+    if is_hermosillo_mode:
+        system_prompt = (
+            "Eres un auditor y validador de inteligencia artificial estricto para Gas a tu Puerta Hermosillo con cobertura EXCLUSIVA en HERMOSILLO, SONORA.\n"
+            "Tu misión crítica es validar si la dirección o ubicación que se te comparte PERTENECE A HERMOSILLO, SONORA, "
+            "o si pertenece a OTRA CIUDAD (Mazatlán, Culiacán, Nogales, Guaymas, Ciudad Obregón, etc.), a otro estado o país, o si es una dirección inventada o falsa.\n\n"
+            "ZONAS Y COLONIAS REALES DE HERMOSILLO (VÁLIDAS PARA ESTE BOT):\n"
+            "- Centenario, San Benito, Pitic, Modelo, Olivares, Villa de Seris, Palo Verde, Sahuaro, Choyal, Las Quintas (Hermosillo), Montecarlo, Los Lagos, Villa Satélite, San Ángel, Puerta Real, Tierra Nueva, Pueblito del Angel, Altares, Solidaridad, Las Lomas, Ley 57, Balderrama, Bugambilias, Cuauhtémoc, Palo Verde Indeur, Bachoco, Loma Linda, Valle Grande, El Mariachi, 5 de Mayo, etc.\n"
+            "- Avenidas y Vialidades: Blvd. Abelardo L. Rodríguez, Blvd. Eusebio Kino, Blvd. Luis Encinas, Blvd. Rosales, Blvd. Vildósola, Blvd. Solidaridad, Blvd. José María Morelos, Blvd. Luis Donaldo Colosio, Blvd. Ignacio Soto, Blvd. García Morales, Blvd. Progreso, Periférico Sur, Periférico Norte, etc.\n\n"
+            "ZONAS DE OTRAS CIUDADES COMO MAZATLÁN O CULIACÁN (DEBES RECHAZAR CATEGÓRICAMENTE EN ESTE BOT DE HERMOSILLO):\n"
+            "- Mazatlán: Fracc. Las Misiones, Marina Mazatlán, Sábalo Country, Zona Dorada, Gaviotas, Real del Valle, Pradera Dorada, El Conchi, Flores Magón, Palos Prietos, Cerro del Vigía, Playa Sur, Jacarandas, Cerritos, Av. Camarón Sábalo, Av. del Mar, etc.\n"
+            "- Culiacán: Desarrollo Urbano Tres Ríos, Las Quintas (Culiacán), Infonavit Humaya, Valle Alto, Barrancos, Bugambilias (Culiacán), Montebello, Stanza Toscana, Nakayama, Bachigualato, San Rafael, Santa Fe, Blvd. Pedro Infante, Av. Álvaro Obregón, Blvd. Enrique Sánchez Alonso, etc.\n"
+            "- REGLA: Si la dirección o ubicación compartida pertenece a Mazatlán, Culiacán o a cualquier otra ciudad fuera de Hermosillo, debes clasificarla con is_valid=false.\n"
+            "- REGLA VITAL DE MENSAJE: En user_feedback NUNCA intentes adivinar ni menciones en qué otra ciudad o lugar se encuentra esa dirección. Solo indica amablemente que el servicio tiene cobertura exclusivamente en Hermosillo, Sonora, y solicita una dirección o ubicación dentro de Hermosillo 📍.\n\n"
+            "CRITERIOS DE VALIDACIÓN:\n"
+            "- VÁLIDA (is_valid=true, is_joke_or_fake=false): Pertenece a Hermosillo y contiene datos para ubicar el lugar (calle, número o entrecalles, colonia/sector de Hermosillo).\n"
+            "- OTRA CIUDAD / FUERA DE COBERTURA (is_valid=false, is_joke_or_fake=false): Pertenece a Mazatlán, Culiacán, Guaymas, Obregón, u otro municipio/estado/país. user_feedback='⚠️ Por el momento nuestro servicio de Gas a tu Puerta Hermosillo tiene cobertura exclusivamente en la ciudad de Hermosillo, Sonora. Por favor proporciona una dirección o ubicación dentro de Hermosillo 📍.'\n"
+            "- FALSA / INVENTADA / BROMA (is_valid=false, is_joke_or_fake=true): Calles o colonias inexistentes o absurdas (ej. 'calle dragón', 'narnia', 'en mi casa'). user_feedback='⚠️ La dirección ingresada no parece ser un domicilio válido o existente en Hermosillo. Por favor escribe tu calle, número y colonia real, o comparte tu ubicación GPS 📍.'\n"
+            "- INCOMPLETA (is_valid=false, is_joke_or_fake=false): Solo una palabra suelta sin datos suficientes.\n\n"
+            "DEBES RESPONDER EXCLUSIVAMENTE CON UN OBJETO JSON VÁLIDO CON ESTE ESQUEMA EXACTO:\n"
+            "{\n"
+            '  "is_valid": true,\n'
+            '  "is_joke_or_fake": false,\n'
+            '  "confidence": 0.95,\n'
+            '  "street": "Blvd. Eusebio Kino",\n'
+            '  "number": "310",\n'
+            '  "colonia": "Pitic",\n'
+            '  "references": "Cerca del hotel",\n'
+            '  "normalized_address": "Blvd. Eusebio Kino 310, Col. Pitic, Hermosillo",\n'
+            '  "reason": "Explicación breve de la validación",\n'
+            '  "user_feedback": "Mensaje cordial para el cliente si fue rechazada o validada"\n'
+            "}"
+        )
+    elif is_culiacan_mode:
         system_prompt = (
             "Eres un auditor y validador de inteligencia artificial estricto para Gas a tu Puerta Gascytsa con cobertura EXCLUSIVA en CULIACÁN, SINALOA.\n"
             "Tu misión crítica es validar si la dirección o ubicación que se te comparte PERTENECE A CULIACÁN, SINALOA, "
@@ -228,24 +287,24 @@ async def validate_address_with_llm(
         )
 
     # Construir prompt para la IA con evidencia cartográfica
-    alt_name = "Mazatlán" if is_culiacan_mode else "Culiacán"
+    alt_name = "Mazatlán o Culiacán" if is_hermosillo_mode else ("Mazatlán" if is_culiacan_mode else "Culiacán")
     if ground_ok is True:
         match_str = ground_data.get("match_addr") or raw
         user_prompt = (
-            f"Dirección o ubicación recibida del usuario para entrega en {target_city_name}, Sinaloa:\n\"{raw}\"\n\n"
+            f"Dirección o ubicación recibida del usuario para entrega en {target_city_name}, {target_state_name}:\n\"{raw}\"\n\n"
             f"[INFORMACIÓN CARTOGRÁFICA PREVIA]: Se detectó una coincidencia tentativa en mapas: '{match_str}'.\n\n"
             f"Tu tarea como IA validadora:\n"
-            f"Evalúa con tu conocimiento si el texto original del usuario (\"{raw}\") pertenece legítimamente a {target_city_name}, Sinaloa.\n"
+            f"Evalúa con tu conocimiento si el texto original del usuario (\"{raw}\") pertenece legítimamente a {target_city_name}, {target_state_name}.\n"
             f"Si la dirección o zona pertenece en realidad a {alt_name} (o a otra ciudad) y fue confundida por similitud de nombres, DEBES CLASIFICARLA CON is_valid=false.\n"
             f"Solo si estás seguro de que es una dirección dentro de {target_city_name}, clasifícala con is_valid=true.\n"
-            f"Si es rechazada por ser de otra ciudad, en user_feedback pon exclusivamente: '⚠️ Por el momento nuestro servicio de {service_name} tiene cobertura exclusivamente en la ciudad de {target_city_name}, Sinaloa. Por favor proporciona una dirección o ubicación dentro de {target_city_name} 📍.'"
+            f"Si es rechazada por ser de otra ciudad, en user_feedback pon exclusivamente: '⚠️ Por el momento nuestro servicio de {service_name} tiene cobertura exclusivamente en la ciudad de {target_city_name}, {target_state_name}. Por favor proporciona una dirección o ubicación dentro de {target_city_name} 📍.'"
         )
     else:
         user_prompt = (
-            f"Dirección o ubicación recibida del usuario para entrega en {target_city_name}, Sinaloa:\n\"{raw}\"\n\n"
-            f"[AUDITORÍA SEMÁNTICA CON IA]: Analiza si esta calle, colonia o zona pertenece a {target_city_name}, Sinaloa.\n"
+            f"Dirección o ubicación recibida del usuario para entrega en {target_city_name}, {target_state_name}:\n\"{raw}\"\n\n"
+            f"[AUDITORÍA SEMÁNTICA CON IA]: Analiza si esta calle, colonia o zona pertenece a {target_city_name}, {target_state_name}.\n"
             f"Si pertenece a {alt_name} o a otra ciudad/estado/país, o si es una dirección inventada o falsa, clasifícala con is_valid=false.\n"
-            f"En user_feedback si no pertenece a {target_city_name}, solo indica que el servicio tiene cobertura exclusivamente en {target_city_name}, Sinaloa, sin mencionar en qué otra ciudad está."
+            f"En user_feedback si no pertenece a {target_city_name}, solo indica que el servicio tiene cobertura exclusivamente en {target_city_name}, {target_state_name}, sin mencionar en qué otra ciudad está."
         )
 
     try:
@@ -289,7 +348,15 @@ async def validate_address_with_llm(
             combined_text = (norm + " " + raw).lower()
 
             # Post-validación estricta de ciudades / estados fuera de cobertura
-            if is_culiacan_mode and is_valid:
+            if is_hermosillo_mode and is_valid:
+                for pat in OUT_LOCATIONS_HERMOSILLO:
+                    if re.search(pat, combined_text, re.IGNORECASE):
+                        is_valid = False
+                        is_joke = False
+                        reason = "Fuera de cobertura (solo Hermosillo)"
+                        fb = f"⚠️ Por el momento nuestro servicio de {service_name} tiene cobertura exclusivamente en la ciudad de {target_city_name}, {target_state_name}. Por favor proporciona una dirección o ubicación dentro de {target_city_name} 📍."
+                        break
+            elif is_culiacan_mode and is_valid:
                 for pat in OUT_LOCATIONS_CULIACAN:
                     if re.search(pat, combined_text, re.IGNORECASE):
                         is_valid = False
@@ -297,7 +364,7 @@ async def validate_address_with_llm(
                         reason = "Fuera de cobertura (solo Culiacán)"
                         fb = "⚠️ Por el momento nuestro servicio de Gas a tu Puerta Gascytsa tiene cobertura exclusivamente en la ciudad de Culiacán, Sinaloa. Por favor proporciona una dirección o ubicación dentro de Culiacán 📍."
                         break
-            elif not is_culiacan_mode and is_valid:
+            elif not is_hermosillo_mode and not is_culiacan_mode and is_valid:
                 for pat in OUT_LOCATIONS_MAZATLAN:
                     if re.search(pat, combined_text, re.IGNORECASE):
                         is_valid = False
@@ -309,9 +376,9 @@ async def validate_address_with_llm(
             # Asegurar que el mensaje al usuario NUNCA mencione o intente adivinar otra ciudad
             if not is_valid:
                 alt_city = "Mazatlán" if is_culiacan_mode else "Culiacán"
-                service_title = "Gas a tu Puerta Gascytsa" if is_culiacan_mode else "Gas a tu Puerta"
+                service_title = service_name
                 if alt_city.lower() in fb.lower() or "otra ciudad" in fb.lower() or "corresponde a" in fb.lower() or "parece pertenecer" in fb.lower() or "ubicada en" in fb.lower():
-                    fb = f"⚠️ Por el momento nuestro servicio de {service_title} tiene cobertura exclusivamente en la ciudad de {target_city_name}, Sinaloa. Por favor proporciona una dirección o ubicación dentro de {target_city_name} 📍."
+                    fb = f"⚠️ Por el momento nuestro servicio de {service_title} tiene cobertura exclusivamente en la ciudad de {target_city_name}, {target_state_name}. Por favor proporciona una dirección o ubicación dentro de {target_city_name} 📍."
 
             if not fb:
                 if not is_valid:
@@ -353,16 +420,16 @@ async def validate_address_with_llm(
     has_words = len(raw.split()) >= 3
     is_plausible = has_digits and has_words
 
-    city_for_msg = "Culiacán" if is_culiacan_mode else "Mazatlán"
-    service_for_msg = "Gas a tu Puerta Gascytsa" if is_culiacan_mode else "Gas a tu Puerta"
+    city_for_msg = target_city_name
+    service_for_msg = service_name
     fb_fallback = "Dirección aceptada." if is_plausible else f"Por favor escribe tu calle, número y colonia completa en {city_for_msg}."
 
     if is_plausible:
-        check_list = OUT_LOCATIONS_CULIACAN if is_culiacan_mode else OUT_LOCATIONS_MAZATLAN
+        check_list = OUT_LOCATIONS_HERMOSILLO if is_hermosillo_mode else (OUT_LOCATIONS_CULIACAN if is_culiacan_mode else OUT_LOCATIONS_MAZATLAN)
         for pat in check_list:
             if re.search(pat, raw.lower(), re.IGNORECASE):
                 is_plausible = False
-                fb_fallback = f"⚠️ Por el momento nuestro servicio de {service_for_msg} tiene cobertura exclusivamente en la ciudad de {city_for_msg}, Sinaloa. Por favor proporciona una dirección dentro de {city_for_msg} o comparte tu ubicación GPS 📍."
+                fb_fallback = f"⚠️ Por el momento nuestro servicio de {service_for_msg} tiene cobertura exclusivamente en la ciudad de {city_for_msg}, {target_state_name}. Por favor proporciona una dirección dentro de {city_for_msg} o comparte tu ubicación GPS 📍."
                 break
 
     return AddressValidationResult(

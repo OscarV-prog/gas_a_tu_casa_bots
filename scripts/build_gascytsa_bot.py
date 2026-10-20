@@ -28,7 +28,8 @@ TELEGRAM_BOT_TOKEN = (
     os.getenv("TELEGRAM_BOT_TOKEN")
     or settings.telegram_bot_token
     or ""
-).strip()'''
+).strip()
+os.environ["IS_PRODUCTION_RUNNER"] = "true"'''
 
 new_tenant_token_block = '''# Configuración del tenant
 TENANT_ID = "gascytsa"
@@ -51,7 +52,8 @@ def resolve_gascytsa_token() -> str:
     ).strip()
 
 
-TELEGRAM_BOT_TOKEN = resolve_gascytsa_token()'''
+TELEGRAM_BOT_TOKEN = resolve_gascytsa_token()
+os.environ["IS_PRODUCTION_RUNNER"] = "true"'''
 
 code = code.replace(old_tenant_token_block, new_tenant_token_block)
 
@@ -111,7 +113,7 @@ code = code.replace(
     'Validación de distancia física a Culiacán (< 35km)'
 )
 
-# 8. Update main() with Gascytsa branding & dynamic token resolution loop
+# 8. Update main() with Gascytsa branding, sync worker & dynamic token resolution loop
 old_main_block = '''def main() -> None:
     """Iniciar el bot de Telegram de producción para Mazatlán."""
     if not TELEGRAM_BOT_TOKEN:
@@ -139,16 +141,39 @@ old_main_block = '''def main() -> None:
 
     request_config = HTTPXRequest(**request_kwargs)
 
+    async def _start_prod_bot_sync(app: Application) -> None:
+        """Sincronizador en segundo plano para escuchar asignaciones de chofer y GPS en Mazatlán."""
+        async def _sync_worker():
+            import asyncio
+            from src.services.pwa_sync_service import poll_order_updates_once
+            logger.info("📡 [ProdBot] Sincronizador de pedidos PWA iniciado para Mazatlán...")
+            await asyncio.sleep(2.0)
+            while True:
+                try:
+                    await poll_order_updates_once(tenant_id=TENANT_ID)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.debug(f"[ProdBot Sync] Error en ciclo de sincronización: {e}")
+                await asyncio.sleep(3.0)
+
+        import asyncio
+        asyncio.create_task(_sync_worker())
+
     builder = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
         .request(request_config)
         .get_updates_request(request_config)
+        .post_init(_start_prod_bot_sync)
     )
     if telegram_base_url:
         builder = builder.base_url(telegram_base_url)
 
     application = builder.build()
+
+    # Rastrear origen de bot para todas las interacciones de los usuarios
+    application.add_handler(TypeHandler(Update, _track_user_bot_pref), group=-1)
 
     # Comando /start y /menu
     application.add_handler(CommandHandler("start", start))
@@ -230,16 +255,39 @@ new_main_block = '''def main() -> None:
 
             request_config = HTTPXRequest(**request_kwargs)
 
+            async def _start_gascytsa_bot_sync(app: Application) -> None:
+                """Sincronizador en segundo plano para escuchar asignaciones de chofer y GPS en Gascytsa (Culiacán)."""
+                async def _sync_worker():
+                    import asyncio
+                    from src.services.pwa_sync_service import poll_order_updates_once
+                    logger.info("📡 [GascytsaBot] Sincronizador de pedidos PWA iniciado para Culiacán...")
+                    await asyncio.sleep(2.0)
+                    while True:
+                        try:
+                            await poll_order_updates_once(tenant_id=TENANT_ID)
+                        except asyncio.CancelledError:
+                            break
+                        except Exception as e:
+                            logger.debug(f"[GascytsaBot Sync] Error en ciclo de sincronización: {e}")
+                        await asyncio.sleep(3.0)
+
+                import asyncio
+                asyncio.create_task(_sync_worker())
+
             builder = (
                 Application.builder()
                 .token(TELEGRAM_BOT_TOKEN)
                 .request(request_config)
                 .get_updates_request(request_config)
+                .post_init(_start_gascytsa_bot_sync)
             )
             if telegram_base_url:
                 builder = builder.base_url(telegram_base_url)
 
             application = builder.build()
+
+            # Rastrear origen de bot para todas las interacciones de los usuarios
+            application.add_handler(TypeHandler(Update, _track_user_bot_pref), group=-1)
 
             # Comando /start y /menu
             application.add_handler(CommandHandler("start", start))
@@ -300,3 +348,4 @@ with open("telegram_bot_gascytsa.py", "w", encoding="utf-8") as f:
     f.write(code)
 
 print("telegram_bot_gascytsa.py adaptado exitosamente.")
+

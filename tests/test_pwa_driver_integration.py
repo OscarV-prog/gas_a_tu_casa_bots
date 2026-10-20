@@ -147,6 +147,8 @@ class TestPwaDriverIntegration(unittest.TestCase):
             latitude=new_lat,
             longitude=new_lng,
             channel="telegram",
+            tenant_id=self.tenant_id,
+            order_id=self.order.id,
         )
 
     @patch("src.services.order_events.notify_order_assigned", return_value=True)

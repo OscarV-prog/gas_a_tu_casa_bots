@@ -43,12 +43,17 @@ if [ "$1" = "all" ]; then
     fi
 
     # 4. Bot de Telegram para Gascytsa (Culiacán)
-    echo "[4/4] Iniciando Bot de Telegram Gascytsa (Culiacán)..."
+    echo "[4/5] Iniciando Bot de Telegram Gascytsa (Culiacán)..."
     python telegram_bot_gascytsa.py &
     GASCYTSA_PID=$!
 
+    # 5. Bot de Telegram para Hermosillo (Sonora)
+    echo "[5/5] Iniciando Bot de Telegram Hermosillo (Sonora)..."
+    python telegram_bot_hermosillo.py &
+    HERMOSILLO_PID=$!
+
     # Manejar señales de apagado limpio
-    trap "echo 'Deteniendo servicios...'; kill -TERM ${API_PID:-} ${TELEGRAM_PID:-} ${DRIVER_PID:-} ${GASCYTSA_PID:-} 2>/dev/null || true; exit 0" SIGTERM SIGINT
+    trap "echo 'Deteniendo servicios...'; kill -TERM ${API_PID:-} ${TELEGRAM_PID:-} ${DRIVER_PID:-} ${GASCYTSA_PID:-} ${HERMOSILLO_PID:-} 2>/dev/null || true; exit 0" SIGTERM SIGINT
 
     # Mantener el contenedor vivo mientras corra la API principal
     wait "$API_PID"

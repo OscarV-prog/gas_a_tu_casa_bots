@@ -21,6 +21,169 @@ logger = logging.getLogger(__name__)
 _RECENT_CLIENT_NOTIFICATIONS: dict[tuple[str, str], float] = {}
 
 
+def resolve_telegram_client_token(
+    order_id: Any = None,
+    tenant_id: str | None = None,
+    channel_user_id: str | None = None,
+    explicit_token: str | None = None,
+) -> str:
+    """Resolve the exact Telegram Bot Token so notifications arrive strictly at the bot the user used."""
+    if explicit_token and explicit_token.strip():
+        return explicit_token.strip()
+
+    from src.repositories.identity_store import identity_store
+
+    order_info = None
+    if order_id is not None:
+        try:
+            order_info = identity_store.get_order_channel_info(order_id)
+        except Exception:
+            pass
+
+    if order_info:
+        if order_info.get("bot_token"):
+            return order_info["bot_token"].strip()
+        if not channel_user_id and order_info.get("channel_user_id"):
+            channel_user_id = str(order_info["channel_user_id"]).strip()
+        if not tenant_id and order_info.get("tenant_id"):
+            tenant_id = order_info["tenant_id"].strip().lower()
+
+    ord_obj = None
+    if order_id is not None:
+        try:
+            from src.repositories import get_repository
+            repo = get_repository()
+            ord_obj = repo.get_order_by_id(tenant_id or "petroil", order_id)
+            if not ord_obj and tenant_id != "gascytsa":
+                ord_obj = repo.get_order_by_id("gascytsa", order_id)
+            if not ord_obj and tenant_id not in ("hermosillo", "blue_propane"):
+                ord_obj = repo.get_order_by_id("blue_propane", order_id) or repo.get_order_by_id("hermosillo", order_id)
+            if ord_obj:
+                if not channel_user_id and getattr(ord_obj, "channel_user_id", None):
+                    channel_user_id = str(ord_obj.channel_user_id).strip()
+                if not tenant_id and getattr(ord_obj, "tenant_id", None):
+                    tenant_id = str(ord_obj.tenant_id).strip().lower()
+                # Verificar si los aliases (id numérico u orderNumber) tienen bot_token guardado
+                for alias_k in (getattr(ord_obj, "id", None), getattr(ord_obj, "orderNumber", None)):
+                    if alias_k:
+                        a_info = identity_store.get_order_channel_info(alias_k)
+                        if a_info and a_info.get("bot_token"):
+                            return a_info["bot_token"].strip()
+        except Exception:
+            pass
+
+    # Aislamiento estricto: Detectar si el pedido pertenece al bot de pruebas (Luke GasSkywalker)
+    is_test_order = False
+    if order_info:
+        test_tok = (os.getenv("TELEGRAM_TEST_BOT_TOKEN") or "").strip()
+        if test_tok and order_info.get("bot_token") == test_tok:
+            is_test_order = True
+        elif "test" in str(order_info.get("channel", "")).lower():
+            is_test_order = True
+
+    if ord_obj and not is_test_order:
+        notes_str = str(getattr(ord_obj, "notes", "") or "").lower()
+        chan_str = str(getattr(ord_obj, "channel", "") or "").lower()
+        if "[test_bot]" in notes_str or "[test]" in notes_str or "test" in chan_str:
+            is_test_order = True
+
+    if is_test_order:
+        # Un pedido de prueba NUNCA debe resolverse al token de producción
+        test_tok = (os.getenv("TELEGRAM_TEST_BOT_TOKEN") or "").strip()
+        return test_tok
+
+    # 1. Si se tiene el identificador del usuario, consultar si tiene preferencia registrada (PRIORIDAD AL BOT QUE USÓ EL CLIENTE)
+    if channel_user_id:
+        try:
+            user_pref = identity_store.get_user_bot_preference(str(channel_user_id))
+            if user_pref:
+                pref_tok = (user_pref.get("bot_token") or "").strip()
+                test_tok = (os.getenv("TELEGRAM_TEST_BOT_TOKEN") or "").strip()
+                # Si el pedido es de producción, NO heredar token de pruebas aunque el usuario haya usado el bot de pruebas antes
+                if order_id is not None and not is_test_order and pref_tok and pref_tok == test_tok:
+                    pass
+                elif pref_tok:
+                    return pref_tok
+                if user_pref.get("tenant_id") in ("hermosillo", "blue_propane"):
+                    settings = get_settings()
+                    token = (
+                        os.getenv("TELEGRAM_BOT_HERMOSILLO_TOKEN", "")
+                        or os.getenv("TELEGRAM_HERMOSILLO", "")
+                        or os.getenv("TELEGRAM_BOT_BLUE_PROPANE_TOKEN", "")
+                        or os.getenv("TELEGRAM_BLUE_PROPANE", "")
+                        or getattr(settings, "telegram_bot_hermosillo_token", "")
+                    ).strip()
+                    if token:
+                        return token
+                if user_pref.get("tenant_id") == "gascytsa":
+                    settings = get_settings()
+                    token = (
+                        os.getenv("TELEGRAM_BOT_GASCYTSA_TOKEN", "")
+                        or os.getenv("TELEGRAM_GASCYTSA", "")
+                        or getattr(settings, "telegram_bot_gascytsa_token", "")
+                    ).strip()
+                    if token:
+                        return token
+        except Exception:
+            pass
+
+    eff_tenant = str(tenant_id or "").strip().lower()
+
+    # 2. Si el pedido o contexto es de Hermosillo / Blue Propane
+    if eff_tenant in ("hermosillo", "blue_propane"):
+        settings = get_settings()
+        token = (
+            os.getenv("TELEGRAM_BOT_HERMOSILLO_TOKEN", "")
+            or os.getenv("TELEGRAM_HERMOSILLO", "")
+            or os.getenv("TELEGRAM_BOT_BLUE_PROPANE_TOKEN", "")
+            or os.getenv("TELEGRAM_BLUE_PROPANE", "")
+            or getattr(settings, "telegram_bot_hermosillo_token", "")
+        ).strip()
+        if not token:
+            try:
+                from src.services.dynamic_settings import get_dynamic_setting
+                token = (
+                    get_dynamic_setting("TELEGRAM_BOT_HERMOSILLO_TOKEN", tenant_id="blue_propane")
+                    or get_dynamic_setting("TELEGRAM_BOT_HERMOSILLO_TOKEN", tenant_id="hermosillo")
+                    or ""
+                ).strip()
+            except Exception:
+                pass
+        if token:
+            return token
+
+    # 3. Si el pedido o contexto es de Gascytsa (Culiacán)
+    if eff_tenant == "gascytsa":
+        settings = get_settings()
+        token = (
+            os.getenv("TELEGRAM_BOT_GASCYTSA_TOKEN", "")
+            or os.getenv("TELEGRAM_GASCYTSA", "")
+            or getattr(settings, "telegram_bot_gascytsa_token", "")
+        ).strip()
+        if not token:
+            try:
+                from src.services.dynamic_settings import get_dynamic_setting
+                token = (get_dynamic_setting("TELEGRAM_BOT_GASCYTSA_TOKEN", tenant_id="gascytsa") or "").strip()
+            except Exception:
+                pass
+        if token:
+            return token
+
+    # 3. Petroil (Mazatlán) o fallback
+    settings = get_settings()
+    token = (
+        os.getenv("TELEGRAM_BOT_TOKEN", "")
+        or getattr(settings, "telegram_bot_token", "")
+    ).strip()
+    if not token:
+        try:
+            from src.services.dynamic_settings import get_dynamic_setting
+            token = (get_dynamic_setting("TELEGRAM_BOT_TOKEN", tenant_id="petroil") or "").strip()
+        except Exception:
+            pass
+    return token
+
+
 def _send_telegram_api_call(token: str, method: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     """Send a request directly to Telegram Bot API and return parsed JSON response."""
     if not token:
@@ -332,6 +495,8 @@ def send_client_live_location(
     live_period: int = 7200,
     channel: str | None = None,
     order_id: Any = None,
+    tenant_id: str | None = None,
+    bot_token: str | None = None,
 ) -> int | None:
     """Send a live location pin or tracking card to the customer (Telegram, WhatsApp, Messenger, or Instagram)."""
     if not channel_user_id:
@@ -538,8 +703,7 @@ def send_client_live_location(
                 channel = "telegram"
 
     # Telegram
-    settings = get_settings()
-    token = settings.telegram_bot_token
+    token = resolve_telegram_client_token(order_id=order_id, tenant_id=tenant_id, channel_user_id=uid_str, explicit_token=bot_token)
     if not token:
         return None
 
@@ -567,6 +731,9 @@ def edit_client_live_location(
     latitude: float,
     longitude: float,
     channel: str | None = None,
+    tenant_id: str | None = None,
+    bot_token: str | None = None,
+    order_id: Any = None,
 ) -> bool:
     """Update an existing live location pin in the customer's chat (Telegram live location edit, WhatsApp map update)."""
     if not channel_user_id:
@@ -577,8 +744,7 @@ def edit_client_live_location(
         return True
 
     # Telegram
-    settings = get_settings()
-    token = settings.telegram_bot_token
+    token = resolve_telegram_client_token(order_id=order_id, tenant_id=tenant_id, channel_user_id=channel_user_id, explicit_token=bot_token)
     if not token or not message_id:
         return False
 
@@ -596,13 +762,18 @@ def edit_client_live_location(
     return False
 
 
-def remove_client_live_location(channel_user_id: str, message_id: int) -> bool:
+def remove_client_live_location(
+    channel_user_id: str,
+    message_id: int,
+    tenant_id: str | None = None,
+    bot_token: str | None = None,
+    order_id: Any = None,
+) -> bool:
     """Delete or stop the live location pin from the customer's chat."""
     if not channel_user_id or not message_id or message_id in (999999, 888888):
         return False
 
-    settings = get_settings()
-    token = settings.telegram_bot_token
+    token = resolve_telegram_client_token(order_id=order_id, tenant_id=tenant_id, channel_user_id=channel_user_id, explicit_token=bot_token)
     if not token:
         return False
 
@@ -632,6 +803,7 @@ def cleanup_client_order_buttons(
     chat_id: str | int | None = None,
     keep_message_id: int | None = None,
     tenant_id: str = "petroil",
+    bot_token: str | None = None,
 ) -> None:
     """
     Remove interactive Cancel buttons from previous client messages for an order,
@@ -642,8 +814,7 @@ def cleanup_client_order_buttons(
 
     from src.repositories.identity_store import identity_store
 
-    settings = get_settings()
-    token = settings.telegram_bot_token
+    token = resolve_telegram_client_token(order_id=order_id, tenant_id=tenant_id, channel_user_id=str(chat_id or "") if chat_id else None, explicit_token=bot_token)
     if not token:
         return
 
@@ -676,6 +847,9 @@ def notify_client(
     message: str,
     reply_markup: dict[str, Any] | None = None,
     channel: str | None = None,
+    tenant_id: str | None = None,
+    bot_token: str | None = None,
+    order_id: Any = None,
 ) -> bool:
     """Send an automated notification to the customer via Client Bot (Telegram or WhatsApp)."""
     if not channel_user_id:
@@ -701,16 +875,15 @@ def notify_client(
         return True
     _RECENT_CLIENT_NOTIFICATIONS[msg_key] = now
 
-
     m_lower = message.lower()
     order_match = re.search(r"(?:pedido|folio)\s*#?\s*(\d+)", message, re.IGNORECASE)
+    eff_order_id = order_id or (order_match.group(1) if order_match else None)
     is_terminal = any(k in m_lower for k in ["cancelado", "entregado", "califica", "encuesta"])
-    if not reply_markup and order_match and not is_terminal:
-        order_id = order_match.group(1)
+    if not reply_markup and eff_order_id and not is_terminal:
         reply_markup = {
             "inline_keyboard": [
                 [
-                    {"text": "❌ Cancelar Pedido", "callback_data": f"cancel_order_client:{order_id}"},
+                    {"text": "❌ Cancelar Pedido", "callback_data": f"cancel_order_client:{eff_order_id}"},
                 ]
             ]
         }
@@ -793,10 +966,14 @@ def notify_client(
         return _dispatch_wa_client_msg(clean_digits or uid_str, wa_text)
 
     # Telegram
-    settings = get_settings()
-    token = settings.telegram_bot_token
+    token = resolve_telegram_client_token(
+        order_id=eff_order_id,
+        tenant_id=tenant_id,
+        channel_user_id=uid_str,
+        explicit_token=bot_token,
+    )
     if not token:
-        logger.warning("[notify_client] No telegram_bot_token configured.")
+        logger.warning(f"[notify_client] No telegram token resolved for client notification ({uid_str}).")
         return False
 
     payload: dict[str, Any] = {
@@ -816,12 +993,11 @@ def notify_client(
     if ok:
         logger.info(f"📣 [notify_client] Notificación enviada exitosamente por Telegram al cliente (chat_id: {uid_str})")
         new_msg_id = resp.get("result", {}).get("message_id")
-        if order_match:
-            o_id = order_match.group(1)
+        if eff_order_id:
             if is_terminal:
-                cleanup_client_order_buttons(o_id, chat_id=uid_str, keep_message_id=None)
+                cleanup_client_order_buttons(eff_order_id, chat_id=uid_str, keep_message_id=None, tenant_id=tenant_id or "petroil", bot_token=token)
             elif reply_markup and new_msg_id:
-                cleanup_client_order_buttons(o_id, chat_id=uid_str, keep_message_id=new_msg_id)
+                cleanup_client_order_buttons(eff_order_id, chat_id=uid_str, keep_message_id=new_msg_id, tenant_id=tenant_id or "petroil", bot_token=token)
         return True
 
     # Fallback automático a WhatsApp si Telegram falla y tenemos teléfono de 10+ dígitos
@@ -959,20 +1135,29 @@ def notify_driver_order_cancelled(
 
 def notify_delivery_survey(order_id: Any, tenant_id: str = "petroil") -> bool:
     """Send delivery completion notification and interactive driver rating survey to the customer (Telegram or WhatsApp)."""
-    # Limpiar inmediatamente los botones de cancelar anteriores del cliente
-    cleanup_client_order_buttons(order_id, keep_message_id=None)
-
     from src.repositories import get_repository
+    from src.repositories.identity_store import identity_store
     repo = get_repository()
-    order = repo.get_order_by_id(tenant_id, order_id)
+
+    chan_info = identity_store.get_order_channel_info(order_id)
+    eff_tenant = tenant_id
+    eff_bot_token = ""
+    if chan_info:
+        if chan_info.get("tenant_id"):
+            eff_tenant = chan_info["tenant_id"]
+        if chan_info.get("bot_token"):
+            eff_bot_token = chan_info["bot_token"]
+
+    # Limpiar inmediatamente los botones de cancelar anteriores del cliente
+    cleanup_client_order_buttons(order_id, keep_message_id=None, tenant_id=eff_tenant, bot_token=eff_bot_token)
+
+    order = repo.get_order_by_id(eff_tenant, order_id) or repo.get_order_by_id(tenant_id, order_id)
     if not order:
         logger.warning(f"[Delivery Survey] Order #{order_id} not found.")
         return False
 
     recipient_id = str(order.channel_user_id or order.customer_phone or "").strip()
-    from src.repositories.identity_store import identity_store
     eff_channel = getattr(order, "channel", "").lower()
-    chan_info = identity_store.get_order_channel_info(order_id)
     if chan_info:
         if not eff_channel or eff_channel == "telegram":
             eff_channel = str(chan_info.get("channel", "")).lower() or eff_channel
@@ -1213,7 +1398,7 @@ def notify_delivery_survey(order_id: Any, tenant_id: str = "petroil") -> bool:
     }
 
     try:
-        notify_client(recipient_id, msg_ticket_tg, channel="telegram")
+        notify_client(recipient_id, msg_ticket_tg, channel="telegram", tenant_id=eff_tenant, bot_token=eff_bot_token, order_id=order_id)
     except Exception as e:
         logger.error(f"Error sending ticket PDF: {e}")
 
@@ -1223,5 +1408,5 @@ def notify_delivery_survey(order_id: Any, tenant_id: str = "petroil") -> bool:
         "Por favor califícalo tocando una de las estrellas a continuación (1 a 5):"
     )
 
-    return notify_client(recipient_id, msg_cliente, reply_markup=reply_markup, channel="telegram")
+    return notify_client(recipient_id, msg_cliente, reply_markup=reply_markup, channel="telegram", tenant_id=eff_tenant, bot_token=eff_bot_token, order_id=order_id)
 

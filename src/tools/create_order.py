@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import re
+import sys
 from typing import Any
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
@@ -169,7 +172,8 @@ def create_order(
 
         if delivery_lat is None or delivery_lng is None or delivery_lat == 0.0:
             try:
-                target_city = "Culiacán" if (tenant_id or "").lower() == "gascytsa" else "Mazatlán"
+                t_lower = (tenant_id or "").lower()
+                target_city = "Hermosillo" if t_lower in ("hermosillo", "blue_propane") else ("Culiacán" if t_lower == "gascytsa" else "Mazatlán")
                 g_lat, g_lng, _ = geocode_address(clean_addr, city_context=target_city, fallback_to_default=False)
                 if g_lat and g_lng:
                     delivery_lat, delivery_lng = g_lat, g_lng
@@ -198,6 +202,48 @@ def create_order(
                 clean_sched_for = dt_parsed.isoformat()
                 clean_sched = format_schedule_display(dt_parsed)
 
+        effective_bot_token = configurable.get("bot_token", "")
+        if not effective_bot_token and str(channel).lower() == "telegram":
+            if channel_user_id:
+                try:
+                    from src.repositories.identity_store import identity_store
+                    user_pref = identity_store.get_user_bot_preference(str(channel_user_id))
+                    if user_pref and user_pref.get("bot_token"):
+                        effective_bot_token = user_pref["bot_token"].strip()
+                except Exception:
+                    pass
+            if not effective_bot_token:
+                from src.config.settings import get_settings
+                t_low = str(tenant_id).lower()
+                if t_low in ("hermosillo", "blue_propane"):
+                    effective_bot_token = (
+                        os.getenv("TELEGRAM_BOT_HERMOSILLO_TOKEN")
+                        or os.getenv("TELEGRAM_HERMOSILLO")
+                        or os.getenv("TELEGRAM_BOT_BLUE_PROPANE_TOKEN")
+                        or os.getenv("TELEGRAM_BLUE_PROPANE")
+                        or getattr(get_settings(), "telegram_bot_hermosillo_token", "")
+                    ).strip()
+                elif t_low == "gascytsa":
+                    effective_bot_token = (
+                        os.getenv("TELEGRAM_BOT_GASCYTSA_TOKEN")
+                        or os.getenv("TELEGRAM_GASCYTSA")
+                        or getattr(get_settings(), "telegram_bot_gascytsa_token", "")
+                    ).strip()
+                elif "test" in sys.argv[0].lower() or "skywalker" in sys.argv[0].lower():
+                    effective_bot_token = (os.getenv("TELEGRAM_TEST_BOT_TOKEN") or "").strip()
+                if not effective_bot_token:
+                    effective_bot_token = (os.getenv("TELEGRAM_BOT_TOKEN") or getattr(get_settings(), "telegram_bot_token", "")).strip()
+
+        is_test_order = (
+            os.getenv("IS_TEST_BOT_PROCESS") == "true"
+            or (effective_bot_token and effective_bot_token == os.getenv("TELEGRAM_TEST_BOT_TOKEN", "").strip())
+            or "test" in sys.argv[0].lower()
+            or "skywalker" in sys.argv[0].lower()
+        )
+        clean_notes = notes.strip()
+        if is_test_order and "[TEST_BOT]" not in clean_notes:
+            clean_notes = f"[TEST_BOT] {clean_notes}".strip()
+
         order = repo.create_order(
             tenant_id=tenant_id,
             customer_name=customer_name.strip(),
@@ -206,12 +252,13 @@ def create_order(
             items=validated_items,
             delivery_schedule=clean_sched,
             payment_method=payment_method.strip() if payment_method else "Efectivo",
-            notes=notes.strip(),
+            notes=clean_notes,
             channel=channel,
             channel_user_id=channel_user_id,
             delivery_lat=delivery_lat,
             delivery_lng=delivery_lng,
             scheduled_for=clean_sched_for,
+            bot_token=effective_bot_token,
         )
 
         # La orden queda registrada (o programada en agenda si es a futuro)
@@ -220,12 +267,20 @@ def create_order(
         # Registrar canal e identidad del cliente para que Torre de Control notifique al asignar chofer
         try:
             from src.repositories.identity_store import identity_store
-            identity_store.save_order_channel_info(
-                order.id,
-                channel=channel,
-                channel_user_id=str(channel_user_id),
-                phone=customer_phone.strip(),
-            )
+            keys_to_save = [order.id, str(order.id)]
+            for extra_attr in ("orderNumber", "external_id", "uuid"):
+                v = getattr(order, extra_attr, None)
+                if v:
+                    keys_to_save.append(str(v).strip())
+            for k in set(keys_to_save):
+                identity_store.save_order_channel_info(
+                    k,
+                    channel=channel,
+                    channel_user_id=str(channel_user_id),
+                    phone=customer_phone.strip(),
+                    tenant_id=tenant_id,
+                    bot_token=effective_bot_token,
+                )
         except Exception:
             pass
 

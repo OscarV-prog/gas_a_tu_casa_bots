@@ -1626,6 +1626,9 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
                             msg_live_notif,
                             btn_cancel,
                             eff_channel,
+                            getattr(order, "tenant_id", None) or TENANT_ID,
+                            None,
+                            order.id,
                         )
             else:
                 # Chofer no tiene GPS todavía: enviar mensaje limpio y solicitarle compartir ubicación
@@ -1638,7 +1641,16 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
                     f"• 🚘 **Unidad:** {v_plate}{phone_line}\n\n"
                     "Tu repartidor ya inició su recorrido. Te notificaremos cualquier avance de tu entrega. ⛽✨"
                 )
-                await asyncio.to_thread(notify_client, recipient_id, msg_cliente, None, eff_channel)
+                await asyncio.to_thread(
+                    notify_client,
+                    recipient_id,
+                    msg_cliente,
+                    None,
+                    eff_channel,
+                    getattr(order, "tenant_id", None) or TENANT_ID,
+                    None,
+                    order.id,
+                )
 
 
         # Solicitar inmediatamente al chofer transmitir su ubicación GPS real para el cliente
@@ -1743,7 +1755,7 @@ async def manejar_callback_pedidos(update: Update, context: ContextTypes.DEFAULT
 
 
         # NOTIFICAR AL CLIENTE EN TELEGRAM O WHATSAPP CON ENCUESTA INTERACTIVA DE CALIFICACIÓN
-        await asyncio.to_thread(notify_delivery_survey, order.id, TENANT_ID)
+        await asyncio.to_thread(notify_delivery_survey, order.id, getattr(order, "tenant_id", None) or TENANT_ID)
 
     # 2b. Cancelación masiva de todos los pedidos activos asignados al chofer
     elif data == "cancel_all_my_orders":
@@ -2212,7 +2224,7 @@ async def recibir_foto_chofer(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "¡Excelente trabajo! Estás disponible para nuevos viajes.",
                 parse_mode="Markdown",
             )
-            await asyncio.to_thread(notify_delivery_survey, order.id, TENANT_ID)
+            await asyncio.to_thread(notify_delivery_survey, order.id, getattr(order, "tenant_id", None) or TENANT_ID)
             return
 
     # Si NO había un tipo en espera (el chofer envió la foto sin presionar botón previo)
@@ -2604,6 +2616,13 @@ async def monitor_dashboard_assigned_orders(bot) -> None:
                             if sent:
                                 _notified_dashboard_assigned_orders.add(order_key)
 
+                                # Aislamiento: Si es pedido de prueba, no notificar al cliente desde driver_bot (el bot de pruebas lo atiende)
+                                notes_txt = str(getattr(parsed_order, "notes", "") or "").lower()
+                                chan_txt = str(getattr(parsed_order, "channel", "") or "").lower()
+                                if "[test_bot]" in notes_txt or "[test]" in notes_txt or "test" in chan_txt:
+                                    logger.info(f"🚨 [Dashboard Assignment] Pedido #{parsed_order.id} es de prueba: chofer alertado, notificación a cliente omitida en bot de choferes.")
+                                    continue
+
                                 # Resolver canal e identificador real del cliente (con fallback a identity_store)
                                 eff_chan = parsed_order.channel
                                 eff_uid = parsed_order.channel_user_id
@@ -2612,6 +2631,9 @@ async def monitor_dashboard_assigned_orders(bot) -> None:
                                     if chan_info:
                                         eff_chan = chan_info.get("channel") or eff_chan
                                         eff_uid = chan_info.get("channel_user_id") or eff_uid
+
+                                eff_tenant = getattr(parsed_order, "tenant_id", None) or (chan_info.get("tenant_id") if chan_info else None) or TENANT_ID
+                                eff_token = (chan_info.get("bot_token") if chan_info else "") or ""
 
                                 recipient_id = str(eff_uid or parsed_order.customer_phone or "").strip()
                                 if recipient_id:
@@ -2624,7 +2646,16 @@ async def monitor_dashboard_assigned_orders(bot) -> None:
                                         f"{d_phone_line}\n"
                                         f"El operador está preparando tu unidad y te avisaremos en cuanto inicie su recorrido hacia tu domicilio. ⛽"
                                     )
-                                    await asyncio.to_thread(notify_client, recipient_id, msg_asignacion, None, eff_chan)
+                                    await asyncio.to_thread(
+                                        notify_client,
+                                        recipient_id,
+                                        msg_asignacion,
+                                        None,
+                                        eff_chan,
+                                        eff_tenant,
+                                        eff_token,
+                                        parsed_order.id,
+                                    )
         except Exception as e:
             logger.debug(f"[Monitor Dashboard Orders Loop] {e}")
 

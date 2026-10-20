@@ -94,6 +94,7 @@ class FlowSession:
     awaiting_rating_order_id: int | None = None
     proposed_schedule: str | None = None
     proposed_scheduled_for: str | None = None
+    bot_token: str = ""
 
 
 @dataclass
@@ -108,8 +109,13 @@ class FlowResponse:
 
 
 def _get_city_context_for_tenant(tenant_id: str) -> str:
-    """Retorna la ciudad objetivo según el tenant (ej. Culiacán para Gascytsa, Mazatlán para Petroil)."""
-    return "Culiacán" if (tenant_id or "").lower() == "gascytsa" else "Mazatlán"
+    """Retorna la ciudad objetivo según el tenant (ej. Hermosillo para Hermosillo, Culiacán para Gascytsa, Mazatlán para Petroil)."""
+    t = (tenant_id or "").lower()
+    if t in ("hermosillo", "blue_propane"):
+        return "Hermosillo"
+    if t == "gascytsa":
+        return "Culiacán"
+    return "Mazatlán"
 
 
 
@@ -122,6 +128,7 @@ def get_or_create_session(
     tenant_id: str = "petroil",
     channel: str = "telegram",
     channel_user_id: str = "",
+    bot_token: str = "",
 ) -> FlowSession:
     """Obtiene o inicializa la sesión conversacional."""
     if session_id not in _SESSIONS:
@@ -130,6 +137,7 @@ def get_or_create_session(
             tenant_id=tenant_id,
             channel=channel,
             channel_user_id=channel_user_id,
+            bot_token=bot_token,
         )
     sess = _SESSIONS[session_id]
     sess.last_interaction = datetime.now().timestamp()
@@ -137,6 +145,15 @@ def get_or_create_session(
         sess.channel = channel
     if channel_user_id:
         sess.channel_user_id = channel_user_id
+    if tenant_id:
+        sess.tenant_id = tenant_id
+    if bot_token:
+        sess.bot_token = bot_token
+    elif not sess.bot_token and channel == "telegram" and channel_user_id:
+        from src.repositories.identity_store import identity_store
+        pref = identity_store.get_user_bot_preference(str(channel_user_id))
+        if pref and pref.get("bot_token"):
+            sess.bot_token = pref["bot_token"]
 
     # Auto-vincular teléfono y nombre si están guardados en identity_store
     if not sess.draft_order.customer_phone and sess.channel and sess.channel_user_id:
@@ -228,7 +245,11 @@ def detect_correction_or_backtracking_intent(
             return CorrectionIntent(target="new_order", extracted_value=items, original_text=text)
 
     # 0.1 Si el usuario escribe directamente un producto durante cualquier estado de dirección, fecha o confirmación (y no es una pregunta de precio/FAQ)
-    if session and session.state not in (FlowState.INITIAL, FlowState.WAITING_FOR_PRODUCT_OR_QUANTITY):
+    if session and session.state not in (
+        FlowState.INITIAL,
+        FlowState.WAITING_FOR_PRODUCT_OR_QUANTITY,
+        FlowState.WAITING_FOR_STATIONARY_DETAILS,
+    ):
         is_faq_question = "?" in t or any(k in t for k in ["cuanto", "cuánto", "precio", "costo", "vale", "cotiz", "a cómo", "a como"])
         if not is_faq_question:
             tenant_id = getattr(session, "tenant_id", "petroil") if session else "petroil"
@@ -809,7 +830,8 @@ def check_out_of_flow_inquiry(text: str, tenant_id: str = "petroil") -> str | No
                 tc = get_tenant(tenant_id)
                 biz_name = tc.business_name
             except Exception:
-                biz_name = "Gas a tu Puerta Gascytsa" if (tenant_id or "").lower() == "gascytsa" else "Gas a Tu Puerta - Petroil"
+                t_low = (tenant_id or "").lower()
+                biz_name = "Gas a tu Puerta Hermosillo" if t_low in ("hermosillo", "blue_propane") else ("Gas a tu Puerta Gascytsa" if t_low == "gascytsa" else "Gas a Tu Puerta - Petroil")
             return f"📋 **Precios Oficiales de Gas LP ({biz_name}):**\n" + "\n".join(lines)
 
     return None
@@ -924,8 +946,16 @@ async def handle_out_of_flow_with_llm(
         tc = get_tenant(tenant_id)
         biz_name = tc.business_name
     except Exception:
-        biz_name = "Gas a tu Puerta Gascytsa" if (tenant_id or "").lower() == "gascytsa" else "Gas a Tu Puerta - Petroil"
-    cobertura_desc = "Exclusivamente en la ciudad y zona urbana de Culiacán, Sinaloa." if (tenant_id or "").lower() == "gascytsa" else "En todas las ciudades, municipios y sucursales autorizadas de Petroil / Petrogas."
+        t_low = (tenant_id or "").lower()
+        if t_low in ("hermosillo", "blue_propane"):
+            biz_name = "Gas a tu Puerta Hermosillo"
+            cobertura_desc = "Exclusivamente en la ciudad y zona urbana de Hermosillo, Sonora."
+        elif t_low == "gascytsa":
+            biz_name = "Gas a tu Puerta Gascytsa"
+            cobertura_desc = "Exclusivamente en la ciudad y zona urbana de Culiacán, Sinaloa."
+        else:
+            biz_name = "Gas a Tu Puerta - Petroil"
+            cobertura_desc = "En todas las ciudades, municipios y sucursales autorizadas de Petroil / Petrogas."
 
     system_prompt = (
         f"Eres el Asistente Virtual Inteligente de {biz_name}.\n"
@@ -1091,9 +1121,10 @@ class FlowRouter:
         channel: str = "telegram",
         channel_user_id: str = "",
         tenant_id: str = "petroil",
+        bot_token: str = "",
     ) -> FlowResponse:
         """Punto de entrada unificado para todos los canales y eventos."""
-        session = get_or_create_session(session_id, tenant_id=tenant_id, channel=channel, channel_user_id=channel_user_id)
+        session = get_or_create_session(session_id, tenant_id=tenant_id, channel=channel, channel_user_id=channel_user_id, bot_token=bot_token)
         repo = get_repository()
 
         # ---------------------------------------------------------------------
@@ -1112,8 +1143,30 @@ class FlowRouter:
             lng = float(location["longitude"])
             resolved_name = reverse_geocode(lat, lng)
 
-            # Validación de ubicación física a Mazatlán (< 35km) y semántica con Inteligencia Artificial
-            if session.tenant_id == "petroil":
+            # Validación de ubicación física a Mazatlán / Culiacán / Hermosillo (< 35km) y semántica con Inteligencia Artificial
+            if session.tenant_id in ("hermosillo", "blue_propane"):
+                from src.services.geocoding import calculate_distance_km, HERMOSILLO_LAT, HERMOSILLO_LNG
+                dist = calculate_distance_km(lat, lng, HERMOSILLO_LAT, HERMOSILLO_LNG)
+                if dist > 35.0:
+                    telemetry.record_message(channel=channel, is_llm=False)
+                    return FlowResponse(
+                        text="⚠️ Por el momento nuestro servicio de Gas a tu Puerta Hermosillo tiene cobertura exclusivamente en la ciudad de Hermosillo, Sonora. Por favor proporciona una dirección o ubicación dentro de Hermosillo 📍:",
+                        state=session.state,
+                        is_llm=False,
+                        action_performed="ask_new_customer_address",
+                    )
+            elif session.tenant_id == "gascytsa":
+                from src.services.geocoding import calculate_distance_km, CULIACAN_LAT, CULIACAN_LNG
+                dist = calculate_distance_km(lat, lng, CULIACAN_LAT, CULIACAN_LNG)
+                if dist > 35.0:
+                    telemetry.record_message(channel=channel, is_llm=False)
+                    return FlowResponse(
+                        text="⚠️ Por el momento nuestro servicio de Gas a tu Puerta Gascytsa tiene cobertura exclusivamente en la ciudad de Culiacán, Sinaloa. Por favor proporciona una dirección o ubicación dentro de Culiacán 📍:",
+                        state=session.state,
+                        is_llm=False,
+                        action_performed="ask_new_customer_address",
+                    )
+            elif session.tenant_id == "petroil":
                 from src.services.geocoding import calculate_distance_km, DEFAULT_LAT, DEFAULT_LNG
                 dist = calculate_distance_km(lat, lng, DEFAULT_LAT, DEFAULT_LNG)
                 if dist > 35.0:
@@ -1386,6 +1439,13 @@ class FlowRouter:
                 draft.delivery_schedule = "Lo antes posible"
                 draft.scheduled_for = None
                 draft.payment_method = "Efectivo"
+                known_phone = draft.customer_phone or cls._get_known_phone_for_session(session, repo)
+                if known_phone:
+                    draft.customer_phone = known_phone
+                    resp = await cls._advance_after_phone(session, known_phone, repo)
+                    resp.text = f"¡Anotado! 🛒 Has seleccionado: **{items_str}**.\n\n" + resp.text
+                    return resp
+
                 session.state = FlowState.WAITING_FOR_PHONE
                 return FlowResponse(
                     text=f"¡Anotado! 🛒 Has seleccionado: **{items_str}**.\n\nPor favor indícame tu **número celular** (10 dígitos) para buscar tu cuenta:",
@@ -2102,7 +2162,7 @@ class FlowRouter:
                         "delivery_lng": draft.delivery_lng,
                         "scheduled_for": draft.scheduled_for,
                     },
-                    config={"configurable": {"tenant_id": session.tenant_id, "channel": session.channel, "channel_user_id": session.channel_user_id}},
+                    config={"configurable": {"tenant_id": session.tenant_id, "channel": session.channel, "channel_user_id": session.channel_user_id, "bot_token": getattr(session, "bot_token", "")}},
                 )
                 session.state = FlowState.COMPLETED
                 m_ord = re.search(r"#\s*(\d+)", res_tool)
@@ -2346,15 +2406,17 @@ class FlowRouter:
             if est_items:
                 telemetry.record_message(channel=session.channel, is_llm=False)
                 draft.items = est_items
-                known_phone = draft.customer_phone or cls._get_known_phone_for_session(session, repo)
-                if known_phone:
-                    draft.customer_phone = known_phone
-                    return await cls._advance_after_phone(session, known_phone, repo)
-
-                session.state = FlowState.WAITING_FOR_PHONE
                 st_q = est_items[0]["quantity"]
                 st_p = est_items[0]["unit_price"]
                 st_tot = round(float(st_q) * float(st_p), 2)
+                known_phone = draft.customer_phone or cls._get_known_phone_for_session(session, repo)
+                if known_phone:
+                    draft.customer_phone = known_phone
+                    resp = await cls._advance_after_phone(session, known_phone, repo)
+                    resp.text = f"¡Anotado! 🚛 **{st_q:g} L {est_items[0]['product_name']}** (${st_tot:,.2f} MXN).\n\n" + resp.text
+                    return resp
+
+                session.state = FlowState.WAITING_FOR_PHONE
                 return FlowResponse(
                     text=f"¡Anotado! 🚛 **{st_q:g} L {est_items[0]['product_name']}** (${st_tot:,.2f} MXN).\n\nPor favor compárteme tu **número celular** (10 dígitos) para buscar tu cuenta:",
                     state=session.state,
@@ -2394,7 +2456,9 @@ class FlowRouter:
                     known_phone = draft.customer_phone or cls._get_known_phone_for_session(session, repo)
                     if known_phone:
                         draft.customer_phone = known_phone
-                        return await cls._advance_after_phone(session, known_phone, repo)
+                        resp = await cls._advance_after_phone(session, known_phone, repo)
+                        resp.text = f"¡Anotado! 🚛 **{liters:g} L {st_name}** (${amt_val:,.2f} MXN).\n\n" + resp.text
+                        return resp
                     session.state = FlowState.WAITING_FOR_PHONE
                     return FlowResponse(
                         text=f"¡Anotado! 🚛 **{liters:g} L {st_name}** (${amt_val:,.2f} MXN).\n\nPor favor indícame tu **número celular** (10 dígitos) para buscar tu cuenta:",
@@ -3269,7 +3333,7 @@ class FlowRouter:
                         "delivery_lng": draft.delivery_lng,
                         "scheduled_for": draft.scheduled_for,
                     },
-                    config={"configurable": {"tenant_id": session.tenant_id, "channel": session.channel, "channel_user_id": session.channel_user_id}},
+                    config={"configurable": {"tenant_id": session.tenant_id, "channel": session.channel, "channel_user_id": session.channel_user_id, "bot_token": getattr(session, "bot_token", "")}},
                 )
                 session.state = FlowState.COMPLETED
                 m_ord = re.search(r"#\s*(\d+)", res_tool)

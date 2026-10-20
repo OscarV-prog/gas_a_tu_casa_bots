@@ -50,6 +50,7 @@ class IdentityStore:
         self._chat_live_locations: dict[str, dict[str, Any]] = {}
         self._deleted_addresses: dict[str, list[str]] = {}
         self._order_cancellations: dict[str, dict[str, Any]] = {}
+        self._user_bot_prefs: dict[str, dict[str, str]] = {}
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self._load()
 
@@ -77,12 +78,12 @@ class IdentityStore:
                     self._deleted_addresses = data.get("deleted_addresses", {})
                     self._order_cancellations = data.get("order_cancellations", {})
                     self._deleted_customers = data.get("deleted_customers", [])
+                    self._user_bot_prefs = data.get("user_bot_prefs", {})
         except Exception as e:
             logger.debug(f"[IdentityStore] Error loading identity cache: {e}")
 
     def _save(self) -> None:
         try:
-            temp_file = CACHE_FILE.with_suffix(".tmp")
             payload = {
                 "phone_to_tg": self._phone_to_tg,
                 "tg_to_phone": self._tg_to_phone,
@@ -95,10 +96,16 @@ class IdentityStore:
                 "deleted_addresses": self._deleted_addresses,
                 "order_cancellations": self._order_cancellations,
                 "deleted_customers": getattr(self, "_deleted_customers", []),
+                "user_bot_prefs": getattr(self, "_user_bot_prefs", {}),
             }
-            with open(temp_file, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-            temp_file.replace(CACHE_FILE)
+            try:
+                temp_file = CACHE_FILE.with_suffix(".tmp")
+                with open(temp_file, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                temp_file.replace(CACHE_FILE)
+            except (PermissionError, OSError):
+                with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.debug(f"[IdentityStore] Error saving identity cache: {e}")
 
@@ -287,14 +294,46 @@ class IdentityStore:
 
         return None
 
+    def set_user_bot_preference(
+        self,
+        channel_user_id: str | int,
+        tenant_id: str = "petroil",
+        bot_token: str = "",
+    ) -> None:
+        """Store the bot identity (tenant and bot token) that a user last interacted with."""
+        if not channel_user_id:
+            return
+        uid = str(channel_user_id).strip()
+        if not uid:
+            return
+        self._load()
+        if not hasattr(self, "_user_bot_prefs") or not isinstance(self._user_bot_prefs, dict):
+            self._user_bot_prefs = {}
+        self._user_bot_prefs[uid] = {
+            "tenant_id": str(tenant_id or "petroil").lower().strip(),
+            "bot_token": str(bot_token or "").strip(),
+        }
+        self._save()
+
+    def get_user_bot_preference(self, channel_user_id: str | int) -> dict[str, str] | None:
+        """Retrieve the bot identity (tenant and bot token) that a user last interacted with."""
+        if not channel_user_id:
+            return None
+        uid = str(channel_user_id).strip()
+        self._load()
+        prefs = getattr(self, "_user_bot_prefs", {})
+        return prefs.get(uid)
+
     def save_order_channel_info(
         self,
         order_id: Any,
         channel: str,
         channel_user_id: str,
         phone: str = "",
+        tenant_id: str = "",
+        bot_token: str = "",
     ) -> None:
-        """Store channel and recipient identifier for an order."""
+        """Store channel, recipient identifier, tenant_id, and bot_token for an order."""
         if not order_id:
             return
         self._load()
@@ -302,21 +341,56 @@ class IdentityStore:
         keys = [s_id]
         is_uuid = len(s_id) == 36 and s_id.count("-") == 4
         if not is_uuid:
-            digits = re.findall(r"\d+", s_id)
-            if digits:
-                keys.append(str(int(digits[-1])))
-                keys.append(digits[-1])
+            clean_num = re.sub(r"^[#\s]+", "", s_id)
+            if clean_num.isdigit():
+                keys.append(str(int(clean_num)))
+                keys.append(clean_num)
+
+        # Si no se pasó bot_token explícito, intentar rescatar bot_token preexistente
+        eff_bot_token = str(bot_token or "").strip()
+        if not eff_bot_token:
+            for k in keys:
+                existing = self._order_channels.get(k)
+                if existing and existing.get("bot_token"):
+                    eff_bot_token = existing["bot_token"].strip()
+                    break
+        if not eff_bot_token and channel_user_id:
+            user_pref = self.get_user_bot_preference(str(channel_user_id))
+            if user_pref and user_pref.get("bot_token"):
+                eff_bot_token = user_pref["bot_token"].strip()
 
         info = {
             "channel": str(channel or "telegram").lower(),
             "channel_user_id": str(channel_user_id or ""),
             "phone": str(phone or ""),
+            "tenant_id": str(tenant_id or "").lower().strip(),
+            "bot_token": eff_bot_token,
         }
         for k in set(keys):
             self._order_channels[k] = info
 
         if phone and channel_user_id and str(channel).lower() == "telegram":
-            self.bind_telegram_user_phone(channel_user_id, phone)
+            tg_id = str(channel_user_id).strip()
+            clean_digits = re.sub(r"\D", "", str(phone))
+            if tg_id and clean_digits:
+                if len(clean_digits) >= 10:
+                    self._phone_to_tg[clean_digits[-10:]] = tg_id
+                    self._phone_to_tg[clean_digits] = tg_id
+                self._phone_to_tg[tg_id] = tg_id
+                self._tg_to_phone[tg_id] = clean_digits[-10:] if len(clean_digits) >= 10 else clean_digits
+
+        if channel_user_id and (tenant_id or eff_bot_token):
+            uid = str(channel_user_id).strip()
+            if uid:
+                if not hasattr(self, "_user_bot_prefs") or not isinstance(self._user_bot_prefs, dict):
+                    self._user_bot_prefs = {}
+                existing_pref = self._user_bot_prefs.get(uid, {})
+                pref_bot_token = eff_bot_token or existing_pref.get("bot_token", "")
+                pref_tenant = tenant_id or existing_pref.get("tenant_id", "petroil")
+                self._user_bot_prefs[uid] = {
+                    "tenant_id": str(pref_tenant).lower().strip(),
+                    "bot_token": str(pref_bot_token).strip(),
+                }
 
         self._save()
 
@@ -326,17 +400,29 @@ class IdentityStore:
             return None
         self._load()
         s_id = str(order_id).strip()
+        found_info = None
         if s_id in self._order_channels:
-            return self._order_channels[s_id]
-        is_uuid = len(s_id) == 36 and s_id.count("-") == 4
-        if not is_uuid:
-            digits = re.findall(r"\d+", s_id)
-            if digits:
-                num_str = str(int(digits[-1]))
-                if num_str in self._order_channels:
-                    return self._order_channels[num_str]
-                if digits[-1] in self._order_channels:
-                    return self._order_channels[digits[-1]]
+            found_info = dict(self._order_channels[s_id])
+        else:
+            is_uuid = len(s_id) == 36 and s_id.count("-") == 4
+            if not is_uuid:
+                digits = re.findall(r"\d+", s_id)
+                if digits:
+                    num_str = str(int(digits[-1]))
+                    if num_str in self._order_channels:
+                        found_info = dict(self._order_channels[num_str])
+                    elif digits[-1] in self._order_channels:
+                        found_info = dict(self._order_channels[digits[-1]])
+
+        if found_info:
+            # Enriquecer bot_token si no venía en el registro del pedido
+            if not found_info.get("bot_token") and found_info.get("channel_user_id"):
+                pref = self.get_user_bot_preference(found_info["channel_user_id"])
+                if pref and pref.get("bot_token"):
+                    found_info["bot_token"] = pref["bot_token"]
+                    if not found_info.get("tenant_id") and pref.get("tenant_id"):
+                        found_info["tenant_id"] = pref["tenant_id"]
+            return found_info
         return None
 
     def get_phone_for_channel_user(self, channel: str, channel_user_id: str) -> str | None:

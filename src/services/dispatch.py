@@ -93,9 +93,9 @@ def dispatch_order(order_id: int, tenant_id: str = "petroil", force_immediate: b
         lat = order.delivery_lat
         lng = order.delivery_lng
         formatted_addr = order.delivery_address
-        logger.info(f"[Dispatch] Order #{order_id} using existing GPS: ({lat:.5f}, {lng:.5f})")
     else:
-        target_city = "Culiacán" if (tenant_id or "").lower() == "gascytsa" else "Mazatlán"
+        t_low = (tenant_id or "").lower()
+        target_city = "Hermosillo" if t_low in ("hermosillo", "blue_propane") else ("Culiacán" if t_low == "gascytsa" else "Mazatlán")
         lat, lng, formatted_addr = geocode_address(order.delivery_address, city_context=target_city)
         if lat is not None and lng is not None:
             logger.info(f"[Dispatch] Order #{order_id} geocoded to ({lat:.5f}, {lng:.5f}) - {formatted_addr}")
@@ -196,7 +196,7 @@ def dispatch_order(order_id: int, tenant_id: str = "petroil", force_immediate: b
             f"El operador está preparando su unidad y te avisaremos en cuanto inicie su recorrido hacia tu domicilio. ⛽"
         )
         try:
-            notify_client(recipient_id, msg_asignacion, channel=order.channel)
+            notify_client(recipient_id, msg_asignacion, channel=order.channel, tenant_id=order.tenant_id, order_id=order.id)
         except Exception as e:
             logger.warning(f"[Dispatch] Error al notificar asignación al cliente: {e}")
 

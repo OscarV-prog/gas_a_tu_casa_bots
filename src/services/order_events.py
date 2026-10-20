@@ -13,7 +13,9 @@ state in the Driver PWA or Central NestJS API:
 from __future__ import annotations
 
 import logging
+import os
 import re
+import sys
 import time
 from typing import Any
 
@@ -63,10 +65,11 @@ def _resolve_recipient_and_channel(order: Any, order_id: Any) -> tuple[str, str]
     try:
         chan_info = identity_store.get_order_channel_info(order_id)
         if chan_info:
-            if not channel or channel == "telegram":
-                store_chan = str(chan_info.get("channel", "")).lower()
-                if store_chan:
-                    channel = store_chan
+            store_chan = str(chan_info.get("channel", "")).lower().strip()
+            if not channel:
+                channel = store_chan
+            elif store_chan and store_chan not in ("dashboard", "web", "api", "admin") and channel in ("dashboard", "web", "api", "admin"):
+                channel = store_chan
             if not recipient_id or recipient_id == getattr(order, "customer_phone", ""):
                 store_uid = str(chan_info.get("channel_user_id", "")).strip()
                 if store_uid:
@@ -82,6 +85,32 @@ def _resolve_recipient_and_channel(order: Any, order_id: Any) -> tuple[str, str]
             channel = "telegram"
 
     return recipient_id, channel
+
+
+def _is_order_admissible_for_runner(order: Any, order_id: Any, channel: str = "") -> bool:
+    """Verifica si el pedido corresponde a este proceso ejecutor (pruebas vs producción)."""
+    is_test_runner = os.getenv("IS_TEST_BOT_PROCESS") == "true"
+    is_prod_runner = os.getenv("IS_PRODUCTION_RUNNER") == "true"
+
+    notes_txt = str(getattr(order, "notes", "") or "").lower()
+    chan_txt = str(channel or getattr(order, "channel", "") or "").lower()
+    is_test_order = "[test_bot]" in notes_txt or "[test]" in notes_txt or "test" in chan_txt
+    if not is_test_order:
+        try:
+            info = identity_store.get_order_channel_info(order_id)
+            test_token = os.getenv("TELEGRAM_TEST_BOT_TOKEN", "").strip()
+            if info and test_token and info.get("bot_token") == test_token:
+                is_test_order = True
+            elif info and "test" in str(info.get("channel", "")).lower():
+                is_test_order = True
+        except Exception:
+            pass
+
+    if is_test_runner:
+        return is_test_order
+    if is_test_order:
+        return False
+    return True
 
 
 def notify_order_assigned(
@@ -112,6 +141,9 @@ def notify_order_assigned(
     if not recipient_id:
         return False
 
+    if not _is_order_admissible_for_runner(order, order_id, channel):
+        return False
+
     msg_asignacion = (
         f"🛻 **¡Tu pedido #{order.id} ha sido asignado!**\n\n"
         f"👨‍✈️ **Chofer:** {driver_name}\n"
@@ -121,7 +153,7 @@ def notify_order_assigned(
     )
 
     try:
-        ok = notify_client(recipient_id, msg_asignacion, None, channel)
+        ok = notify_client(recipient_id, msg_asignacion, None, channel, tenant_id=tenant_id, order_id=order_id)
         logger.info(f"📣 [OrderEvents] Assignment notification sent for order #{order_id} to {recipient_id} ({channel}) -> {ok}")
         return ok
     except Exception as e:
@@ -151,6 +183,9 @@ def notify_order_in_route(
 
     recipient_id, channel = _resolve_recipient_and_channel(order, order_id)
     if not recipient_id:
+        return False
+
+    if not _is_order_admissible_for_runner(order, order_id, channel):
         return False
 
     # Extract driver coordinates if available
@@ -199,7 +234,7 @@ def notify_order_in_route(
                     ]
                 ]
             }
-            notify_client(recipient_id, msg_live_notif, btn_cancel, channel)
+            notify_client(recipient_id, msg_live_notif, btn_cancel, channel, tenant_id=tenant_id, order_id=order_id)
 
         logger.info(f"📍 [OrderEvents] In-route GPS tracking initiated for order #{order_id} -> {recipient_id} ({channel})")
         return True
@@ -211,7 +246,7 @@ def notify_order_in_route(
             f"• 🚘 **Unidad:** {v_plate}{phone_line}\n\n"
             "Tu repartidor ya inició su recorrido hacia tu domicilio. Te notificaremos en cuanto esté por llegar. ⛽✨"
         )
-        ok = notify_client(recipient_id, msg_cliente, None, channel)
+        ok = notify_client(recipient_id, msg_cliente, None, channel, tenant_id=tenant_id, order_id=order_id)
         logger.info(f"🚚 [OrderEvents] In-route text notification sent for order #{order_id} -> {recipient_id} ({channel})")
         return ok
 
@@ -264,6 +299,8 @@ def notify_driver_location_update(
                 latitude=float(lat),
                 longitude=float(lng),
                 channel=channel,
+                tenant_id=tenant_id,
+                order_id=order.id,
             )
             updated_count += 1
         else:
@@ -275,6 +312,7 @@ def notify_driver_location_update(
                 live_period=7200,
                 channel=channel,
                 order_id=order.id,
+                tenant_id=tenant_id,
             )
             if new_msg_id:
                 try:
@@ -302,12 +340,15 @@ def notify_order_delivered(
         logger.warning(f"[OrderEvents] Order #{order_id} not found for delivery survey.")
         return False
 
+    if not _is_order_admissible_for_runner(order, order_id):
+        return False
+
     # 1. Clean up live location pin and cancel buttons from customer's chat
     try:
         live_msg_id = getattr(order, "live_location_message_id", None)
         live_chat_id = getattr(order, "live_location_chat_id", None)
         if live_msg_id and live_chat_id:
-            remove_client_live_location(str(live_chat_id), int(live_msg_id))
+            remove_client_live_location(str(live_chat_id), int(live_msg_id), tenant_id=tenant_id, order_id=order.id)
             repo.clear_order_live_location(tenant_id, order.id)
     except Exception as e:
         logger.debug(f"[OrderEvents] Live location cleanup note: {e}")
@@ -350,13 +391,16 @@ def notify_order_cancelled(
     if not order:
         return False
 
+    if not _is_order_admissible_for_runner(order, order_id):
+        return False
+
     # Clean up buttons and live location
     try:
         cleanup_client_order_buttons(order_id, tenant_id=tenant_id, keep_message_id=None)
         live_msg_id = getattr(order, "live_location_message_id", None)
         live_chat_id = getattr(order, "live_location_chat_id", None)
         if live_msg_id and live_chat_id:
-            remove_client_live_location(str(live_chat_id), int(live_msg_id))
+            remove_client_live_location(str(live_chat_id), int(live_msg_id), tenant_id=tenant_id, order_id=order_id)
             repo.clear_order_live_location(tenant_id, order_id)
     except Exception:
         pass
@@ -409,7 +453,7 @@ def notify_order_cancelled(
 
     recipient_id, channel = _resolve_recipient_and_channel(order, order_id)
     if recipient_id:
-        return notify_client(recipient_id, client_cancel_msg, None, channel)
+        return notify_client(recipient_id, client_cancel_msg, None, channel, tenant_id=tenant_id, order_id=order_id)
     return False
 
 

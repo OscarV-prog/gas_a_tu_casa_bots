@@ -555,7 +555,8 @@ class ApiRepository:
         lng = kwargs.get("longitude") or kwargs.get("delivery_lng")
         if (lat is None or lng is None or float(lat) == 0.0) and address:
             try:
-                target_city = "Culiacán" if (tenant_id or "").lower() == "gascytsa" else "Mazatlán"
+                t_low = (tenant_id or "").lower()
+                target_city = "Hermosillo" if t_low in ("hermosillo", "blue_propane") else ("Culiacán" if t_low == "gascytsa" else "Mazatlán")
                 g_lat, g_lng, _ = geocode_address(address, city_context=target_city, fallback_to_default=False)
                 if g_lat and g_lng:
                     lat, lng = g_lat, g_lng
@@ -570,13 +571,16 @@ class ApiRepository:
         else:
             formatted_phone = phone_val
 
+        t_low = (tenant_id or "").lower()
+        target_city = "Hermosillo" if t_low in ("hermosillo", "blue_propane") else ("Culiacán" if t_low == "gascytsa" else "Mazatlán")
+
         body = {
             "tenantId": tenant_id,
             "name": name,
             "phone": formatted_phone or clean_phone or channel_user_id,
-            "address": address or "Mazatlán",
-            "colonia": "Mazatlán",
-            "city": "Mazatlán",
+            "address": address or target_city,
+            "colonia": target_city,
+            "city": target_city,
             "customerType": customer_type,
         }
         if lat is not None and lng is not None:
@@ -1078,7 +1082,8 @@ class ApiRepository:
         clean_pay = "EFECTIVO" if "efectivo" in payment_method.lower() else ("TARJETA" if "tarjeta" in payment_method.lower() or "terminal" in payment_method.lower() else "EFECTIVO")
         clean_channel = channel.upper() if channel else "TELEGRAM"
 
-        target_city = "Culiacán" if (tenant_id or "").lower() == "gascytsa" else "Mazatlán"
+        t_low = (tenant_id or "").lower()
+        target_city = "Hermosillo" if t_low in ("hermosillo", "blue_propane") else ("Culiacán" if t_low == "gascytsa" else "Mazatlán")
         if (delivery_lat is None or delivery_lng is None or float(delivery_lat) == 0.0) and delivery_address:
             try:
                 g_lat, g_lng, _ = geocode_address(delivery_address, city_context=target_city, fallback_to_default=False)
@@ -1222,10 +1227,22 @@ class ApiRepository:
                 if channel_user_id:
                     parsed_ord.channel = channel
                     parsed_ord.channel_user_id = str(channel_user_id)
+                    eff_bot_token = str(kwargs.get("bot_token") or "").strip()
+                    if not eff_bot_token:
+                        pref = identity_store.get_user_bot_preference(str(channel_user_id))
+                        if pref and pref.get("bot_token"):
+                            eff_bot_token = pref["bot_token"]
                     for k in (parsed_ord.id, str(parsed_ord.id), str(res.get("id")), str(res.get("orderNumber"))):
                         if k:
                             self._order_channel_user_ids[k] = (channel, str(channel_user_id))
-                            identity_store.save_order_channel_info(k, channel, str(channel_user_id), customer_phone)
+                            identity_store.save_order_channel_info(
+                                k,
+                                channel,
+                                str(channel_user_id),
+                                customer_phone,
+                                tenant_id=tenant_id,
+                                bot_token=eff_bot_token,
+                            )
                 return parsed_ord
         except Exception as e:
             self._record_api_failure(e)

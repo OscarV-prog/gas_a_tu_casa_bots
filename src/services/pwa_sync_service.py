@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import sys
 from typing import Any
 
 from src.repositories import get_repository
@@ -89,6 +91,29 @@ async def poll_order_updates_once(tenant_id: str = "petroil") -> int:
 
         curr_st = _normalize_status(o.get("status"))
         curr_drv = o.get("driver_id")
+
+        # Aislamiento estricto: El proceso de pruebas solo atiende pedidos de prueba;
+        # cualquier proceso normal/producción jamás atiende pedidos de prueba.
+        is_test_runner = os.getenv("IS_TEST_BOT_PROCESS") == "true"
+        notes_txt = str(o.get("notes") or "").lower()
+        chan_txt = str(o.get("channel") or "").lower()
+        is_test_order = "[test_bot]" in notes_txt or "[test]" in notes_txt or "test" in chan_txt
+        if not is_test_order:
+            try:
+                from src.repositories.identity_store import identity_store
+                info = identity_store.get_order_channel_info(oid)
+                test_token = os.getenv("TELEGRAM_TEST_BOT_TOKEN", "").strip()
+                if info and test_token and info.get("bot_token") == test_token:
+                    is_test_order = True
+            except Exception:
+                pass
+
+        if is_test_runner and not is_test_order:
+            _KNOWN_ORDER_STATES[oid] = {"status": curr_st, "driver_id": curr_drv}
+            continue
+        elif not is_test_runner and is_test_order:
+            _KNOWN_ORDER_STATES[oid] = {"status": curr_st, "driver_id": curr_drv}
+            continue
 
         prev_state = _KNOWN_ORDER_STATES.get(oid)
 
