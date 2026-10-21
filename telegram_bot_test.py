@@ -1248,11 +1248,46 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # 2.4 Si el usuario recién registró su número y está ingresando su nombre deseado
     if context.user_data.get("awaiting_registration_name"):
         clean_name = texto_usuario.strip()
-        digits_in_name = re.sub(r"\D", "", clean_name)
-        if len(digits_in_name) >= 7 or len(clean_name) < 2 or clean_name.startswith("/"):
+        registered_phone = context.user_data.get("phone", "")
+        if not registered_phone:
+            from src.repositories.identity_store import identity_store
+            registered_phone = identity_store.get_phone_for_channel_user("telegram", str(user_id)) or ""
+
+        # Detección temprana de intento de cambiar o registrar otro número
+        is_phone_change = (
+            any(k in texto_lower for k in [
+                "cambiar de numero", "cambiar de número", "cambiar mi numero", "cambiar mi número",
+                "cambiar numero", "cambiar número", "cambiar celular", "cambiar mi celular",
+                "cambiar de celular", "cambiar telefono", "cambiar teléfono", "cambiar de telefono", "cambiar de teléfono",
+                "dar de alta otro", "alta otro numero", "alta a otro numero", "alta otro número", "alta a otro número",
+                "registrar otro", "vincular otro", "usar otro numero", "usar otro número", "usar otro celular",
+                "otro numero", "otro número", "otro celular", "otro cel", "otro telefono", "otro teléfono",
+                "modificar numero", "modificar número", "modificar celular", "actualizar numero", "actualizar número",
+                "actualizar celular", "corregir numero", "corregir número", "corregir celular", "cambiar mi tel",
+                "quiero dar de alta otro", "deseo cambiar mi numero", "deseo cambiar de numero",
+            ])
+            or bool(re.search(r"\b(?:cambiar|corregir|modificar|actualizar|alta|registrar|vincular|usar|meter|poner)\s+(?:de\s+|el\s+|mi\s+|un\s+|a\s+)?(?:otro\s+|nuevo\s+)?(?:celular|cel|tel[eé]fono|n[uú]mero|num|núm)\b", texto_lower))
+            or bool(re.search(r"\botr[ao]\s+(?:tel[eé]fono|celular|cel|n[uú]mero|num|núm)\b", texto_lower))
+            or bool(re.search(r"\b(?:quiero|deseo|necesito|ocupo)\s+(?:cambiar|modificar|actualizar|corregir|registrar|vincular|dar\s+de\s+alta)\s+(?:de\s+|el\s+|mi\s+|otro\s+)?(?:celular|cel|tel[eé]fono|n[uú]mero|num|núm)\b", texto_lower))
+        )
+        if is_phone_change:
+            phone_txt = f" (**{registered_phone}**)" if registered_phone else ""
             await safe_reply_text(
                 update.message,
-                "⚠️ Por favor escribe tu nombre completo (ej. *Juan Pérez*):",
+                f"⛔ **Operación no permitida por seguridad.**\n\n"
+                f"Tu número celular ya quedó registrado{phone_txt}. Por políticas de seguridad y protección de datos (política de 1 cuenta por dispositivo), "
+                f"**no está permitido cambiar de número celular ni registrar múltiples números** desde este dispositivo.\n\n"
+                f"Por favor escribe tu **nombre y apellido** real (ej. *Juan Pérez*) para completar el registro de tu cuenta:",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            return
+
+        from src.services.flow_router import is_plausible_person_name
+        digits_in_name = re.sub(r"\D", "", clean_name)
+        if len(digits_in_name) >= 7 or len(clean_name) < 2 or clean_name.startswith("/") or not is_plausible_person_name(clean_name):
+            await safe_reply_text(
+                update.message,
+                "⚠️ Por favor escribe tu **nombre y apellido** completo (ej. *Juan Pérez*):",
                 reply_markup=ReplyKeyboardRemove(),
             )
             return
@@ -1290,8 +1325,15 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # 2.5 Si el cliente estaba en proceso de editar su nombre de cuenta
     if context.user_data.get("awaiting_account_name_edit"):
-        context.user_data.pop("awaiting_account_name_edit", None)
         new_name = texto_usuario.strip()
+        from src.services.flow_router import is_plausible_person_name
+        if not is_plausible_person_name(new_name):
+            await safe_reply_text(
+                update.message,
+                "⚠️ Por favor escribe un **nombre y apellido** válido (ej. *Juan Pérez*):",
+            )
+            return
+        context.user_data.pop("awaiting_account_name_edit", None)
         cust = get_registered_customer(user_id)
         if cust:
             cust = repo.save_or_update_customer(
@@ -1509,6 +1551,40 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
+    # 3.1 Seguridad estricta: Bloquear cualquier intento de cambiar o registrar otro número si el usuario ya está dado de alta
+    is_phone_change_attempt = (
+        any(k in texto_lower for k in [
+            "cambiar de numero", "cambiar de número", "cambiar mi numero", "cambiar mi número",
+            "cambiar numero", "cambiar número", "cambiar celular", "cambiar mi celular",
+            "cambiar de celular", "cambiar telefono", "cambiar teléfono", "cambiar de telefono", "cambiar de teléfono",
+            "dar de alta otro", "alta otro numero", "alta a otro numero", "alta otro número", "alta a otro número",
+            "registrar otro", "vincular otro", "usar otro numero", "usar otro número", "usar otro celular",
+            "otro numero", "otro número", "otro celular", "otro cel", "otro telefono", "otro teléfono",
+            "modificar numero", "modificar número", "modificar celular", "actualizar numero", "actualizar número",
+            "actualizar celular", "corregir numero", "corregir número", "corregir celular", "cambiar mi tel",
+            "quiero dar de alta otro", "deseo cambiar mi numero", "deseo cambiar de numero",
+        ])
+        or bool(re.search(r"\b(?:cambiar|corregir|modificar|actualizar|alta|registrar|vincular|usar|meter|poner)\s+(?:de\s+|el\s+|mi\s+|un\s+|a\s+)?(?:otro\s+|nuevo\s+)?(?:celular|cel|tel[eé]fono|n[uú]mero|num|núm)\b", texto_lower))
+        or bool(re.search(r"\botr[ao]\s+(?:tel[eé]fono|celular|cel|n[uú]mero|num|núm)\b", texto_lower))
+        or bool(re.search(r"\b(?:quiero|deseo|necesito|ocupo)\s+(?:cambiar|modificar|actualizar|corregir|registrar|vincular|dar\s+de\s+alta)\s+(?:de\s+|el\s+|mi\s+|otro\s+)?(?:celular|cel|tel[eé]fono|n[uú]mero|num|núm)\b", texto_lower))
+    )
+    is_raw_different_phone = False
+    raw_digits_only = re.sub(r"\D", "", texto_usuario.strip())
+    if len(raw_digits_only) == 10 and raw_digits_only != cust.phone and len(texto_usuario.strip().split()) == 1:
+        is_raw_different_phone = True
+
+    if is_phone_change_attempt or is_raw_different_phone:
+        await safe_reply_text(
+            update.message,
+            "⛔ **Operación no permitida por seguridad.**\n\n"
+            f"Tu cuenta ya se encuentra registrada y vinculada a tu número celular (**{cust.phone}**).\n\n"
+            "Por políticas de seguridad y protección de tus datos (política de 1 cuenta por dispositivo), "
+            "**no está permitido cambiar de número celular ni registrar múltiples números** desde este mismo chat.\n\n"
+            "Si cambiaste de número o requieres soporte para tu cuenta, por favor comunícate directamente con nuestro centro de atención a clientes. ⛽📞",
+            reply_markup=get_botones_tipo_servicio(),
+        )
+        return
+
     # Usuario ya registrado: verificar si solicita el menú o gestión de cuenta
     if texto_lower in ("/menu", "menu", "menú", "opciones", "/opciones"):
         await mostrar_menu_principal(update, context, cust.name or "Cliente", cust.phone)
@@ -1544,11 +1620,14 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         flow_session = flow_router.get_session(thread_id)
         active_phone = (
-            (flow_session.draft_order.customer_phone if flow_session and flow_session.draft_order else "")
+            cust.phone
+            or (flow_session.draft_order.customer_phone if flow_session and flow_session.draft_order else "")
             or context.user_data.get("phone", "")
         )
         if active_phone:
             context.user_data["phone"] = active_phone
+            if flow_session and flow_session.draft_order:
+                flow_session.draft_order.customer_phone = active_phone
             from src.repositories.identity_store import identity_store
             identity_store.bind_channel_user_phone("telegram", str(user_id), active_phone)
             if hasattr(repo, "bind_telegram_user_phone"):

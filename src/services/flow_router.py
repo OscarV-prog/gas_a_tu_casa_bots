@@ -497,7 +497,8 @@ def is_plausible_person_name(text: str) -> bool:
         "espera", "hola", "buenos", "buenas", "tardes", "dias", "días", "noches", "gracias",
         "ayuda", "no se", "no sé", "ninguno", "nada", "jaja", "xd", "oye", "disculpa",
         "perdon", "perdón", "quiero", "favor", "porfa", "cuanto vale", "cuánto vale",
-        "estatus", "donde viene", "dónde viene", "falsa", "chistoso"
+        "estatus", "donde viene", "dónde viene", "falsa", "chistoso",
+        "dar de alta", "linea", "línea"
     ]
 
     for pw in prohibited_keywords:
@@ -1607,6 +1608,36 @@ class FlowRouter:
 
         # 5. TELÉFONO / CELULAR / NÚMERO
         elif intent.target == "phone":
+            known_phone = cls._get_known_phone_for_session(session, repo)
+            if known_phone:
+                draft.customer_phone = known_phone
+                curr_state = session.state
+                act_perf = "show_service_buttons"
+                if curr_state == FlowState.WAITING_FOR_CONFIRMATION:
+                    act_perf = "show_confirmation"
+                elif curr_state == FlowState.WAITING_FOR_SCHEDULE:
+                    act_perf = "show_schedule_buttons"
+                elif curr_state == FlowState.WAITING_FOR_PAYMENT_METHOD:
+                    act_perf = "show_payment_buttons"
+                elif curr_state == FlowState.WAITING_FOR_ADDRESS_SELECTION:
+                    act_perf = "show_address_buttons"
+                elif curr_state == FlowState.WAITING_FOR_PRODUCT_OR_QUANTITY:
+                    act_perf = "show_product_buttons"
+
+                return FlowResponse(
+                    text=(
+                        "⛔ **Operación no permitida por seguridad.**\n\n"
+                        f"Tu cuenta ya se encuentra registrada y vinculada a tu número celular (**{known_phone}**).\n\n"
+                        "Por políticas de seguridad y protección de tus datos (política de 1 cuenta por dispositivo), "
+                        "**no está permitido cambiar de número celular ni registrar múltiples números** desde este chat.\n\n"
+                        "Si necesitas actualizar tu número oficial o requieres asistencia con tu cuenta, "
+                        "por favor comunícate directamente con nuestro centro de atención a clientes. ⛽📞"
+                    ),
+                    state=curr_state,
+                    action_performed=act_perf,
+                    is_llm=False,
+                )
+
             phone = intent.extracted_value or extract_phone_10_digits(intent.original_text)
             if phone:
                 return await cls._advance_after_phone(session, phone, repo)
@@ -2205,6 +2236,7 @@ class FlowRouter:
         """Enruta mensajes de texto determinísticamente según el estado actual."""
         state = session.state
         draft = session.draft_order
+        from src.repositories.identity_store import identity_store
 
         # Si hay una propuesta de horario alternativa pendiente y el usuario responde afirmativamente:
         if session.proposed_schedule and any(re.search(r"\b" + re.escape(w) + r"\b", text.lower().strip()) for w in [
@@ -2826,6 +2858,19 @@ class FlowRouter:
             is_phone_corr, new_phone = check_phone_correction_request(text)
             if is_phone_corr:
                 telemetry.record_message(channel=session.channel, is_llm=False)
+                known_phone = cls._get_known_phone_for_session(session, repo) or draft.customer_phone
+                if known_phone:
+                    draft.customer_phone = known_phone
+                    return FlowResponse(
+                        text=(
+                            "⛔ **Operación no permitida por seguridad.**\n\n"
+                            f"Tu número celular ya se encuentra registrado (**{known_phone}**). "
+                            "Por políticas de seguridad (1 cuenta por dispositivo), no es posible cambiarlo ni registrar otro número desde este chat.\n\n"
+                            "Por favor escribe tu **nombre y apellido** (ej. *Juan Pérez*) para continuar con tu registro:"
+                        ),
+                        state=session.state,
+                        is_llm=False,
+                    )
                 if new_phone:
                     return await cls._advance_after_phone(session, new_phone, repo)
                 session.state = FlowState.WAITING_FOR_PHONE

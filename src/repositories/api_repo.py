@@ -40,17 +40,22 @@ class ApiRepository:
         self._driver_locations: dict[str, tuple[float, float]] = {}
         self._order_driver_msg_ids: dict[str, list[int]] = {}
 
-    def bind_telegram_user_phone(self, telegram_user_id: str | int, phone: str) -> None:
+    def bind_telegram_user_phone(self, telegram_user_id: str | int, phone: str, force: bool = False) -> None:
         """Bind customer's phone number to their Telegram Chat ID in memory and persistent identity store."""
         if not telegram_user_id or not phone:
             return
         tg_id = str(telegram_user_id).strip()
         clean_phone = re.sub(r"\D", "", str(phone))
+        existing_phone = identity_store.get_phone_for_channel_user("telegram", tg_id)
+        clean_10 = clean_phone[-10:] if len(clean_phone) >= 10 else clean_phone
+        if existing_phone and existing_phone != clean_10 and not force:
+            logger.warning(f"⚠️ [APIRepository] Refusing to overwrite existing bound phone {existing_phone} with {clean_10} for Telegram ID {tg_id}")
+            return
         if len(clean_phone) >= 10:
             self._phone_to_telegram_chat_id[clean_phone[-10:]] = tg_id
             self._phone_to_telegram_chat_id[clean_phone] = tg_id
         self._phone_to_telegram_chat_id[tg_id] = tg_id
-        identity_store.bind_telegram_user_phone(tg_id, clean_phone)
+        identity_store.bind_telegram_user_phone(tg_id, clean_phone, force=force)
 
     def get_telegram_chat_id_for_phone(self, phone: str) -> str | None:
         """Retrieve Telegram Chat ID for a given phone number."""

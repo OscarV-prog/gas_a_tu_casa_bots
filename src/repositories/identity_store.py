@@ -217,7 +217,7 @@ class IdentityStore:
             curr.remove(r)
         self._save()
 
-    def bind_telegram_user_phone(self, telegram_user_id: str | int, phone: str) -> None:
+    def bind_telegram_user_phone(self, telegram_user_id: str | int, phone: str, force: bool = False) -> None:
         """Bind customer's phone number to their Telegram Chat ID."""
         if not telegram_user_id or not phone:
             return
@@ -227,31 +227,42 @@ class IdentityStore:
             return
 
         self._load()  # Sync latest from disk
+        existing = self._tg_to_phone.get(tg_id)
+        clean_10 = clean_digits[-10:] if len(clean_digits) >= 10 else clean_digits
+        if existing and existing != clean_10 and not force:
+            logger.warning(f"⚠️ [IdentityStore] Refusing to overwrite existing bound phone {existing} with {clean_10} for Telegram ID {tg_id}")
+            return
+
         if len(clean_digits) >= 10:
             suffix_10 = clean_digits[-10:]
             self._phone_to_tg[suffix_10] = tg_id
             self._phone_to_tg[clean_digits] = tg_id
 
         self._phone_to_tg[tg_id] = tg_id
-        self._tg_to_phone[tg_id] = clean_digits[-10:] if len(clean_digits) >= 10 else clean_digits
+        self._tg_to_phone[tg_id] = clean_10
         self._save()
         logger.info(f"🔗 [IdentityStore] Bound Telegram Chat ID {tg_id} <-> Phone {clean_digits}")
 
-    def bind_channel_user_phone(self, channel: str, channel_user_id: str | int, phone: str) -> None:
+    def bind_channel_user_phone(self, channel: str, channel_user_id: str | int, phone: str, force: bool = False) -> None:
         """Bind customer's phone number to their channel user ID across channels."""
         if not channel_user_id or not phone:
             return
         if str(channel).lower() == "telegram":
-            self.bind_telegram_user_phone(channel_user_id, phone)
+            self.bind_telegram_user_phone(channel_user_id, phone, force=force)
         else:
             clean_digits = re.sub(r"\D", "", str(phone))
             if clean_digits:
                 c_str = str(channel_user_id).strip()
                 self._load()
+                existing_entry = self._order_channels.get(c_str)
+                clean_10 = clean_digits[-10:] if len(clean_digits) >= 10 else clean_digits
+                if existing_entry and existing_entry.get("phone") and existing_entry.get("phone") != clean_10 and not force:
+                    logger.warning(f"⚠️ [IdentityStore] Refusing to overwrite existing bound phone {existing_entry.get('phone')} with {clean_10} for channel user {c_str}")
+                    return
                 self._order_channels[c_str] = {
                     "channel": str(channel).lower(),
                     "channel_user_id": c_str,
-                    "phone": clean_digits[-10:] if len(clean_digits) >= 10 else clean_digits,
+                    "phone": clean_10,
                 }
                 self._save()
 
