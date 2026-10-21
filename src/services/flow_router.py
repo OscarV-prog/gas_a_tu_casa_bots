@@ -200,6 +200,65 @@ def extract_phone_10_digits(text: str) -> str | None:
     return None
 
 
+def check_phone_change_attempt_deterministic(text: str) -> bool:
+    """Detecta de forma determinista (0ms) si el texto del usuario expresa la intención de cambiar,
+    actualizar, corregir o registrar otro número celular o línea telefónica."""
+    if not text:
+        return False
+    t = text.lower().strip()
+
+    direct_phrases = [
+        "cambiar de numero", "cambiar de número", "cambiar mi numero", "cambiar mi número",
+        "cambiar numero", "cambiar número", "cambiar celular", "cambiar mi celular",
+        "cambiar de celular", "cambiar telefono", "cambiar teléfono", "cambiar de telefono", "cambiar de teléfono",
+        "dar de alta otro", "alta otro numero", "alta a otro numero", "alta otro número", "alta a otro número",
+        "registrar otro", "vincular otro", "usar otro numero", "usar otro número", "usar otro celular",
+        "otro numero", "otro número", "otro celular", "otro cel", "otro telefono", "otro teléfono",
+        "otra linea", "otra línea", "nueva linea", "nueva línea", "nuevo celular", "nuevo telefono",
+        "nuevo teléfono", "nuevo cel", "nuevo num", "nuevo número", "nuevo numero",
+        "mi nuevo celular", "mi nuevo telefono", "mi nuevo teléfono", "mi nuevo numero", "mi nuevo número", "mi nuevo cel",
+        "cambio de numero", "cambio de número", "cambio de celular", "cambio de cel", "cambio de telefono", "cambio de teléfono",
+        "cambio de chip", "cambio de linea", "cambio de línea", "cambie de chip", "cambié de chip",
+        "cambie de numero", "cambié de número", "cambie de celular", "cambié de celular", "cambie de cel", "cambié de cel",
+        "modificar numero", "modificar número", "modificar celular", "actualizar numero", "actualizar número",
+        "actualizar celular", "actualizar telefono", "actualizar teléfono", "actualizar mi contacto",
+        "corregir numero", "corregir número", "corregir celular", "corregir telefono", "corregir teléfono", "cambiar mi tel",
+        "quiero dar de alta otro", "deseo cambiar mi numero", "deseo cambiar de numero",
+        "este ya no es mi numero", "este ya no es mi número", "ya no tengo este numero", "ya no tengo este número",
+        "este no es mi cel", "este no es mi celular", "este no es mi numero", "este no es mi número",
+        "ya cambie de numero", "ya cambié de número", "ya cambie de celular", "ya cambié de celular",
+    ]
+    if any(k in t for k in direct_phrases):
+        return True
+
+    patterns = [
+        r"\b(?:nuev[oa]|otr[ao]|diferente)\s+(?:de\s+)?(?:celular|cel|tel[eé]fono|tel|n[uú]mero|num|núm|l[ií]nea|linea|chip|sim)\b",
+        r"\b(?:cambiar|corregir|modificar|actualizar|alta|registrar|vincular|usar|meter|poner|asociar|ligar|cambi[eé])\s+(?:de\s+|el\s+|mi\s+|un\s+|a\s+|por\s+)?(?:otr[ao]\s+|nuev[ao]\s+)?(?:celular|cel|tel[eé]fono|tel|n[uú]mero|num|núm|l[ií]nea|linea|chip|sim)\b",
+        r"\b(?:quiero|deseo|necesito|ocupo|puedo|se\s+puede|c[oó]mo\s+puedo)\s+(?:cambiar|modificar|actualizar|corregir|registrar|vincular|dar\s+de\s+alta|poner|usar)\s+(?:de\s+|el\s+|mi\s+|un\s+|otr[ao]\s+|nuev[ao]\s+)?(?:celular|cel|tel[eé]fono|tel|n[uú]mero|num|núm|l[ií]nea|linea|chip|sim)\b",
+        r"\bya\s+cambi[eé]\s+(?:de\s+)?(?:celular|cel|tel[eé]fono|tel|n[uú]mero|num|l[ií]nea|linea|chip)\b",
+        r"\b(?:te\s+paso|te\s+dejo|anota|guarda|aqu[ií]\s+est[aá])\s+(?:mi\s+)?(?:nuev[ao]\s+|otr[ao]\s+)?(?:celular|cel|tel[eé]fono|tel|n[uú]mero|num)\b",
+    ]
+    for pat in patterns:
+        if re.search(pat, t):
+            return True
+
+    return False
+
+
+def has_phone_or_account_clues(text: str) -> bool:
+    """Verifica de forma ultrarrápida si el texto contiene indicios relacionados con teléfono, cuenta o cambios."""
+    if not text:
+        return False
+    t = text.lower()
+    clues = [
+        "cel", "tel", "num", "núm", "linea", "línea", "chip", "sim", "contacto",
+        "cuenta", "dispositivo", "aparato", "cambi", "modific", "actualiz", "correg", "registr",
+        "vincular", "alta", "baja", "nuev", "otr", "diferente", "equivoc", "distint", "anterior",
+        "perdi", "perdí", "extravi", "apunta", "anota", "guarda", "whats", "titular", "dueñ", "duen"
+    ]
+    return any(c in t for c in clues)
+
+
 @dataclass
 class CorrectionIntent:
     target: Literal["schedule", "address", "product", "payment", "phone", "name", "back", "generic", "new_order"]
@@ -221,7 +280,12 @@ def detect_correction_or_backtracking_intent(
     if t in ("sí", "si", "confirmar", "sí, confirmo", "si, confirmo", "confirmo", "correcto"):
         return None
 
-    # 0. INICIAR NUEVO PEDIDO / REINICIAR / CANCELAR / COMENZAR DE NUEVO / MENÚ
+    # 0. INTENTO DE CAMBIO O REGISTRO DE OTRO TELÉFONO (SEGURIDAD PRIORIDAD 1)
+    if check_phone_change_attempt_deterministic(text):
+        digits = extract_phone_10_digits(text)
+        return CorrectionIntent(target="phone", extracted_value=digits, original_text=text)
+
+    # 0.1 INICIAR NUEVO PEDIDO / REINICIAR / CANCELAR / COMENZAR DE NUEVO / MENÚ
     new_order_patterns = [
         r"\b(?:nuevo|nueva)\s+(?:pedido|orden)\b",
         r"\b(?:pedido|orden)\s+(?:nuevo|nueva)\b",
@@ -484,6 +548,8 @@ async def check_new_order_or_reset_semantic(text: str, tenant_id: str = "petroil
 def is_plausible_person_name(text: str) -> bool:
     """Valida si un texto ingresado representa un nombre propio de persona verosímil."""
     if not text:
+        return False
+    if check_phone_change_attempt_deterministic(text):
         return False
     t = text.strip()
     t_lower = t.lower()
@@ -1027,6 +1093,54 @@ async def execute_minimal_llm_fallback(
         return ""
 
 
+async def is_phone_change_attempt_semantic(text: str, tenant_id: str = "petroil") -> bool:
+    """Clasifica con IA si el texto del usuario busca cambiar, registrar o vincular otro número/línea de teléfono.
+    Garantiza que todas las variaciones posibles lleven al mismo resultado de seguridad."""
+    if not text or not text.strip():
+        return False
+
+    # 1. Chequeo determinista inmediato (0 ms)
+    if check_phone_change_attempt_deterministic(text):
+        return True
+
+    raw = text.strip()
+
+    # 2. Si no tiene pistas mínimas de cuenta/teléfono/cambio/contacto, evitar llamada innecesaria a IA
+    if not has_phone_or_account_clues(raw):
+        return False
+
+    # 3. Validación Semántica con IA
+    system_prompt = (
+        "Eres un clasificador estricto de seguridad para un sistema de atención de Gas LP.\n"
+        "La empresa tiene una política de seguridad estricta: '1 cuenta por dispositivo / número de teléfono'.\n"
+        "Por protección de datos y antifraude, está terminantemente prohibido cambiar de número celular o registrar múltiples líneas desde un mismo chat/dispositivo.\n\n"
+        "Tu tarea es evaluar el mensaje del usuario y determinar si expresa la intención (directa, indirecta, coloquial o con faltas de ortografía) de:\n"
+        "- Cambiar, modificar o actualizar su número de teléfono o celular.\n"
+        "- Registrar, dar de alta, usar o vincular otro número de teléfono, línea o chip.\n"
+        "- Indicar que cambió de número, que el número actual ya no funciona, que se le perdió el chip o que tiene una línea nueva.\n"
+        "- Preguntar si es posible cambiar de número o usar otro teléfono.\n\n"
+        "REGLAS CRÍTICAS:\n"
+        "- Si el usuario está pidiendo gas (cilindros o estacionario), dando una dirección, indicando un horario, preguntando precios o métodos de pago, responde false.\n"
+        "- Si el usuario pregunta por el teléfono o número de atención de la empresa (ej. 'cuál es su teléfono', 'a qué número llamo'), responde false.\n"
+        "- Si el usuario intenta cambiar, reemplazar o registrar su propio número/celular/cuenta o dar otro número de contacto, responde true.\n\n"
+        "Responde ÚNICAMENTE un JSON con este formato:\n"
+        "{\"is_phone_change\": true/false, \"confidence\": 0.0-1.0}"
+    )
+    user_prompt = f'Mensaje del usuario: "{raw}"'
+
+    try:
+        raw_json = await execute_minimal_llm_fallback(system_prompt, user_prompt, tenant_id)
+        m = re.search(r"\{[\s\S]*\}", raw_json)
+        if m:
+            data = json.loads(m.group(0))
+            if data.get("is_phone_change") is True and float(data.get("confidence", 1.0)) >= 0.5:
+                return True
+    except Exception as e:
+        logger.error(f"[FlowRouter] Error en clasificador semántico de cambio de teléfono: {e}")
+
+    return False
+
+
 # =============================================================================
 # Formatters for Resumen & Confirmation
 # =============================================================================
@@ -1368,9 +1482,19 @@ class FlowRouter:
         # ---------------------------------------------------------------------
         if session.state not in (FlowState.COMPLETED, FlowState.CANCELLED):
             corr_intent = detect_correction_or_backtracking_intent(raw_text, session, repo)
-            if corr_intent:
-                telemetry.record_message(channel=channel, is_llm=False)
-                return await cls._handle_correction_intent(session, corr_intent, repo)
+        else:
+            if check_phone_change_attempt_deterministic(raw_text):
+                corr_intent = CorrectionIntent(target="phone", original_text=raw_text)
+            else:
+                corr_intent = None
+
+        if not corr_intent and (session.draft_order.customer_phone or cls._get_known_phone_for_session(session, repo)):
+            if await is_phone_change_attempt_semantic(raw_text, tenant_id=session.tenant_id):
+                corr_intent = CorrectionIntent(target="phone", original_text=raw_text)
+
+        if corr_intent:
+            telemetry.record_message(channel=channel, is_llm=False)
+            return await cls._handle_correction_intent(session, corr_intent, repo)
 
         # ---------------------------------------------------------------------
         # 3. Consultas Globales Explícitas (Estatus de Folio / Cancelación de Orden previa / Pregunta de Precio)
@@ -2856,6 +2980,9 @@ class FlowRouter:
 
             # 1. Chequeo de corrección de número
             is_phone_corr, new_phone = check_phone_correction_request(text)
+            if not is_phone_corr and (draft.customer_phone or cls._get_known_phone_for_session(session, repo)):
+                if await is_phone_change_attempt_semantic(text, tenant_id=session.tenant_id):
+                    is_phone_corr = True
             if is_phone_corr:
                 telemetry.record_message(channel=session.channel, is_llm=False)
                 known_phone = cls._get_known_phone_for_session(session, repo) or draft.customer_phone

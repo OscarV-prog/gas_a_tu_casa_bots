@@ -4,7 +4,14 @@ from unittest.mock import AsyncMock, MagicMock
 from src.database import init_db
 from src.repositories import get_repository
 from src.repositories.identity_store import identity_store
-from src.services.flow_router import flow_router, clear_session, FlowState, is_plausible_person_name
+from src.services.flow_router import (
+    flow_router,
+    clear_session,
+    FlowState,
+    is_plausible_person_name,
+    check_phone_change_attempt_deterministic,
+    is_phone_change_attempt_semantic,
+)
 import telegram_bot_test as bot
 
 
@@ -147,6 +154,32 @@ def test_registered_user_cannot_change_phone_via_chat():
         bound_p = identity_store.get_phone_for_channel_user("telegram", str(test_uid))
         assert bound_p == registered_phone
 
+        # Attempt 4: "nuevo celular" (User reported variation)
+        update_mock.message.reply_text.reset_mock()
+        update_mock.message.text = "nuevo celular"
+        await bot.responder(update_mock, context_mock)
+
+        reply_text = update_mock.message.reply_text.call_args[0][0]
+        reply_markup = update_mock.message.reply_text.call_args[1].get("reply_markup")
+        assert "no permitida por seguridad" in reply_text.lower()
+        assert reply_markup is not None
+        assert reply_markup.inline_keyboard[0][0].callback_data == "menu:main"
+        bound_p = identity_store.get_phone_for_channel_user("telegram", str(test_uid))
+        assert bound_p == registered_phone
+
+        # Attempt 5: "nuevo telefono" (User reported variation)
+        update_mock.message.reply_text.reset_mock()
+        update_mock.message.text = "nuevo telefono"
+        await bot.responder(update_mock, context_mock)
+
+        reply_text = update_mock.message.reply_text.call_args[0][0]
+        reply_markup = update_mock.message.reply_text.call_args[1].get("reply_markup")
+        assert "no permitida por seguridad" in reply_text.lower()
+        assert reply_markup is not None
+        assert reply_markup.inline_keyboard[0][0].callback_data == "menu:main"
+        bound_p = identity_store.get_phone_for_channel_user("telegram", str(test_uid))
+        assert bound_p == registered_phone
+
         # Test callback query: user clicks "⬅️ Regresar al Menú Principal"
         cb_update = MagicMock()
         cb_update.effective_user.id = test_uid
@@ -223,9 +256,83 @@ def test_flow_router_blocks_phone_correction_for_registered_user():
     asyncio.run(_run())
 
 
+def test_deterministic_and_semantic_phone_change_detection():
+    """Verify that deterministic regex and semantic AI checks catch all variations of phone changes."""
+    # 1. Deterministic direct variations (0ms fast path)
+    positive_phrases = [
+        "nuevo celular",
+        "nuevo telefono",
+        "nuevo teléfono",
+        "mi nuevo cel",
+        "nuevo cel",
+        "otra linea",
+        "otra línea",
+        "nueva linea",
+        "cambie de chip",
+        "cambié de chip",
+        "cambio de chip",
+        "otro numero",
+        "otro número",
+        "otro celular",
+        "usar otro celular",
+        "quiero dar de alta otro",
+        "dar de alta otro",
+        "modificar mi numero",
+        "actualizar celular",
+        "actualizar mi contacto",
+        "este ya no es mi numero",
+        "este ya no es mi número",
+        "este no es mi cel",
+        "ya cambie de numero",
+        "ya cambié de celular",
+        "puedo cambiar de celular?",
+        "se puede cambiar mi numero?",
+        "te paso mi nuevo cel",
+        "anota mi nuevo telefono",
+    ]
+    for phrase in positive_phrases:
+        assert check_phone_change_attempt_deterministic(phrase) is True, f"Failed to detect: '{phrase}'"
+
+    # 2. Legitimate user phrases that MUST NOT be detected as phone changes
+    negative_phrases = [
+        "Quiero un cilindro de 30 kg",
+        "Hola buenas tardes",
+        "Calle Benito Juarez 405",
+        "Pago con tarjeta terminal",
+        "A qué hora llega mi pedido",
+        "Cuánto cuesta el gas",
+        "Tanque estacionario 500 pesos",
+    ]
+    for phrase in negative_phrases:
+        assert check_phone_change_attempt_deterministic(phrase) is False, f"False positive on: '{phrase}'"
+
+    # 3. Semantic validation async tests
+    async def _run_semantic():
+        # Deterministic phrase returns True immediately
+        assert await is_phone_change_attempt_semantic("nuevo celular") is True
+
+        # Non-clue phrase returns False immediately without LLM
+        assert await is_phone_change_attempt_semantic("Quiero un cilindro de 30 kg") is False
+
+        # Novel semantic phrasing evaluated via LLM / mock
+        from unittest.mock import patch
+        with patch("src.services.flow_router.execute_minimal_llm_fallback", return_value='{"is_phone_change": true, "confidence": 0.95}'):
+            # Text has phone/account clue "linea", triggers LLM
+            res = await is_phone_change_attempt_semantic("tengo una linea distinta ahora")
+            assert res is True
+
+        with patch("src.services.flow_router.execute_minimal_llm_fallback", return_value='{"is_phone_change": false, "confidence": 0.9}'):
+            # Text asking for company phone
+            res = await is_phone_change_attempt_semantic("cuál es su teléfono para dudas")
+            assert res is False
+
+    asyncio.run(_run_semantic())
+
+
 if __name__ == "__main__":
     test_is_plausible_person_name_rejects_phone_and_registration_phrases()
     test_onboarding_name_rejects_phone_change_and_invalid_name()
     test_registered_user_cannot_change_phone_via_chat()
     test_flow_router_blocks_phone_correction_for_registered_user()
+    test_deterministic_and_semantic_phone_change_detection()
     print("✅ All security tests passed successfully!")

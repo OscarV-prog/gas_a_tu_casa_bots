@@ -39,7 +39,14 @@ from src.graphs.sales_graph import compile_sales_graph
 from src.models.customer import Customer, CustomerAddress
 from src.repositories import get_repository
 from src.services.audio_transcription import transcribe_audio_file
-from src.services.flow_router import FlowResponse, FlowState, flow_router, get_or_create_session
+from src.services.flow_router import (
+    FlowResponse,
+    FlowState,
+    flow_router,
+    get_or_create_session,
+    check_phone_change_attempt_deterministic,
+    is_phone_change_attempt_semantic,
+)
 from src.services.geocoding import resolve_gps_address_to_name, reverse_geocode
 from src.services.notifications import notify_driver
 from src.services.dynamic_settings import get_dynamic_setting
@@ -1279,22 +1286,10 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             from src.repositories.identity_store import identity_store
             registered_phone = identity_store.get_phone_for_channel_user("telegram", str(user_id)) or ""
 
-        # Detección temprana de intento de cambiar o registrar otro número
+        # Detección temprana de intento de cambiar o registrar otro número (Determinista + IA Semántica)
         is_phone_change = (
-            any(k in texto_lower for k in [
-                "cambiar de numero", "cambiar de número", "cambiar mi numero", "cambiar mi número",
-                "cambiar numero", "cambiar número", "cambiar celular", "cambiar mi celular",
-                "cambiar de celular", "cambiar telefono", "cambiar teléfono", "cambiar de telefono", "cambiar de teléfono",
-                "dar de alta otro", "alta otro numero", "alta a otro numero", "alta otro número", "alta a otro número",
-                "registrar otro", "vincular otro", "usar otro numero", "usar otro número", "usar otro celular",
-                "otro numero", "otro número", "otro celular", "otro cel", "otro telefono", "otro teléfono",
-                "modificar numero", "modificar número", "modificar celular", "actualizar numero", "actualizar número",
-                "actualizar celular", "corregir numero", "corregir número", "corregir celular", "cambiar mi tel",
-                "quiero dar de alta otro", "deseo cambiar mi numero", "deseo cambiar de numero",
-            ])
-            or bool(re.search(r"\b(?:cambiar|corregir|modificar|actualizar|alta|registrar|vincular|usar|meter|poner)\s+(?:de\s+|el\s+|mi\s+|un\s+|a\s+)?(?:otro\s+|nuevo\s+)?(?:celular|cel|tel[eé]fono|n[uú]mero|num|núm)\b", texto_lower))
-            or bool(re.search(r"\botr[ao]\s+(?:tel[eé]fono|celular|cel|n[uú]mero|num|núm)\b", texto_lower))
-            or bool(re.search(r"\b(?:quiero|deseo|necesito|ocupo)\s+(?:cambiar|modificar|actualizar|corregir|registrar|vincular|dar\s+de\s+alta)\s+(?:de\s+|el\s+|mi\s+|otro\s+)?(?:celular|cel|tel[eé]fono|n[uú]mero|num|núm)\b", texto_lower))
+            check_phone_change_attempt_deterministic(clean_name)
+            or await is_phone_change_attempt_semantic(clean_name, tenant_id=TENANT_ID)
         )
         if is_phone_change:
             phone_txt = f" (**{registered_phone}**)" if registered_phone else ""
@@ -1578,28 +1573,18 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
     # 3.1 Seguridad estricta: Bloquear cualquier intento de cambiar o registrar otro número si el usuario ya está dado de alta
-    is_phone_change_attempt = (
-        any(k in texto_lower for k in [
-            "cambiar de numero", "cambiar de número", "cambiar mi numero", "cambiar mi número",
-            "cambiar numero", "cambiar número", "cambiar celular", "cambiar mi celular",
-            "cambiar de celular", "cambiar telefono", "cambiar teléfono", "cambiar de telefono", "cambiar de teléfono",
-            "dar de alta otro", "alta otro numero", "alta a otro numero", "alta otro número", "alta a otro número",
-            "registrar otro", "vincular otro", "usar otro numero", "usar otro número", "usar otro celular",
-            "otro numero", "otro número", "otro celular", "otro cel", "otro telefono", "otro teléfono",
-            "modificar numero", "modificar número", "modificar celular", "actualizar numero", "actualizar número",
-            "actualizar celular", "corregir numero", "corregir número", "corregir celular", "cambiar mi tel",
-            "quiero dar de alta otro", "deseo cambiar mi numero", "deseo cambiar de numero",
-        ])
-        or bool(re.search(r"\b(?:cambiar|corregir|modificar|actualizar|alta|registrar|vincular|usar|meter|poner)\s+(?:de\s+|el\s+|mi\s+|un\s+|a\s+)?(?:otro\s+|nuevo\s+)?(?:celular|cel|tel[eé]fono|n[uú]mero|num|núm)\b", texto_lower))
-        or bool(re.search(r"\botr[ao]\s+(?:tel[eé]fono|celular|cel|n[uú]mero|num|núm)\b", texto_lower))
-        or bool(re.search(r"\b(?:quiero|deseo|necesito|ocupo)\s+(?:cambiar|modificar|actualizar|corregir|registrar|vincular|dar\s+de\s+alta)\s+(?:de\s+|el\s+|mi\s+|otro\s+)?(?:celular|cel|tel[eé]fono|n[uú]mero|num|núm)\b", texto_lower))
-    )
     is_raw_different_phone = False
     raw_digits_only = re.sub(r"\D", "", texto_usuario.strip())
     if len(raw_digits_only) == 10 and raw_digits_only != cust.phone and len(texto_usuario.strip().split()) == 1:
         is_raw_different_phone = True
 
-    if is_phone_change_attempt or is_raw_different_phone:
+    is_phone_change_attempt = (
+        check_phone_change_attempt_deterministic(texto_usuario)
+        or is_raw_different_phone
+        or await is_phone_change_attempt_semantic(texto_usuario, tenant_id=TENANT_ID)
+    )
+
+    if is_phone_change_attempt:
         await safe_reply_text(
             update.message,
             "⛔ **Operación no permitida por seguridad.**\n\n"
