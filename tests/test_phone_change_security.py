@@ -1,5 +1,9 @@
 import asyncio
+import os
+import sys
 from unittest.mock import AsyncMock, MagicMock
+
+sys.path.insert(0, os.path.abspath("."))
 
 from src.database import init_db
 from src.repositories import get_repository

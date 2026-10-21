@@ -70,41 +70,45 @@ async def run_tests():
     print("✅ TEST 1 PASÓ: El usuario no registrado recibió la solicitud de vincular su número.")
 
     # -------------------------------------------------------------------------
-    # TEST 2: Usuario no registrado envía texto arbitrario -> se le insiste vincular
+    # TEST 2: Usuario no registrado envía texto arbitrario -> teclado bloqueado con persistencia
     # -------------------------------------------------------------------------
-    print("\n[TEST 2] Texto arbitrario de usuario no registrado...")
+    print("\n[TEST 2] Texto arbitrario de usuario no registrado (bloqueo estricto)...")
     update_mock.message.reply_text.reset_mock()
     update_mock.message.text = "Hola quiero pedir gas"
 
     await bot.responder(update_mock, context_mock)
     args, kwargs = update_mock.message.reply_text.call_args
     sent_text = args[0]
-    assert "necesitamos vincular tu número" in sent_text or "Compartir mi número" in sent_text
-    print("✅ TEST 2 PASÓ: No permite saltarse el registro con texto libre.")
+    markup = kwargs.get("reply_markup")
+    assert "Vinculación obligatoria de dispositivo" in sent_text or "Compartir mi número" in sent_text
+    assert markup.is_persistent is True, "El teclado debe ser persistente (is_persistent=True)"
+    assert markup.one_time_keyboard is False
+    assert markup.input_field_placeholder is not None
+    print("✅ TEST 2 PASÓ: Bloquea texto arbitrario y mantiene el teclado oficial bloqueado y persistente.")
 
     # -------------------------------------------------------------------------
-    # TEST 3: Registro de teléfono sin tomar nombre automático -> Solicita nombre
+    # TEST 3: Seguridad anti-spoofing y registro auténtico de contacto
     # -------------------------------------------------------------------------
-    print("\n[TEST 3] Registro mediante compartir contacto (solo toma número, solicita nombre)...")
+    print("\n[TEST 3] Validación anti-spoofing de contacto y registro de perfil verificado...")
+    # 3.A: Intento de spoofing con tarjeta de contacto de tercero (user_id distinto)
     update_mock.message.reply_text.reset_mock()
     update_mock.message.contact = MagicMock()
+    update_mock.message.contact.user_id = 99999999  # Distinto al test_uid
     update_mock.message.contact.phone_number = f"+52 {test_phone}"
 
     await bot.recibir_contacto_cliente(update_mock, context_mock)
-
-    # Verificar que pidió escribir el nombre y NO registró el nombre del perfil de Telegram
-    assert context_mock.user_data.get("awaiting_registration_name") is True
-    assert context_mock.user_data.get("phone") == test_phone
     args, kwargs = update_mock.message.reply_text.call_args
-    assert "escribe tu nombre completo" in args[0].lower()
+    assert "Contacto no válido por seguridad" in args[0], "Debe rechazar contactos de terceros"
+    assert bot.get_registered_customer(test_uid) is None, "No debe registrar si es contacto ajeno"
 
-    # Ahora el usuario escribe su nombre deseado
-    update_mock.message.contact = None
+    # 3.B: Contacto legítimo desde el propio dispositivo (user_id coincide)
     update_mock.message.reply_text.reset_mock()
-    update_mock.message.text = test_user_name
-    await bot.responder(update_mock, context_mock)
+    update_mock.message.contact.user_id = test_uid
+    update_mock.effective_user.full_name = test_user_name
 
-    # Verificar que el cliente existe en base de datos con el nombre que él escribió
+    await bot.recibir_contacto_cliente(update_mock, context_mock)
+
+    # Debe auto-capturar el nombre verificado del perfil de Telegram y registrarlo de inmediato
     saved_cust = bot.get_registered_customer(test_uid)
     assert saved_cust is not None, "El cliente debería estar registrado en la BD"
     assert saved_cust.phone == test_phone
@@ -114,7 +118,7 @@ async def run_tests():
     # Verificar que identity_store lo mapeó
     mapped_p = identity_store.get_phone_for_channel_user("telegram", str(test_uid))
     assert mapped_p == test_phone, f"Identity store debería mapear a {test_phone}"
-    print(f"✅ TEST 3 PASÓ: Número vinculado y nombre explícito registrado como '{saved_cust.name}' ({saved_cust.phone}).")
+    print(f"✅ TEST 3 PASÓ: Anti-spoofing validado y perfil de Telegram '{saved_cust.name}' ({saved_cust.phone}) registrado automáticamente.")
 
     # -------------------------------------------------------------------------
     # TEST 4: Usuario registrado envía /start o /menu -> Ve Menú Principal
@@ -305,13 +309,10 @@ async def run_tests():
     print("\n[TEST 8] Re-registro tras baja: verificar que la cuenta inicia limpia sin direcciones...")
     update_mock.message.reply_text.reset_mock()
     update_mock.message.contact = MagicMock()
+    update_mock.message.contact.user_id = test_uid
     update_mock.message.contact.phone_number = test_phone
+    update_mock.effective_user.full_name = "Nuevo Nombre Re-registrado"
     await bot.recibir_contacto_cliente(update_mock, context_mock)
-
-    update_mock.message.contact = None
-    update_mock.message.reply_text.reset_mock()
-    update_mock.message.text = "Nuevo Nombre Re-registrado"
-    await bot.responder(update_mock, context_mock)
 
     re_registered_cust = bot.get_registered_customer(test_uid)
     assert re_registered_cust is not None

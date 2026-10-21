@@ -221,7 +221,9 @@ def get_teclado_registro() -> ReplyKeyboardMarkup:
             [KeyboardButton("📱 Compartir mi número", request_contact=True)],
         ],
         resize_keyboard=True,
-        one_time_keyboard=True,
+        one_time_keyboard=False,
+        is_persistent=True,
+        input_field_placeholder="Toca '📱 Compartir mi número' abajo 👇",
     )
 
 
@@ -1108,7 +1110,19 @@ async def recibir_contacto_cliente(update: Update, context: ContextTypes.DEFAULT
 
     user = update.effective_user
     user_id = user.id
-    raw_phone = update.message.contact.phone_number or ""
+    contact = update.message.contact
+
+    # 1. Validación anti-spoofing: el contacto DEBE pertenecer al mismo usuario de Telegram (origen del mensaje)
+    if contact.user_id and contact.user_id != user_id:
+        await safe_reply_text(
+            update.message,
+            "⛔ **Contacto no válido por seguridad.**\n\n"
+            "Debes presionar directamente el botón oficial **'📱 Compartir mi número'** para compartir el número de este dispositivo. No se permite reenviar tarjetas de contacto de terceros.",
+            reply_markup=get_teclado_registro(),
+        )
+        return
+
+    raw_phone = contact.phone_number or ""
     digits = re.sub(r"\D", "", raw_phone)
     if digits.startswith("521") and len(digits) == 13:
         phone = digits[3:]
@@ -1122,25 +1136,55 @@ async def recibir_contacto_cliente(update: Update, context: ContextTypes.DEFAULT
     if len(phone) != 10:
         await safe_reply_text(
             update.message,
-            "⚠️ El número compartido no parece ser un número válido de 10 dígitos. Por favor escríbelo directamente en el chat:"
+            "⚠️ No fue posible validar un número celular a 10 dígitos desde tu contacto. Por favor vuelve a tocar el botón **'📱 Compartir mi número'**:",
+            reply_markup=get_teclado_registro(),
         )
         return
 
     repo = get_repository()
     context.user_data["phone"] = phone
-    context.user_data["awaiting_registration_name"] = True
 
     from src.repositories.identity_store import identity_store
     identity_store.bind_channel_user_phone("telegram", str(user_id), phone)
     if hasattr(repo, "bind_telegram_user_phone"):
         repo.bind_telegram_user_phone(str(user_id), phone)
 
-    await update.message.reply_text(
-        f"📱 ¡Número registrado con éxito! (`{phone}`)\n\n"
-        "Ahora, por favor **escribe tu nombre completo** para tu cuenta (ej. *Juan Pérez*):",
-        reply_markup=ReplyKeyboardRemove(),
-        parse_mode="Markdown",
-    )
+    # 2. Obtener automáticamente el nombre real del usuario de su perfil de Telegram
+    telegram_name = (
+        user.full_name
+        or f"{contact.first_name or ''} {contact.last_name or ''}".strip()
+        or user.first_name
+        or ""
+    ).strip()
+
+    from src.services.flow_router import is_plausible_person_name
+    if telegram_name and is_plausible_person_name(telegram_name):
+        # Nombre verosímil y legítimo del usuario en Telegram -> Registro automático sin permitir datos externos
+        context.user_data.pop("awaiting_registration_name", None)
+        cust = repo.save_or_update_customer(
+            tenant_id=TENANT_ID,
+            channel="telegram",
+            channel_user_id=str(user_id),
+            name=telegram_name,
+            phone=phone,
+        )
+        await safe_reply_text(
+            update.message,
+            f"📱 ¡Teléfono vinculado con éxito! (**{phone}**)\n"
+            f"👤 Nombre de usuario: **{telegram_name}**",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await mostrar_menu_principal(update, context, telegram_name, phone)
+        return
+    else:
+        # En caso de que el perfil de Telegram tenga solo emojis o esté vacío
+        context.user_data["awaiting_registration_name"] = True
+        await update.message.reply_text(
+            f"📱 ¡Teléfono vinculado con éxito! (**{phone}**)\n\n"
+            "Para completar tu cuenta, por favor escribe tu **nombre y apellido** (ej. *Juan Pérez*):",
+            reply_markup=ReplyKeyboardRemove(),
+            parse_mode="Markdown",
+        )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1162,11 +1206,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     cust = get_registered_customer(user_id)
     if not cust or not cust.phone:
+        try:
+            tc = get_tenant(TENANT_ID)
+            b_name = tc.business_name
+        except Exception:
+            b_name = "Gas a Tu Puerta - Hermosillo"
         texto_onboarding = (
-            "👋 ¡Bienvenido a **Gas a Tu Puerta - Petroil**! ⛽\n\n"
-            "Para brindarte un servicio personalizado y seguro (1 cuenta por dispositivo), "
-            "por favor pulsa el botón **'📱 Compartir mi número'** abajo para vincular tu cuenta:\n\n"
-            "_💡 También puedes escribir tu número celular a 10 dígitos directamente en el chat._"
+            f"👋 ¡Bienvenido a **{b_name}**! ⛽\n\n"
+            "Para brindarte un servicio personalizado y seguro (política de 1 cuenta por dispositivo), "
+            "es necesario vincular tu cuenta presionando el botón **'📱 Compartir mi número'** abajo:"
         )
         await update.message.reply_text(
             texto_onboarding,
@@ -1539,38 +1587,15 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # 3. Control de seguridad y onboarding obligatorio de dispositivo (1 cuenta por dispositivo)
     cust = get_registered_customer(user_id)
     if not cust or not cust.phone:
-        # Si el usuario no registrado escribió su número celular a 10 dígitos:
-        digits_10 = ""
-        if len(found_phones) == 1:
-            digits_10 = re.sub(r"\D", "", found_phones[0])
-        else:
-            raw_digits = re.sub(r"\D", "", texto_usuario)
-            if len(raw_digits) == 10:
-                digits_10 = raw_digits
-
-        if digits_10 and len(digits_10) == 10:
-            from src.repositories.identity_store import identity_store
-            identity_store.bind_channel_user_phone("telegram", str(user_id), digits_10)
-            if hasattr(repo, "bind_telegram_user_phone"):
-                repo.bind_telegram_user_phone(str(user_id), digits_10)
-            context.user_data["phone"] = digits_10
-            context.user_data["awaiting_registration_name"] = True
-
-            await update.message.reply_text(
-                f"📱 ¡Número registrado con éxito! (`{digits_10}`)\n\n"
-                "Ahora, por favor **escribe tu nombre completo** para tu cuenta (ej. *Juan Pérez*):",
-                reply_markup=ReplyKeyboardRemove(),
-                parse_mode="Markdown",
-            )
-            return
-        else:
-            await update.message.reply_text(
-                "👋 ¡Hola! Para poder atenderte, necesitamos vincular tu número de teléfono a tu cuenta (1 cuenta por dispositivo).\n\n"
-                "Por favor presiona el botón **'📱 Compartir mi número'** abajo o escribe tus 10 dígitos:",
-                reply_markup=get_teclado_registro(),
-                parse_mode="Markdown",
-            )
-            return
+        await update.message.reply_text(
+            "🔒 **Vinculación obligatoria de dispositivo**\n\n"
+            "Por políticas de seguridad y protección contra fraudes (política de 1 cuenta por dispositivo), "
+            "es **obligatorio** presionar el botón oficial **'📱 Compartir mi número'** abajo para vincular tu cuenta desde este dispositivo.\n\n"
+            "⚠️ _Por seguridad, no se permite ingresar números telefónicos de forma manual por texto._",
+            reply_markup=get_teclado_registro(),
+            parse_mode="Markdown",
+        )
+        return
 
     # 3.1 Seguridad estricta: Bloquear cualquier intento de cambiar o registrar otro número si el usuario ya está dado de alta
     is_raw_different_phone = False
