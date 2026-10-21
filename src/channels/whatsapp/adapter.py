@@ -653,8 +653,95 @@ class WhatsAppAdapter:
                 "description": f"${p.price:.2f} {p.currency}",
             })
 
+    @staticmethod
+    def filter_valid_addresses(addresses: list[CustomerAddress], phone: str | None = None) -> list[CustomerAddress]:
+        """Filter out addresses deleted in identity store or containing bare city names."""
+        from src.repositories.identity_store import identity_store
+        valid = []
+        for a in addresses:
+            addr_str = (a.address or "").strip()
+            if not addr_str:
+                continue
+            if addr_str.lower() in ("mazatlán", "mazatlan", "culiacán", "culiacan", "hermosillo", "sinaloa", "sonora", "mexico", "méxico"):
+                continue
+            if phone and identity_store.is_address_deleted(phone, addr_str):
+                continue
+            valid.append(a)
+        return valid
+
+    def get_main_menu_buttons(self, has_addresses: bool = False) -> list[dict[str, str]]:
+        """Main menu buttons for WhatsApp users."""
+        btns = [
+            {"id": "menu:hacer_pedido", "title": "📦 Hacer Pedido"},
+            {"id": "menu:mi_cuenta", "title": "⚙️ Mi Cuenta"},
+        ]
+        if has_addresses:
+            btns.append({"id": "account_menu:addresses", "title": "📍 Mis Direcciones"})
+        return btns
+
+    def get_account_menu_buttons(self) -> list[dict[str, str]]:
+        """Account menu buttons."""
+        return [
+            {"id": "account_menu:addresses", "title": "📍 Mis Direcciones"},
+            {"id": "menu:hacer_pedido", "title": "📦 Hacer Pedido"},
+            {"id": "account:edit_name", "title": "👤 Cambiar Nombre"},
+        ]
+
+    def get_address_view_buttons(self, addr_id: int | str, idx: int | str) -> list[dict[str, str]]:
+        """Action buttons when viewing a specific saved address."""
+        return [
+            {"id": f"client_addr:{idx}", "title": "📦 Pedir a esta Dir."},
+            {"id": f"del_addr:{addr_id}", "title": "🗑️ Eliminar Dir."},
+            {"id": "account_menu:addresses", "title": "🔙 Volver"},
+        ]
+
+    def get_new_address_cancel_buttons(self, is_in_order: bool = True) -> list[dict[str, str]]:
+        """Quick reply button to cancel or go back when entering a new address."""
+        target_id = "client_addr_back" if is_in_order else "account_menu:addresses"
+        return [
+            {"id": target_id, "title": "🔙 Volver"},
+        ]
+
+    def get_account_addresses_list_sections(self, addresses: list[CustomerAddress]) -> list[dict[str, Any]]:
+        """Interactive list sections for browsing account addresses in Mi Cuenta."""
+        rows = []
+        for i, addr in enumerate(addresses[:7], 1):
+            addr_text = resolve_gps_address_to_name(addr.address.strip())
+            addr_text = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", addr_text, flags=re.I).strip()
+            es_generico = bool(re.match(r"^(?:principal|predeterminada|nueva\s*direcci[oó]n|direcci[oó]n(?:\s*\d+)?)$", (addr.alias or "").strip(), re.I))
+            alias = addr.alias.strip() if addr.alias and not es_generico else ""
+            alias_tag = f"[{alias}] " if alias else ""
+            title = f"{i}. 📍 {alias_tag}{addr_text}"
+            if len(title) > 24:
+                title = title[:23] + "."
+
+            desc = f"Ver opciones para {addr_text}"
+            if len(desc) > 72:
+                desc = desc[:69] + "..."
+            rows.append({
+                "id": f"account_addr:view:{addr.id}:{i}",
+                "title": title,
+                "description": desc,
+            })
+
+        rows.append({
+            "id": "account_addr:add",
+            "title": "➕ Agregar Dirección",
+            "description": "Registrar un nuevo domicilio en tu cuenta",
+        })
+        rows.append({
+            "id": "client_addr:del_menu",
+            "title": "🗑️ Eliminar Dirección",
+            "description": "Borrar una de tus direcciones guardadas",
+        })
+        rows.append({
+            "id": "menu:mi_cuenta",
+            "title": "🔙 Volver a Mi Cuenta",
+            "description": "Regresar al menú de tu perfil",
+        })
+
         return [{
-            "title": "Catálogo de Cilindros",
+            "title": "Tus Direcciones",
             "rows": rows[:10],
         }]
 
@@ -1204,6 +1291,14 @@ class WhatsAppAdapter:
                         addrs = list(cust.addresses)
                     elif cust.address:
                         addrs = [CustomerAddress(id=1, address=cust.address, alias="Principal")]
+
+            if addrs:
+                eff_phone = phone
+                if not eff_phone and user_text:
+                    m_ph = re.search(r"\b(\d{10})\b", user_text)
+                    if m_ph:
+                        eff_phone = m_ph.group(1)
+                addrs = self.filter_valid_addresses(addrs, phone=eff_phone)
 
             if addrs:
                 # Si es exactamente 1 dirección, generar 3 botones Quick Reply (1. Dir, 2. Nueva, 3. Eliminar)

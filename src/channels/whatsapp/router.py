@@ -198,6 +198,148 @@ MENSAJE_SEGURIDAD_ATENCION_WA = (
 # Estado en memoria para comentarios de texto opcionales posteriores a la encuesta (wa_id -> {"order_id": int, "time": float})
 _AWAITING_RATING_COMMENTS: dict[str, dict[str, Any]] = {}
 
+# Estado en memoria para operaciones de perfil y cuenta en WhatsApp (wa_id -> dict)
+_WA_ACCOUNT_STATES: dict[str, dict[str, Any]] = {}
+
+
+def _get_wa_account_state(wa_id: str) -> dict[str, Any]:
+    return _WA_ACCOUNT_STATES.setdefault(wa_id, {})
+
+
+def _clear_wa_account_state(wa_id: str) -> None:
+    _WA_ACCOUNT_STATES.pop(wa_id, None)
+
+
+async def _mostrar_menu_principal_wa(wa_id: str, phone_10: str, name: str = "Cliente") -> None:
+    _clear_wa_account_state(wa_id)
+    repo = get_repository()
+    cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else repo.get_customer(TENANT_ID, "whatsapp", wa_id)
+    client_name = cust.name if (cust and cust.name and cust.name != "Cliente") else name
+    raw_addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if (cust and cust.address) else [])
+    valid_addrs = adapter.filter_valid_addresses(raw_addrs, phone=phone_10)
+    has_addresses = bool(valid_addrs)
+
+    text = (
+        f"👋 ¡Hola, *{client_name}*! Te damos la bienvenida a *Gas a Tu Puerta (Petroil Gas)* en Mazatlán. ⛽🌊\n\n"
+        "¿En qué podemos ayudarte el día de hoy?\n"
+        "Selecciona una opción a continuación:"
+    )
+    buttons = adapter.get_main_menu_buttons(has_addresses=has_addresses)
+    await adapter.send_interactive_buttons(
+        recipient_wa_id=wa_id,
+        body_text=text,
+        buttons=buttons,
+    )
+
+
+async def _mostrar_mi_cuenta_wa(wa_id: str, phone_10: str) -> None:
+    _clear_wa_account_state(wa_id)
+    repo = get_repository()
+    cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else repo.get_customer(TENANT_ID, "whatsapp", wa_id)
+    client_name = cust.name if cust else "Cliente"
+    client_phone = cust.phone if (cust and cust.phone) else (phone_10 or "No registrado")
+    raw_addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if (cust and cust.address) else [])
+    valid_addrs = adapter.filter_valid_addresses(raw_addrs, phone=client_phone)
+
+    text = (
+        "⚙️ *Mi Cuenta — Petroil Gas Mazatlán*\n\n"
+        f"👤 *Nombre:* {client_name}\n"
+        f"📱 *Teléfono:* {client_phone}\n"
+        f"📍 *Direcciones:* {len(valid_addrs)} guardada(s)\n\n"
+        "¿Qué deseas realizar hoy?"
+    )
+    buttons = adapter.get_account_menu_buttons()
+    await adapter.send_interactive_buttons(
+        recipient_wa_id=wa_id,
+        body_text=text,
+        buttons=buttons,
+    )
+
+
+async def _mostrar_direcciones_cuenta_wa(wa_id: str, phone_10: str) -> None:
+    _clear_wa_account_state(wa_id)
+    repo = get_repository()
+    cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else repo.get_customer(TENANT_ID, "whatsapp", wa_id)
+    raw_addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if (cust and cust.address) else [])
+    addrs = adapter.filter_valid_addresses(raw_addrs, phone=phone_10)
+
+    if not addrs:
+        body = (
+            "📍 *Mis Direcciones Guardadas*\n\n"
+            "_Aún no tienes direcciones registradas en tu cuenta._\n\n"
+            "Puedes registrar una nueva dirección a continuación:"
+        )
+        buttons = [
+            {"id": "account_addr:add", "title": "➕ Nueva Dirección"},
+            {"id": "menu:mi_cuenta", "title": "🔙 Volver"},
+        ]
+        await adapter.send_interactive_buttons(
+            recipient_wa_id=wa_id,
+            body_text=body,
+            buttons=buttons,
+        )
+    elif len(addrs) == 1:
+        addr = addrs[0]
+        addr_text = resolve_gps_address_to_name(addr.address.strip())
+        addr_text = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", addr_text, flags=re.I).strip()
+        body = (
+            "📍 *Mis Direcciones Guardadas*\n\n"
+            f"1. 📍 `{addr_text}`\n\n"
+            "Selecciona una opción a continuación:"
+        )
+        buttons = [
+            {"id": "client_addr:1", "title": "📦 Pedir a esta Dir."},
+            {"id": f"del_addr:{addr.id}", "title": "🗑️ Eliminar Dir."},
+            {"id": "account_addr:add", "title": "➕ Nueva Dirección"},
+        ]
+        await adapter.send_interactive_buttons(
+            recipient_wa_id=wa_id,
+            body_text=body,
+            buttons=buttons,
+        )
+    else:
+        body = (
+            "📍 *Mis Direcciones Guardadas*\n\n"
+            "Selecciona en la lista a continuación para ver detalles, pedir a esa dirección o agregar una nueva:"
+        )
+        sections = adapter.get_account_addresses_list_sections(addrs)
+        await adapter.send_interactive_list(
+            recipient_wa_id=wa_id,
+            body_text=body,
+            button_label="Ver Direcciones",
+            sections=sections,
+        )
+
+
+async def _mostrar_detalle_direccion_wa(wa_id: str, phone_10: str, addr_id: str, idx: str) -> None:
+    repo = get_repository()
+    cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else repo.get_customer(TENANT_ID, "whatsapp", wa_id)
+    raw_addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if (cust and cust.address) else [])
+    addrs = adapter.filter_valid_addresses(raw_addrs, phone=phone_10)
+
+    target_addr = next((a for a in addrs if str(a.id) == str(addr_id)), None)
+    if not target_addr and idx.isdigit():
+        i_idx = int(idx) - 1
+        if 0 <= i_idx < len(addrs):
+            target_addr = addrs[i_idx]
+
+    addr_str = target_addr.address if target_addr else f"Dirección #{idx}"
+    clean_addr = resolve_gps_address_to_name(addr_str.strip())
+    clean_addr = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_addr, flags=re.I).strip()
+
+    actual_aid = target_addr.id if target_addr else addr_id
+    body = (
+        f"📍 *Detalle de Dirección #{idx}:*\n\n"
+        f"🏠 `{clean_addr}`\n\n"
+        "¿Qué deseas hacer con esta dirección?"
+    )
+    buttons = adapter.get_address_view_buttons(actual_aid, idx)
+    await adapter.send_interactive_buttons(
+        recipient_wa_id=wa_id,
+        body_text=body,
+        buttons=buttons,
+    )
+
 
 async def process_whatsapp_event(event: dict[str, Any]) -> None:
     """Process a single incoming WhatsApp event asynchronously using the deterministic router."""
@@ -504,6 +646,34 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
     if loc and loc.get("latitude") is not None and loc.get("longitude") is not None:
         lat = float(loc["latitude"])
         lng = float(loc["longitude"])
+        wa_account_st = _get_wa_account_state(wa_id)
+        if wa_account_st.get("awaiting_account_new_address"):
+            _clear_wa_account_state(wa_id)
+            resolved_name = reverse_geocode(lat, lng) or f"Ubicación GPS ({lat:.5f}, {lng:.5f})"
+            cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else repo.get_customer(TENANT_ID, "whatsapp", wa_id)
+            if not cust and phone_10:
+                cust = repo.save_or_update_customer(
+                    tenant_id=TENANT_ID,
+                    channel="whatsapp",
+                    channel_user_id=wa_id,
+                    name="Cliente",
+                    phone=phone_10,
+                    address=resolved_name,
+                    latitude=lat,
+                    longitude=lng,
+                )
+            if cust and hasattr(repo, "add_customer_address"):
+                repo.add_customer_address(customer_id=cust.id, address=resolved_name, notes="")
+            if phone_10:
+                from src.repositories.identity_store import identity_store
+                identity_store.unmark_address_deleted(phone_10, resolved_name)
+            await adapter.send_text_message(
+                recipient_wa_id=wa_id,
+                text=f"✅ *¡Ubicación GPS guardada con éxito en tu cuenta!*\n📍 `{resolved_name}`"
+            )
+            await _mostrar_direcciones_cuenta_wa(wa_id, phone_10)
+            return
+
         flow_res = await flow_router.process_event(
             session_id=thread_id,
             location={"latitude": lat, "longitude": lng},
@@ -572,6 +742,108 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
 
     if interactive_id:
         _AWAITING_RATING_COMMENTS.pop(wa_id, None)
+        _clear_wa_account_state(wa_id)
+
+        # 4.1 Menú Principal y Mi Cuenta
+        if interactive_id == "menu:main":
+            await _mostrar_menu_principal_wa(wa_id, phone_10)
+            return
+
+        elif interactive_id == "menu:mi_cuenta":
+            await _mostrar_mi_cuenta_wa(wa_id, phone_10)
+            return
+
+        elif interactive_id == "menu:hacer_pedido":
+            clear_cart(wa_id)
+            clear_session(thread_id)
+            sess = flow_router.get_session(thread_id)
+            cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else repo.get_customer(TENANT_ID, "whatsapp", wa_id)
+            if cust:
+                sess.draft_order.customer_phone = cust.phone
+                sess.draft_order.customer_name = cust.name
+            await adapter.send_interactive_buttons(
+                recipient_wa_id=wa_id,
+                body_text="🛻 *Nuevo Pedido de Gas*\n\n¿Qué tipo de servicio necesitas hoy?\nSelecciona una opción a continuación:",
+                buttons=adapter.get_service_type_buttons(),
+            )
+            return
+
+        elif interactive_id in ("account_menu:addresses", "menu:mis_direcciones"):
+            await _mostrar_direcciones_cuenta_wa(wa_id, phone_10)
+            return
+
+        elif interactive_id.startswith("account_addr:view:"):
+            parts = interactive_id.split(":")
+            addr_id = parts[2]
+            idx = parts[3] if len(parts) > 3 else "1"
+            await _mostrar_detalle_direccion_wa(wa_id, phone_10, addr_id, idx)
+            return
+
+        elif interactive_id == "account_addr:add":
+            _get_wa_account_state(wa_id)["awaiting_account_new_address"] = True
+            body = (
+                "📍 *Agregar Nueva Dirección a tu Cuenta*\n\n"
+                "Por favor escribe en el chat tu **dirección completa** (Calle, Número, Colonia y Referencias) "
+                "o comparte tu **ubicación GPS 📍** desde el clip de WhatsApp:\n\n"
+                "_💡 Ejemplo: Av. Insurgentes 123, Col. Centro, portón blanco._"
+            )
+            buttons = [
+                {"id": "account_menu:addresses", "title": "🔙 Volver"},
+            ]
+            await adapter.send_interactive_buttons(
+                recipient_wa_id=wa_id,
+                body_text=body,
+                buttons=buttons,
+            )
+            return
+
+        elif interactive_id == "account:edit_name":
+            _get_wa_account_state(wa_id)["awaiting_account_name"] = True
+            cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else repo.get_customer(TENANT_ID, "whatsapp", wa_id)
+            curr_name = cust.name if cust else "Cliente"
+            body = (
+                f"✏️ Tu nombre actual registrado es: *{curr_name}*\n\n"
+                "Por favor escribe en el chat tu **nuevo nombre completo**:"
+            )
+            buttons = [
+                {"id": "menu:mi_cuenta", "title": "🔙 Volver"},
+            ]
+            await adapter.send_interactive_buttons(
+                recipient_wa_id=wa_id,
+                body_text=body,
+                buttons=buttons,
+            )
+            return
+
+        elif interactive_id == "client_addr_back":
+            sess = flow_router.get_session(thread_id)
+            if sess and sess.state == FlowState.WAITING_FOR_NEW_CUSTOMER_ADDRESS:
+                phone_val = sess.draft_order.customer_phone or phone_10
+                cust = repo.get_customer_by_phone(TENANT_ID, phone_val) if phone_val else None
+                raw_addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if cust and cust.address else [])
+                valid_addrs = adapter.filter_valid_addresses(raw_addrs, phone=phone_val)
+                if valid_addrs:
+                    sess.state = FlowState.WAITING_FOR_ADDRESS_SELECTION
+                    body = "📍 Regresamos a tus direcciones registradas.\n\n¿A cuál de tus direcciones guardadas deseas que enviemos tu pedido?"
+                    if len(valid_addrs) == 1:
+                        buttons = adapter.get_customer_addresses_buttons(valid_addrs)
+                        await adapter.send_interactive_buttons(recipient_wa_id=wa_id, body_text=body, buttons=buttons)
+                    else:
+                        sections = adapter.get_customer_addresses_list_sections(valid_addrs)
+                        await adapter.send_interactive_list(recipient_wa_id=wa_id, body_text=body, button_label="Ver Direcciones", sections=sections)
+                    return
+                else:
+                    clear_session(thread_id)
+                    await adapter.send_interactive_buttons(
+                        recipient_wa_id=wa_id,
+                        body_text="ℹ️ *Operación cancelada.*\n\n¿Qué tipo de servicio de gas necesitas hoy?",
+                        buttons=adapter.get_service_type_buttons(),
+                    )
+                    return
+            else:
+                await _mostrar_direcciones_cuenta_wa(wa_id, phone_10)
+                return
+
         if interactive_id == "client_svc:cilindro":
             clear_cart(wa_id)
             sections = adapter.get_cylinder_catalog_list_sections(TENANT_ID)
@@ -855,13 +1127,14 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
                 await adapter.send_text_message(wa_id, wa_text)
             return
 
-        elif interactive_id == "client_addr:del_menu":
+        elif interactive_id in ("client_addr:del_menu", "client_addr_del_menu", "account_addr:del_menu"):
             phone_to_search = phone_10
             cust = repo.get_customer_by_phone(TENANT_ID, phone_to_search) if phone_to_search else None
             if not cust and not phone_to_search:
                 cust = repo.get_customer(TENANT_ID, "whatsapp", wa_id)
 
-            addrs = cust.addresses if (cust and cust.addresses) else []
+            raw_addrs = cust.addresses if (cust and cust.addresses) else []
+            addrs = adapter.filter_valid_addresses(raw_addrs, phone=phone_to_search)
             if not addrs:
                 await adapter.send_text_message(
                     wa_id,
@@ -882,11 +1155,12 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
             )
             return
 
-        elif interactive_id == "del_addr_cancel":
+        elif interactive_id in ("del_addr_cancel", "client_addr:cancel_del"):
             cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else None
             if not cust and not phone_10:
                 cust = repo.get_customer(TENANT_ID, "whatsapp", wa_id)
-            addrs = cust.addresses if (cust and cust.addresses) else []
+            raw_addrs = cust.addresses if (cust and cust.addresses) else []
+            addrs = adapter.filter_valid_addresses(raw_addrs, phone=phone_10)
             msg = "ℹ️ *Operación cancelada.*\nTu dirección se mantiene guardada en tu cuenta.\n\n¿A cuál de tus direcciones deseas que enviemos tu pedido?"
             if len(addrs) == 1:
                 buttons = adapter.get_customer_addresses_buttons(addrs)
@@ -961,8 +1235,13 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
 
             if customer_id:
                 repo.delete_customer_address(customer_id, actual_aid, phone=phone_10, address_text=addr_text_deleted)
+                if phone_10 and addr_text_deleted:
+                    from src.repositories.identity_store import identity_store
+                    identity_store.mark_address_deleted(phone_10, addr_text_deleted)
+
                 updated_cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else None
-                remaining = updated_cust.addresses if (updated_cust and updated_cust.addresses) else (repo.get_customer_addresses(customer_id) if hasattr(repo, "get_customer_addresses") else [])
+                raw_remaining = updated_cust.addresses if (updated_cust and updated_cust.addresses) else (repo.get_customer_addresses(customer_id) if hasattr(repo, "get_customer_addresses") else [])
+                remaining = adapter.filter_valid_addresses(raw_remaining, phone=phone_10)
                 clean_deleted = resolve_gps_address_to_name(addr_text_deleted.strip()) if addr_text_deleted else ""
                 clean_deleted = re.sub(r"^(?:\[(?:Nueva\s*Direcci[oó]n|Direcci[oó]n(?:\s*\d+)?|Principal)\]\s*)+", "", clean_deleted, flags=re.I).strip()
                 addr_display = clean_deleted or f"#{addr_id_str}"
@@ -1005,40 +1284,7 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
                 )
                 return
 
-        elif interactive_id in ("del_addr_cancel", "client_addr:cancel_del"):
-            cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else None
-            if not cust and not phone_10:
-                cust = repo.get_customer(TENANT_ID, "whatsapp", wa_id)
-            addrs = cust.addresses if (cust and cust.addresses) else []
-            body = "ℹ️ *Operación cancelada.* Tu dirección se mantiene guardada.\n\n¿A cuál de tus direcciones deseas que enviemos tu pedido o prefieres registrar una nueva?"
-            if len(addrs) == 1:
-                buttons = adapter.get_customer_addresses_buttons(addrs)
-                await adapter.send_interactive_buttons(recipient_wa_id=wa_id, body_text=body, buttons=buttons)
-            elif len(addrs) > 1:
-                sections = adapter.get_customer_addresses_list_sections(addrs)
-                await adapter.send_interactive_list(recipient_wa_id=wa_id, body_text=body, button_label="Ver Direcciones", sections=sections)
-            else:
-                await adapter.send_text_message(wa_id, body)
-            return
-
         elif interactive_id.startswith("client_addr:"):
-            if interactive_id in ("client_addr:del_menu", "client_addr_del_menu"):
-                cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else None
-                if not cust and not phone_10:
-                    cust = repo.get_customer(TENANT_ID, "whatsapp", wa_id)
-                addrs = cust.addresses if (cust and cust.addresses) else []
-                if not addrs:
-                    await adapter.send_text_message(wa_id, "ℹ️ No tienes direcciones guardadas para eliminar.")
-                    return
-                sections = adapter.get_delete_addresses_list_sections(addrs)
-                await adapter.send_interactive_list(
-                    recipient_wa_id=wa_id,
-                    body_text="🗑️ *Eliminar Dirección Guardada*\n\nSelecciona abajo cuál de tus direcciones deseas borrar de tu cuenta:",
-                    button_label="Borrar Dirección",
-                    sections=sections,
-                )
-                return
-
             flow_res = await flow_router.process_event(
                 session_id=thread_id,
                 callback_data=interactive_id,
@@ -1069,6 +1315,68 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
 
     texto_clean = texto_usuario.strip().lower()
 
+    # 5.0 Comprobación de estado de cuenta en WhatsApp (nombre o dirección nueva desde Mi Cuenta)
+    wa_account_st = _get_wa_account_state(wa_id)
+    if wa_account_st.get("awaiting_account_name"):
+        _clear_wa_account_state(wa_id)
+        new_name = texto_usuario.strip()
+        if len(new_name) >= 2 and not any(k in new_name.lower() for k in ["/start", "cancelar", "menu"]):
+            repo = get_repository()
+            cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else repo.get_customer(TENANT_ID, "whatsapp", wa_id)
+            if cust:
+                repo.update_customer_name(TENANT_ID, phone_10 or cust.phone, new_name)
+            sess = flow_router.get_session(thread_id)
+            if sess and sess.draft_order:
+                sess.draft_order.customer_name = new_name
+            await adapter.send_text_message(wa_id, f"✅ *Tu nombre ha sido actualizado a:* {new_name}")
+            await _mostrar_mi_cuenta_wa(wa_id, phone_10)
+            return
+        else:
+            await adapter.send_text_message(wa_id, "ℹ️ Operación cancelada.")
+            await _mostrar_mi_cuenta_wa(wa_id, phone_10)
+            return
+
+    if wa_account_st.get("awaiting_account_new_address"):
+        _clear_wa_account_state(wa_id)
+        if texto_clean in ("cancelar", "volver", "salir", "regresar"):
+            await _mostrar_direcciones_cuenta_wa(wa_id, phone_10)
+            return
+
+        from src.services.address_validator import validate_address_with_llm
+        val_result = await validate_address_with_llm(user_address=texto_usuario, city_context="Mazatlán")
+        if not val_result.is_valid:
+            rejection_msg = val_result.rejection_reason or (
+                "⚠️ La dirección ingresada no parece estar dentro de nuestra zona de cobertura en Mazatlán, "
+                "o le faltan datos indispensables (Calle, Número, Colonia).\n\n"
+                "Por favor verifica e intenta de nuevo, o comparte tu ubicación GPS 📍:"
+            )
+            buttons = [{"id": "account_menu:addresses", "title": "🔙 Volver"}]
+            _get_wa_account_state(wa_id)["awaiting_account_new_address"] = True
+            await adapter.send_interactive_buttons(wa_id, rejection_msg, buttons)
+            return
+
+        addr_to_save = val_result.normalized_address or texto_usuario.strip()
+        repo = get_repository()
+        cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else repo.get_customer(TENANT_ID, "whatsapp", wa_id)
+        if not cust and phone_10:
+            cust = repo.save_or_update_customer(
+                tenant_id=TENANT_ID,
+                channel="whatsapp",
+                channel_user_id=wa_id,
+                name="Cliente",
+                phone=phone_10,
+                address=addr_to_save,
+            )
+        if cust and hasattr(repo, "add_customer_address"):
+            repo.add_customer_address(customer_id=cust.id, address=addr_to_save, notes="")
+        if phone_10:
+            from src.repositories.identity_store import identity_store
+            identity_store.unmark_address_deleted(phone_10, addr_to_save)
+
+        await adapter.send_text_message(wa_id, f"✅ *¡Dirección guardada con éxito en tu cuenta!*\n📍 `{addr_to_save}`")
+        await _mostrar_direcciones_cuenta_wa(wa_id, phone_10)
+        return
+
     # 5.1 Detección temprana de intentos de payload / inyección / jailbreak / scraping multi-número
     found_phones = re.findall(r"\b(?:\+?52\s*)?(\d{10})\b", texto_usuario)
     es_payload_o_inyeccion = any(k in texto_clean for k in [
@@ -1092,27 +1400,34 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
         )
         return
 
-    # 5.2 Si el usuario envía saludo o inicio, reiniciar sesión para un pedido limpio
+    # 5.2 Accesos directos a Menú y Mi Cuenta fuera de pedidos activos
+    curr_sess = flow_router.get_session(thread_id)
+    is_in_active_order = curr_sess and curr_sess.state not in (FlowState.START, None)
+
+    if not is_in_active_order:
+        if texto_clean in ("mi cuenta", "cuenta", "perfil", "mi perfil", "ver perfil"):
+            await _mostrar_mi_cuenta_wa(wa_id, phone_10)
+            return
+        elif texto_clean in ("mis direcciones", "direcciones", "ver direcciones", "mis ubicaciones"):
+            await _mostrar_direcciones_cuenta_wa(wa_id, phone_10)
+            return
+        elif texto_clean in ("menu", "menú"):
+            await _mostrar_menu_principal_wa(wa_id, phone_10)
+            return
+
+    # 5.3 Si el usuario envía saludo o inicio, mostrar menú principal para empezar
     es_saludo_puro = (
-        texto_clean in ("/start", "start", "hola", "hola!", "buenas", "buenos dias", "buenos días", "buenas tardes", "buenas noches", "inicio", "empezar", "menu", "menú", "reiniciar", "nuevo pedido")
+        texto_clean in ("/start", "start", "hola", "hola!", "buenas", "buenos dias", "buenos días", "buenas tardes", "buenas noches", "inicio", "empezar", "reiniciar", "nuevo pedido")
         or (any(texto_clean.startswith(g) for g in ["hola", "buenos dias", "buenos días", "buenas tardes", "buenas noches", "inicio", "empezar", "que tal", "buenas"])
             and not any(k in texto_clean for k in ["quiero", "cilindro", "estacionario", "tanque", "litro", "litros", "pedir", "gas", "cuanto", "cuánto", "precio", "30", "20", "45", "10"]))
     )
-    if es_saludo_puro:
+    if es_saludo_puro and not is_in_active_order:
         clear_cart(wa_id)
         clear_session(thread_id)
-
-        flow_res = await flow_router.process_event(
-            session_id=thread_id,
-            text="/start",
-            channel="whatsapp",
-            channel_user_id=wa_id,
-            tenant_id=TENANT_ID,
-        )
-        await _dispatch_flow_response_whatsapp(flow_res, wa_id=wa_id, phone_10=phone_10, user_text=texto_usuario)
+        await _mostrar_menu_principal_wa(wa_id, phone_10)
         return
 
-    # 5.3 Procesamiento conversacional regular
+    # 5.4 Procesamiento conversacional regular
     flow_res = await flow_router.process_event(
         session_id=thread_id,
         text=texto_usuario,
@@ -1153,11 +1468,39 @@ async def _dispatch_flow_response_whatsapp(
                 sections=sections,
             )
             return
+
+        elif state == FlowState.WAITING_FOR_NEW_CUSTOMER_ADDRESS or action_performed in ("ask_new_customer_address", "ask_new_address"):
+            from src.services.notifications import _format_markdown_for_whatsapp
+            wa_text = _format_markdown_for_whatsapp(respuesta)
+            repo = get_repository()
+            phone_to_search = phone_10
+            if not phone_to_search and wa_id:
+                sess = flow_router.get_session(f"whatsapp:{TENANT_ID}:{wa_id}")
+                if sess and sess.draft_order and sess.draft_order.customer_phone:
+                    phone_to_search = sess.draft_order.customer_phone
+
+            cust = repo.get_customer_by_phone(TENANT_ID, phone_to_search) if phone_to_search else None
+            if not cust and not phone_to_search and wa_id:
+                cust = repo.get_customer(TENANT_ID, "whatsapp", wa_id)
+
+            raw_addrs = cust.addresses if (cust and cust.addresses) else []
+            valid_addrs = adapter.filter_valid_addresses(raw_addrs, phone=phone_to_search)
+            if valid_addrs:
+                buttons = [{"id": "client_addr_back", "title": "🔙 Volver"}]
+            else:
+                buttons = [{"id": "client_confirm:cancel", "title": "❌ Cancelar Pedido"}]
+
+            await adapter.send_interactive_buttons(
+                recipient_wa_id=wa_id,
+                body_text=wa_text,
+                buttons=buttons,
+            )
+            return
+
         elif state in (
             FlowState.WAITING_FOR_NEW_CUSTOMER_NAME,
-            FlowState.WAITING_FOR_NEW_CUSTOMER_ADDRESS,
             FlowState.WAITING_FOR_PHONE,
-        ) or action_performed in ("ask_phone", "ask_new_customer_name", "ask_new_customer_address"):
+        ) or action_performed in ("ask_phone", "ask_new_customer_name"):
             from src.services.notifications import _format_markdown_for_whatsapp
             await adapter.send_text_message(
                 recipient_wa_id=wa_id,
@@ -1177,7 +1520,8 @@ async def _dispatch_flow_response_whatsapp(
             if not cust and not phone_to_search and wa_id:
                 cust = repo.get_customer(TENANT_ID, "whatsapp", wa_id)
 
-            addrs = cust.addresses if (cust and cust.addresses) else []
+            raw_addrs = cust.addresses if (cust and cust.addresses) else []
+            addrs = adapter.filter_valid_addresses(raw_addrs, phone=phone_to_search)
             if addrs:
                 sections = adapter.get_delete_addresses_list_sections(addrs)
                 await adapter.send_interactive_list(
@@ -1191,7 +1535,8 @@ async def _dispatch_flow_response_whatsapp(
             return
 
         elif action_performed == "show_delete_confirm_buttons":
-            sess = flow_router.get_session(thread_id)
+            sess_key = f"whatsapp:{TENANT_ID}:{wa_id}"
+            sess = flow_router.get_session(sess_key)
             pending_aid = getattr(sess, "_pending_delete_address_id", "") if sess else ""
             confirm_id = f"del_addr_confirm:{pending_aid}" if pending_aid else "del_addr_confirm_text"
             confirm_buttons = [
@@ -1217,7 +1562,8 @@ async def _dispatch_flow_response_whatsapp(
             if not cust and not phone_to_search and wa_id:
                 cust = repo.get_customer(TENANT_ID, "whatsapp", wa_id)
 
-            addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if cust and cust.address else [])
+            raw_addrs = cust.addresses if (cust and cust.addresses) else ([CustomerAddress(id=1, address=cust.address, alias="Principal")] if cust and cust.address else [])
+            addrs = adapter.filter_valid_addresses(raw_addrs, phone=phone_to_search)
             if addrs:
                 if len(addrs) == 1:
                     buttons = adapter.get_customer_addresses_buttons(addrs)
@@ -1238,6 +1584,23 @@ async def _dispatch_flow_response_whatsapp(
                         sections=sections,
                     )
                     return
+            else:
+                sess_key = f"whatsapp:{TENANT_ID}:{wa_id}"
+                sess = flow_router.get_session(sess_key)
+                if sess:
+                    sess.state = FlowState.WAITING_FOR_NEW_CUSTOMER_ADDRESS
+                from src.services.notifications import _format_markdown_for_whatsapp
+                wa_text = _format_markdown_for_whatsapp(
+                    "📍 Por favor indícame tu **dirección de entrega completa** (calle, número, colonia y referencias) "
+                    "o presiona el botón para compartir tu **ubicación GPS** 📍:"
+                )
+                buttons = [{"id": "client_confirm:cancel", "title": "❌ Cancelar Pedido"}]
+                await adapter.send_interactive_buttons(
+                    recipient_wa_id=wa_id,
+                    body_text=wa_text,
+                    buttons=buttons,
+                )
+                return
 
         elif action_performed == "ask_schedule_text":
             await adapter.send_text_message(
