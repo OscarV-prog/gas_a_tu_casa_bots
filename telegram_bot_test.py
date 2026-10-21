@@ -1312,12 +1312,46 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-        from src.services.flow_router import is_plausible_person_name
-        digits_in_name = re.sub(r"\D", "", clean_name)
-        if len(digits_in_name) >= 3 or len(clean_name) < 2 or clean_name.startswith("/") or not is_plausible_person_name(clean_name):
+        from src.services.flow_router import validate_person_name_semantic
+        is_valid_name, reason = await validate_person_name_semantic(clean_name, tenant_id=TENANT_ID)
+        if not is_valid_name:
+            if reason == "groseria":
+                msg = (
+                    "⚠️ **Nombre no permitido**\n\n"
+                    "Por favor evita ingresar groserías, palabras altisonantes o apodos ofensivos.\n\n"
+                    "Escribe tu **nombre y apellido** real (ej. *Juan Pérez*):"
+                )
+            elif reason == "no_es_nombre":
+                msg = (
+                    "⚠️ **Nombre no válido**\n\n"
+                    "El texto ingresado no parece ser un nombre propio de persona (evita nombres de objetos, productos, frases o saludos).\n\n"
+                    "Por favor escribe tu **nombre y apellido** real (ej. *Juan Pérez*):"
+                )
+            elif reason in ("galimatias", "caracteres_invalidos"):
+                msg = (
+                    "⚠️ **Nombre no válido**\n\n"
+                    "Por favor ingresa un nombre y apellido real usando únicamente letras (ej. *Juan Pérez*):"
+                )
+            elif reason == "troll":
+                msg = (
+                    "⚠️ **Nombre no válido**\n\n"
+                    "Por favor ingresa tu nombre de persona real (evita apodos ficticios o personajes):\n\n"
+                    "Escribe tu **nombre y apellido** (ej. *Juan Pérez*):"
+                )
+            elif reason == "cambio_telefono":
+                phone_txt = f" (**{registered_phone}**)" if registered_phone else ""
+                msg = (
+                    f"⛔ **Operación no permitida por seguridad.**\n\n"
+                    f"Tu número celular ya quedó registrado{phone_txt}. Por políticas de seguridad y protección de datos, "
+                    f"no está permitido ingresar números telefónicos en el campo de nombre.\n\n"
+                    f"Por favor escribe tu **nombre y apellido** real (ej. *Juan Pérez*):"
+                )
+            else:
+                msg = "⚠️ Por favor escribe tu **nombre y apellido** real (ej. *Juan Pérez*):"
+
             await safe_reply_text(
                 update.message,
-                "⚠️ Por favor escribe tu **nombre y apellido** real (ej. *Juan Pérez*):",
+                msg,
                 reply_markup=ReplyKeyboardRemove(),
             )
             return
@@ -1373,11 +1407,37 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # 2.5 Si el cliente estaba en proceso de editar su nombre de cuenta
     if context.user_data.get("awaiting_account_name_edit"):
         new_name = texto_usuario.strip()
-        from src.services.flow_router import is_plausible_person_name
-        if not is_plausible_person_name(new_name):
+        from src.services.flow_router import validate_person_name_semantic
+        is_valid_name, reason = await validate_person_name_semantic(new_name, tenant_id=TENANT_ID)
+        if not is_valid_name:
+            if reason == "groseria":
+                msg = (
+                    "⚠️ **Nombre no permitido**\n\n"
+                    "Por favor evita ingresar groserías, palabras altisonantes o apodos ofensivos.\n\n"
+                    "Escribe tu **nombre y apellido** real (ej. *Juan Pérez*):"
+                )
+            elif reason == "no_es_nombre":
+                msg = (
+                    "⚠️ **Nombre no válido**\n\n"
+                    "El texto ingresado no parece ser un nombre propio de persona (evita nombres de objetos, productos, frases o saludos).\n\n"
+                    "Por favor escribe tu **nombre y apellido** real (ej. *Juan Pérez*):"
+                )
+            elif reason in ("galimatias", "caracteres_invalidos"):
+                msg = (
+                    "⚠️ **Nombre no válido**\n\n"
+                    "Por favor ingresa un nombre y apellido real usando únicamente letras (ej. *Juan Pérez*):"
+                )
+            elif reason == "troll":
+                msg = (
+                    "⚠️ **Nombre no válido**\n\n"
+                    "Por favor ingresa tu nombre de persona real (evita apodos ficticios o personajes):\n\n"
+                    "Escribe tu **nombre y apellido** (ej. *Juan Pérez*):"
+                )
+            else:
+                msg = "⚠️ Por favor escribe un **nombre y apellido** válido (ej. *Juan Pérez*):"
             await safe_reply_text(
                 update.message,
-                "⚠️ Por favor escribe un **nombre y apellido** válido (ej. *Juan Pérez*):",
+                msg,
             )
             return
         context.user_data.pop("awaiting_account_name_edit", None)

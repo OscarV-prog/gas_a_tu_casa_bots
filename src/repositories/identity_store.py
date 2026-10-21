@@ -281,6 +281,15 @@ class IdentityStore:
                     self._phone_to_tg.pop(clean_p, None)
         else:
             self._order_channels.pop(uid_str, None)
+
+        # Also clean up any lingering order_channels entry matching channel & uid_str
+        keys_to_del = [
+            k for k, v in self._order_channels.items()
+            if str(v.get("channel_user_id", "")).strip() == uid_str and str(v.get("channel", "")).lower() == str(channel).lower()
+        ]
+        for k in keys_to_del:
+            self._order_channels.pop(k, None)
+
         self._save()
         logger.info(f"🗑️ [IdentityStore] Unbound {channel} user {uid_str}")
 
@@ -442,17 +451,17 @@ class IdentityStore:
             return None
         self._load()
         c_str = str(channel_user_id).strip()
-        # 1. Search in order_channels
+        # 1. Search in tg mapping if telegram (authoritative 1:1 mapping)
+        if str(channel).lower() == "telegram":
+            if c_str in self._tg_to_phone:
+                return self._tg_to_phone[c_str]
+        # 2. Search in order_channels
         for info in self._order_channels.values():
             if str(info.get("channel", "")).lower() == str(channel).lower():
                 if str(info.get("channel_user_id", "")).strip() == c_str:
                     phone = info.get("phone")
                     if phone:
                         return phone
-        # 2. Search in tg mapping if telegram
-        if str(channel).lower() == "telegram":
-            if c_str in self._tg_to_phone:
-                return self._tg_to_phone[c_str]
         # 3. Fallback to repository
         try:
             from src.repositories import get_repository

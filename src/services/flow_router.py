@@ -545,11 +545,42 @@ async def check_new_order_or_reset_semantic(text: str, tenant_id: str = "petroil
     return False, None
 
 
+# Lista determinista de groserías, vulgaridades e insultos en español / México
+PROFANITY_PATTERNS = [
+    r"\b(?:put[oas]+|putit[oas]+|putot[oas]+)\b",
+    r"\b(?:pendej[oas]+|pendejit[oas]+|pendejad\w*)\b",
+    r"\b(?:verg[oas]+|vergit[oas]+|el\s+vergas?|alv)\b",
+    r"\b(?:ching[aáeéoóu]\w*|chinguita|chsm)\b",
+    r"\b(?:mierd[as]+|mierdit\w*)\b",
+    r"\b(?:culer[oas]+|culit[oas]+|cul[oas]+)\b",
+    r"\b(?:cabr[oó]n\w*|cabroncit\w*)\b",
+    r"\b(?:zorrit[oas]+|zorras?|mecos?|perr[oas]+)\b",
+    r"\b(?:maric[oó]n\w*|maricas?|jot[oas]+)\b",
+    r"\b(?:idiot[as]+|est[uú]pid[oas]+|imb[eé]cil\w*|tarad[oas]+)\b",
+    r"\b(?:mam[oó]n\w*|mamad\w*)\b",
+    r"\b(?:cochin[oas]+|marran[oas]+|cerd[oas]+)\b",
+    r"\b(?:bastard[oas]+|malparid[oas]+|hdp)\b",
+]
+
+
+def contains_profanity_deterministic(text: str) -> bool:
+    """Verifica si el texto contiene groserías, malas palabras o insultos evidentes."""
+    if not text:
+        return False
+    t_lower = text.lower()
+    for pat in PROFANITY_PATTERNS:
+        if re.search(pat, t_lower):
+            return True
+    return False
+
+
 def is_plausible_person_name(text: str) -> bool:
     """Valida si un texto ingresado representa un nombre propio de persona verosímil."""
     if not text:
         return False
     if check_phone_change_attempt_deterministic(text):
+        return False
+    if contains_profanity_deterministic(text):
         return False
     t = text.strip()
     t_lower = t.lower()
@@ -1139,6 +1170,108 @@ async def is_phone_change_attempt_semantic(text: str, tenant_id: str = "petroil"
         logger.error(f"[FlowRouter] Error en clasificador semántico de cambio de teléfono: {e}")
 
     return False
+
+
+async def validate_person_name_semantic(text: str, tenant_id: str = "petroil") -> tuple[bool, str]:
+    """Valida con IA y heurísticas si el nombre ingresado por el usuario es un nombre de persona real y verosímil.
+    Distingue nombres legítimos (incluyendo nombres raros, antiguos, indígenas y extranjeros)
+    de groserías, palabras comunes, comandos, objetos o troleos.
+    Retorna: (is_valid: bool, reason: str)
+    """
+    if not text or not text.strip():
+        return False, "vacio"
+
+    raw = text.strip()
+    raw_lower = raw.lower()
+
+    # 1. Chequeo de longitud
+    if len(raw) < 2:
+        return False, "muy_corto"
+    if len(raw) > 60:
+        return False, "muy_largo"
+
+    # 2. No debe contener números (números telefónicos o dígitos)
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) >= 3:
+        return False, "contiene_numeros"
+
+    # 3. No debe contener caracteres especiales o de código
+    if re.search(r"[@#$%&*_=+\\/<>\[\]{}~^;:|]", raw):
+        return False, "caracteres_invalidos"
+
+    # 4. Chequeo determinista de intento de cambio de teléfono
+    if check_phone_change_attempt_deterministic(raw):
+        return False, "cambio_telefono"
+
+    # 5. Chequeo determinista inmediato de groserías e insultos (0 ms)
+    if contains_profanity_deterministic(raw):
+        return False, "groseria"
+
+    # 6. Chequeo de palabras prohibidas evidentes (objetos, comandos, saludos, productos de gas)
+    words = raw_lower.split()
+    obvious_single_words = {
+        "gas", "cilindro", "estacionario", "tanque", "litro", "precio", "cuanto", "cuánto",
+        "pedido", "orden", "cancelar", "cambiar", "ayuda", "hola", "mesa", "silla", "zapato",
+        "pizza", "perro", "gato", "comida", "nada", "ninguno", "jaja", "xd", "oye", "disculpa",
+        "perdon", "perdón", "quiero", "favor", "porfa", "linea", "línea", "telefono", "teléfono",
+        "celular", "recarga", "domicilio", "ubicacion", "ubicación", "colonia", "calle"
+    }
+    obvious_phrases = [
+        "buenos dias", "buenas tardes", "buenas noches", "no se", "no sé", "quiero gas",
+        "cuanto vale", "cuánto vale", "donde viene", "dónde viene", "para que", "para qué"
+    ]
+    if raw_lower in obvious_single_words or any(p in raw_lower for p in obvious_phrases):
+        return False, "no_es_nombre"
+    if len(words) == 1 and words[0] in obvious_single_words:
+        return False, "no_es_nombre"
+
+    # 7. Si no pasa la heurística de caracteres de nombre (solo letras, espacios, acentos, guion, punto)
+    if not re.match(r"^[A-Za-zÁÉÍÓÚáéíóúÑñüÜ\s\.\'-]+$", raw):
+        return False, "caracteres_invalidos"
+
+    # 8. Evaluación Semántica con IA (LLM)
+    system_prompt = (
+        "Eres un validador lingüístico estricto y de seguridad para el registro de clientes de Gas LP.\n"
+        "Evalúa si el texto proporcionado por el usuario es un NOMBRE DE PERSONA VÁLIDO Y VEROSÍMIL o si debe ser rechazado.\n\n"
+        "CRITERIOS DE ACEPTACIÓN (is_valid = true):\n"
+        "- Nombres y apellidos comunes, formales o cotidianos (ej. 'Juan Pérez', 'María Elena', 'Oscar Vizcarra', 'Carlos Alberto González').\n"
+        "- Nombres poco comunes, raros o antiguos en español (ej. 'Hermenegildo', 'Bonifacio', 'Eufrosina', 'Anacleto', 'Severiano', 'Austreberta', 'Wenceslao', 'Gaudencio', 'Celedonio').\n"
+        "- Nombres de origen indígena o prehispánico (ej. 'Xóchitl', 'Cuauhtémoc', 'Citlalli', 'Nayeli', 'Tonatiuh', 'Itzel', 'Quetzalli', 'Yael', 'Nezahualcóyotl').\n"
+        "- Nombres de origen extranjero o anglosajón comunes o adoptados en México (ej. 'Brayan', 'Kevin', 'Jonathan', 'Dylan', 'Axel', 'Ian', 'Thiago', 'Iker', 'Zidane', 'Ashley').\n\n"
+        "CRITERIOS DE RECHAZO (is_valid = false):\n"
+        "- Groserías, albures, insultos, palabras altisonantes, obscenidades o términos vulgares en español o slang mexicano (ej. 'Puto', 'El Vergas', 'Pendejo', 'Chinga', 'Mierda', 'Mamón', 'Culero', 'Cochino').\n"
+        "- Palabras que sean sustantivos comunes, objetos, animales, comidas, marcas o productos (ej. 'Mesa', 'Cilindro', 'Perro', 'Pizza', 'Gasolinera', 'Zapato', 'Bicicleta').\n"
+        "- Frases conversacionales, saludos, peticiones o comandos (ej. 'Hola qué tal', 'Quiero gas', 'Cancelar pedido', 'No tengo nombre', 'Para qué quieres mi nombre').\n"
+        "- Texto sin sentido, tecleo aleatorio o galimatías (ej. 'asdfghjk', 'qwertyuiop', 'zzzzzz', 'xdddd', 'jajaja', 'fghjk').\n"
+        "- Apodos cómicos, personajes ficticios o troleos (ej. 'Batman', 'El Bromas', 'Tu Padre', 'Soy Tu Dueño', 'Goku').\n\n"
+        "Responde ÚNICAMENTE un JSON con este formato:\n"
+        "{\"is_valid\": true/false, \"reason\": \"nombre_valido | groseria | no_es_nombre | galimatias | troll\"}"
+    )
+    user_prompt = f'Texto a evaluar como nombre de persona: "{raw}"'
+
+    try:
+        raw_json = await execute_minimal_llm_fallback(system_prompt, user_prompt, tenant_id)
+        m = re.search(r"\{[\s\S]*\}", raw_json)
+        if m:
+            data = json.loads(m.group(0))
+            is_valid = bool(data.get("is_valid", False))
+            reason = str(data.get("reason", "no_es_nombre" if not is_valid else "nombre_valido"))
+            return is_valid, reason
+    except Exception as e:
+        logger.error(f"[FlowRouter] Error en validación semántica de nombre con IA: {e}")
+
+    # 9. Fallback heurístico en caso de que el LLM falle o no responda:
+    has_vowels = all(bool(re.search(r"[aeiouáéíóúü]", w, re.I)) for w in words)
+    if has_vowels and is_plausible_person_name(raw):
+        return True, "nombre_valido"
+
+    return False, "no_es_nombre"
+
+
+async def is_plausible_person_name_semantic(text: str, tenant_id: str = "petroil") -> bool:
+    """Verifica si el texto es un nombre de persona verosímil usando IA y heurísticas."""
+    is_valid, _ = await validate_person_name_semantic(text, tenant_id)
+    return is_valid
 
 
 # =============================================================================

@@ -333,10 +333,147 @@ def test_deterministic_and_semantic_phone_change_detection():
     asyncio.run(_run_semantic())
 
 
+def test_validate_person_name_semantic_comprehensive():
+    """Verify that profanities, objects, and nonsensical words are rejected,
+    while rare, indigenous, foreign, and unusual names are accepted."""
+    from src.services.flow_router import validate_person_name_semantic
+    from unittest.mock import patch
+
+    async def _run():
+        # 1. Deterministic profanity rejection
+        profanities = [
+            "el vergas",
+            "puto",
+            "pendejo",
+            "chinga tu madre",
+            "alv",
+            "mierda",
+            "hdp",
+            "culero",
+        ]
+        for bad_word in profanities:
+            is_valid, reason = await validate_person_name_semantic(bad_word)
+            assert not is_valid, f"Expected '{bad_word}' to be rejected"
+            assert reason == "groseria", f"Expected reason 'groseria' for '{bad_word}', got '{reason}'"
+
+        # 2. Obvious single-word non-names / objects / commands
+        non_names = ["mesa", "silla", "pizza", "cilindro", "gas", "quiero gas", "tanque"]
+        for non_name in non_names:
+            is_valid, reason = await validate_person_name_semantic(non_name)
+            assert not is_valid, f"Expected '{non_name}' to be rejected"
+            assert reason == "no_es_nombre", f"Expected reason 'no_es_nombre' for '{non_name}', got '{reason}'"
+
+        # 3. Digits, phone numbers, special characters
+        invalid_chars = ["6691234567", "Juan 123", "Pedro#", "Ana_12", "<script>"]
+        for inv in invalid_chars:
+            is_valid, reason = await validate_person_name_semantic(inv)
+            assert not is_valid, f"Expected '{inv}' to be rejected"
+
+        # 4. Standard and rare names accepted (via phonetic fallback or mocked LLM)
+        names_to_test = [
+            "Juan Pérez",
+            "Oscar Vizcarra",
+            "Carlos Mesa",
+            "Francisco Rojo",
+            "Hermenegildo López",
+            "Xóchitl Gálvez",
+            "Cuauhtémoc Blanco",
+            "Brayan Martínez",
+        ]
+        with patch(
+            "src.services.flow_router.execute_minimal_llm_fallback",
+            return_value='{"is_valid": true, "reason": "nombre_valido"}',
+        ):
+            for name in names_to_test:
+                is_valid, reason = await validate_person_name_semantic(name)
+                assert is_valid, f"Expected rare/standard name '{name}' to be accepted"
+                assert reason == "nombre_valido"
+
+        # 5. LLM rejecting subtle insults or fictional/troll characters
+        with patch(
+            "src.services.flow_router.execute_minimal_llm_fallback",
+            return_value='{"is_valid": false, "reason": "troll"}',
+        ):
+            is_valid, reason = await validate_person_name_semantic("Batman")
+            assert not is_valid
+            assert reason == "troll"
+
+    asyncio.run(_run())
+
+
+def test_onboarding_name_rejects_profanity_and_accepts_rare_names():
+    """Test onboarding workflow in telegram_bot_test: profanities are rejected with custom message,
+    and rare/indigenous names successfully register the user."""
+    from unittest.mock import patch
+
+    async def _run():
+        repo = get_repository()
+        test_uid = 999111222
+        test_phone = "6699887766"
+
+        # Cleanup
+        repo.delete_customer("petroil", phone=test_phone, channel="telegram", channel_user_id=str(test_uid))
+        identity_store.unbind_channel_user("telegram", str(test_uid))
+        identity_store.unmark_customer_deleted(test_phone)
+        clear_session(f"telegram:petroil:{test_uid}")
+
+        context_mock = MagicMock()
+        context_mock.user_data = {
+            "phone": test_phone,
+            "awaiting_registration_name": True,
+        }
+        identity_store.bind_channel_user_phone("telegram", str(test_uid), test_phone, force=True)
+
+        update_mock = MagicMock()
+        update_mock.effective_user.id = test_uid
+        update_mock.effective_chat.id = test_uid
+        update_mock.message.reply_text = AsyncMock()
+
+        # Step 1: User enters profanity
+        update_mock.message.text = "el vergas"
+        await bot.responder(update_mock, context_mock)
+        assert update_mock.message.reply_text.called
+        reply_call = update_mock.message.reply_text.call_args[0][0]
+        assert "no permitido" in reply_call.lower() or "groserías" in reply_call.lower()
+        assert context_mock.user_data.get("awaiting_registration_name") is True
+
+        # Step 2: User enters an object
+        update_mock.message.reply_text.reset_mock()
+        update_mock.message.text = "mesa"
+        await bot.responder(update_mock, context_mock)
+        assert update_mock.message.reply_text.called
+        reply_call = update_mock.message.reply_text.call_args[0][0]
+        assert "no parece ser un nombre propio" in reply_call.lower() or "nombre no válido" in reply_call.lower()
+        assert context_mock.user_data.get("awaiting_registration_name") is True
+
+        # Step 3: User enters a rare indigenous name (e.g., Cuauhtémoc Blanco)
+        with patch(
+            "src.services.flow_router.execute_minimal_llm_fallback",
+            return_value='{"is_valid": true, "reason": "nombre_valido"}',
+        ):
+            update_mock.message.reply_text.reset_mock()
+            update_mock.message.text = "Cuauhtémoc Blanco"
+            await bot.responder(update_mock, context_mock)
+
+        # Successfully registered
+        cust = bot.get_registered_customer(test_uid)
+        assert cust is not None
+        assert cust.name == "Cuauhtémoc Blanco"
+        assert cust.phone == test_phone
+
+        # Cleanup
+        repo.delete_customer("petroil", phone=test_phone, channel="telegram", channel_user_id=str(test_uid))
+        identity_store.unbind_channel_user("telegram", str(test_uid), phone=test_phone)
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
     test_is_plausible_person_name_rejects_phone_and_registration_phrases()
     test_onboarding_name_rejects_phone_change_and_invalid_name()
     test_registered_user_cannot_change_phone_via_chat()
     test_flow_router_blocks_phone_correction_for_registered_user()
     test_deterministic_and_semantic_phone_change_detection()
-    print("✅ All security tests passed successfully!")
+    test_validate_person_name_semantic_comprehensive()
+    test_onboarding_name_rejects_profanity_and_accepts_rare_names()
+    print("✅ All security and AI name validation tests passed successfully!")
