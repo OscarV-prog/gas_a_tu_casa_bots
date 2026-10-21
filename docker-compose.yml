@@ -13,3 +13,9 @@ services:
       - ./data:/app/data
       - ./uploads:/app/uploads
       - ./petroil.db:/app/petroil.db
+      - ./src:/app/src
+      - ./tenants:/app/tenants
+      - ./telegram_bot.py:/app/telegram_bot.py
+      - ./telegram_bot_gascytsa.py:/app/telegram_bot_gascytsa.py
+      - ./telegram_bot_hermosillo.py:/app/telegram_bot_hermosillo.py
+      - ./driver_bot.py:/app/driver_bot.py
