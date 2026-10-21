@@ -72,6 +72,9 @@ init_db()
 
 def get_markup_for_flow_response(flow_res: FlowResponse, phone: str = "", user_id: str = "") -> InlineKeyboardMarkup | None:
     """Selecciona el markup interactivo apropiado según la acción o estado del flujo."""
+    if flow_res.action_performed == "show_security_return_menu":
+        return get_botones_regresar_menu()
+
     if flow_res.action_performed == "show_edit_options":
         return get_botones_editar_opciones()
 
@@ -174,6 +177,13 @@ def get_markup_for_flow_response(flow_res: FlowResponse, phone: str = "", user_i
         if match_order:
             return get_botones_pedido_activo(match_order.group(1))
     return detectar_botones_mensaje(flow_res.text, phone=phone, channel_user_id=str(user_id))
+
+
+def get_botones_regresar_menu() -> InlineKeyboardMarkup:
+    """Botón interactivo para regresar al menú principal."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Regresar al Menú Principal", callback_data="menu:main")]
+    ])
 
 
 def get_botones_menu_principal() -> InlineKeyboardMarkup:
@@ -608,6 +618,10 @@ def detectar_botones_mensaje(respuesta: str, phone: str = "", channel_user_id: s
         match_order = re.search(r"(?:pedido|folio)\s*#?\s*(\d+)", respuesta, re.IGNORECASE)
         if match_order:
             return get_botones_confirmar_cancelacion(match_order.group(1))
+
+    # 0.1 ¿Es aviso de seguridad de cambio de número / política de 1 cuenta? -> Botón para regresar al menú principal
+    if any(k in resp_lower for k in ["operación no permitida por seguridad", "operacion no permitida por seguridad"]):
+        return get_botones_regresar_menu()
 
     # 1. ¿Es un pedido ya creado/confirmado en BD o consulta de historial/estatus? -> GUARD ESTRICTO: NINGÚN BOTÓN
     is_confirmed_order_or_history = any(k in resp_lower for k in [
@@ -1581,7 +1595,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Por políticas de seguridad y protección de tus datos (política de 1 cuenta por dispositivo), "
             "**no está permitido cambiar de número celular ni registrar múltiples números** desde este mismo chat.\n\n"
             "Si cambiaste de número o requieres soporte para tu cuenta, por favor comunícate directamente con nuestro centro de atención a clientes. ⛽📞",
-            reply_markup=get_botones_tipo_servicio(),
+            reply_markup=get_botones_regresar_menu(),
         )
         return
 
@@ -1958,7 +1972,7 @@ async def manejar_callback_cliente(update: Update, context: ContextTypes.DEFAULT
             context.user_data["phone"] = mapped_phone
 
     # 0. Menú Principal y Gestión de Cuenta de Dispositivo
-    if data == "menu:main":
+    if data in ("menu:main", "menu:principal", "menu:regresar", "menu:volver"):
         cust = get_registered_customer(user_id)
         name = cust.name if cust else "Cliente"
         phone = cust.phone if cust else context.user_data.get("phone", "")

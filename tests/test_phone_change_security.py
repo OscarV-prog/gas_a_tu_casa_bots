@@ -110,8 +110,12 @@ def test_registered_user_cannot_change_phone_via_chat():
         await bot.responder(update_mock, context_mock)
 
         reply_text = update_mock.message.reply_text.call_args[0][0]
+        reply_markup = update_mock.message.reply_text.call_args[1].get("reply_markup")
         assert "no permitida por seguridad" in reply_text.lower()
         assert registered_phone in reply_text
+        assert reply_markup is not None
+        assert reply_markup.inline_keyboard[0][0].callback_data == "menu:main"
+        assert "regresar" in reply_markup.inline_keyboard[0][0].text.lower()
 
         # Verify identity store phone did NOT change
         bound_p = identity_store.get_phone_for_channel_user("telegram", str(test_uid))
@@ -123,7 +127,10 @@ def test_registered_user_cannot_change_phone_via_chat():
         await bot.responder(update_mock, context_mock)
 
         reply_text = update_mock.message.reply_text.call_args[0][0]
+        reply_markup = update_mock.message.reply_text.call_args[1].get("reply_markup")
         assert "no permitida por seguridad" in reply_text.lower()
+        assert reply_markup is not None
+        assert reply_markup.inline_keyboard[0][0].callback_data == "menu:main"
         bound_p = identity_store.get_phone_for_channel_user("telegram", str(test_uid))
         assert bound_p == registered_phone
 
@@ -133,9 +140,33 @@ def test_registered_user_cannot_change_phone_via_chat():
         await bot.responder(update_mock, context_mock)
 
         reply_text = update_mock.message.reply_text.call_args[0][0]
+        reply_markup = update_mock.message.reply_text.call_args[1].get("reply_markup")
         assert "no permitida por seguridad" in reply_text.lower()
+        assert reply_markup is not None
+        assert reply_markup.inline_keyboard[0][0].callback_data == "menu:main"
         bound_p = identity_store.get_phone_for_channel_user("telegram", str(test_uid))
         assert bound_p == registered_phone
+
+        # Test callback query: user clicks "⬅️ Regresar al Menú Principal"
+        cb_update = MagicMock()
+        cb_update.effective_user.id = test_uid
+        cb_update.effective_chat.id = test_uid
+        cb_update.callback_query.data = "menu:main"
+        cb_update.callback_query.message = MagicMock()
+        cb_update.callback_query.message.reply_text = AsyncMock()
+        cb_update.callback_query.edit_message_text = AsyncMock()
+        cb_update.callback_query.answer = AsyncMock()
+
+        await bot.manejar_callback_cliente(cb_update, context_mock)
+        assert cb_update.callback_query.edit_message_text.called
+        cb_edit_call = cb_update.callback_query.edit_message_text.call_args
+        menu_text = cb_edit_call[0][0]
+        menu_markup = cb_edit_call[1].get("reply_markup")
+        assert "qué deseas hacer hoy" in menu_text.lower() or "hola" in menu_text.lower()
+        # Ensure menu has Hacer un Pedido and Mi Cuenta
+        menu_callbacks = [btn.callback_data for row in menu_markup.inline_keyboard for btn in row]
+        assert "menu:hacer_pedido" in menu_callbacks
+        assert "menu:mi_cuenta" in menu_callbacks
 
         # Cleanup
         repo.delete_customer("petroil", phone=registered_phone, channel="telegram", channel_user_id=str(test_uid))
@@ -173,8 +204,14 @@ def test_flow_router_blocks_phone_correction_for_registered_user():
 
         assert "no permitida por seguridad" in res2.text.lower()
         assert registered_phone in res2.text
+        assert res2.action_performed == "show_security_return_menu"
         # State should not become WAITING_FOR_PHONE
         assert res2.state != FlowState.WAITING_FOR_PHONE
+
+        # Verify markup generated for flow response
+        markup = bot.get_markup_for_flow_response(res2)
+        assert markup is not None
+        assert markup.inline_keyboard[0][0].callback_data == "menu:main"
 
         session = flow_router.get_session(session_id)
         assert session.draft_order.customer_phone == registered_phone

@@ -1634,7 +1634,7 @@ class FlowRouter:
                         "por favor comunícate directamente con nuestro centro de atención a clientes. ⛽📞"
                     ),
                     state=curr_state,
-                    action_performed=act_perf,
+                    action_performed="show_security_return_menu",
                     is_llm=False,
                 )
 

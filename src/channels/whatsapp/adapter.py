@@ -1024,6 +1024,15 @@ class WhatsAppAdapter:
                     "buttons": self.get_order_cancel_confirm_buttons(match_order.group(1)),
                 }
 
+        # 1.6. ¿Es aviso de seguridad por cambio de número de teléfono? -> Botón para regresar al menú principal
+        if any(k in resp_lower for k in ["operación no permitida por seguridad", "operacion no permitida por seguridad"]):
+            return respuesta, {
+                "type": "buttons",
+                "buttons": [
+                    {"id": "menu:main", "title": "⬅️ Menú Principal"}
+                ],
+            }
+
         # 1.8. GUARD: Solicitud de registro de nuevo usuario, nombre, dirección o teléfono celular -> NINGÚN BOTÓN
         es_registro_o_datos_personales = any(k in resp_lower for k in [
             "nombre completo", "cuál es tu nombre", "cual es tu nombre", "para registrar tu cuenta",
