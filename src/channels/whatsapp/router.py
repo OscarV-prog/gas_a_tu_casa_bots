@@ -751,6 +751,39 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
         _AWAITING_RATING_COMMENTS.pop(wa_id, None)
         _clear_wa_account_state(wa_id)
 
+        # 4.05 2FA OTP: Rechazar o Confirmar vinculación de cuenta desde WhatsApp
+        if interactive_id.startswith("otp_reject"):
+            req_id = interactive_id.split(":", 1)[1] if ":" in interactive_id else None
+            from src.services.otp_service import otp_service
+            rejected_req = otp_service.reject_linking_request(phone_10 or wa_id, req_id=req_id, reason="not_me")
+            chan_name = (rejected_req.get("channel", "redes sociales") if rejected_req else "redes sociales").title()
+            await adapter.send_text_message(
+                wa_id,
+                f"🛡️ *Solicitud Cancelada y Borrada*\n\n"
+                f"Hemos cancelado la solicitud de vinculación con {chan_name}. El código de verificación ha sido eliminado e invalidado de inmediato, por lo que ya no procederá nada en dicha plataforma.\n\n"
+                "Tu cuenta de WhatsApp permanece segura y protegida. ¡Gracias por avisarnos! ⛽🔒",
+            )
+            return
+
+        if interactive_id.startswith("otp_confirm"):
+            req_id = interactive_id.split(":", 1)[1] if ":" in interactive_id else None
+            from src.services.otp_service import otp_service
+            ok, reason, conf_req = otp_service.confirm_by_whatsapp(phone_10 or wa_id, req_id=req_id)
+            if ok and conf_req:
+                chan_name = conf_req.get("channel", "redes sociales").title()
+                await adapter.send_text_message(
+                    wa_id,
+                    f"✅ *¡Cuenta Vinculada con Éxito!*\n\n"
+                    f"Tu cuenta de {chan_name} ahora está vinculada a este número de WhatsApp. "
+                    "Tus pedidos y direcciones registradas estarán sincronizados en ambas plataformas. ⛽🎉",
+                )
+            else:
+                await adapter.send_text_message(
+                    wa_id,
+                    "⚠️ La solicitud de vinculación ya no está disponible o ha expirado.",
+                )
+            return
+
         # 4.1 Menú Principal y Mi Cuenta
         if interactive_id == "menu:main":
             await _mostrar_menu_principal_wa(wa_id, phone_10)
@@ -1423,6 +1456,39 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
         await adapter.send_text_message(wa_id, f"✅ *¡Dirección guardada con éxito en tu cuenta!*\n📍 `{addr_to_save}`")
         await _mostrar_direcciones_cuenta_wa(wa_id, phone_10)
         return
+
+    # 5.05 Soporte de 2FA OTP: Si el usuario responde al mensaje de vinculación de Messenger / Instagram
+    from src.services.otp_service import otp_service
+    pending_otp_for_user = otp_service.get_pending_request_by_phone(phone_10 or wa_id)
+    if pending_otp_for_user:
+        if any(k in texto_clean for k in [
+            "no soy yo", "no soy esta persona", "no soy esa persona", "equivocado", "equivocaron",
+            "se equivocaron", "no fui yo", "no reconozco", "cancelar vinculacion", "cancelar vinculación",
+            "numero equivocado", "número equivocado", "cancelar"
+        ]):
+            rejected_req = otp_service.reject_linking_request(phone_10 or wa_id, req_id=pending_otp_for_user.get("id"), reason="not_me")
+            chan_name = (rejected_req.get("channel", "redes sociales") if rejected_req else "redes sociales").title()
+            await adapter.send_text_message(
+                wa_id,
+                f"🛡️ *Solicitud Cancelada y Borrada*\n\n"
+                f"Hemos cancelado la solicitud de vinculación con {chan_name}. El código de verificación ha sido eliminado e invalidado de inmediato, por lo que ya no procederá nada en dicha plataforma.\n\n"
+                "Tu cuenta de WhatsApp permanece segura y protegida. ¡Gracias por avisarnos! ⛽🔒",
+            )
+            return
+
+        m_vincular = re.search(r"vincular\s*(?:messenger|instagram)?\s*(\d{6})?", texto_clean)
+        clean_digits = re.sub(r"\D", "", texto_clean)
+        if m_vincular or clean_digits == pending_otp_for_user.get("code") or texto_clean in ("autorizar", "confirmar", "si soy yo", "sí soy yo"):
+            ok, reason, conf_req = otp_service.confirm_by_whatsapp(phone_10 or wa_id, req_id=pending_otp_for_user.get("id"))
+            if ok and conf_req:
+                chan_name = conf_req.get("channel", "redes sociales").title()
+                await adapter.send_text_message(
+                    wa_id,
+                    f"✅ *¡Cuenta Vinculada con Éxito!*\n\n"
+                    f"Tu cuenta de {chan_name} ahora está vinculada a este número de WhatsApp. "
+                    "Tus pedidos y direcciones registradas estarán sincronizados en ambas plataformas. ⛽🎉",
+                )
+                return
 
     # 5.1 Control de seguridad estricto: Bloquear cualquier intento de cambiar o registrar otro número
     is_raw_different_phone = False

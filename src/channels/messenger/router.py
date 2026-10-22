@@ -415,6 +415,21 @@ async def _process_single_messenger_event(event: dict[str, Any]) -> None:
             sess = flow_router.get_session(psid)
             if sess and sess.draft_order and sess.draft_order.customer_phone:
                 user_phone = sess.draft_order.customer_phone
+        if user_phone and not identity_store.get_phone_for_channel_user("messenger", psid):
+            identity_store.bind_channel_user_phone("messenger", psid, user_phone)
+
+        # Solo requerir vinculación para acciones sensibles de gestión de cuenta
+        sensitive_account_prefixes = ("account_menu:", "del_addr:", "account:")
+        if not user_phone and any(interactive_id.startswith(p) for p in sensitive_account_prefixes):
+            profile = await adapter.get_user_profile(psid)
+            first_name = (profile.get("first_name") if profile else None) or "Cliente"
+            await adapter.send_text_message(
+                psid,
+                f"👋 **¡Hola, {first_name}!**\n\n"
+                "Para consultar o administrar los datos de tu cuenta, primero necesitamos verificar tu número celular.\n\n"
+                "👉 Por favor escribe tu **número celular a 10 dígitos** (ej. *6691234567*):",
+            )
+            return
 
         if user_phone:
             user_orders = repo.get_orders_by_customer_phone(TENANT_ID, user_phone, limit=3)
@@ -938,6 +953,143 @@ async def _process_single_messenger_event(event: dict[str, Any]) -> None:
                 "¿En qué servicio de gas puedo servirte hoy? ⛽"
             ),
             quick_replies=adapter.get_service_quick_replies(),
+        )
+        return
+
+    # 6.15 Interceptor de Onboarding y 2FA para Messenger (Unificación segura con WhatsApp)
+    cust = repo.get_customer(TENANT_ID, "messenger", psid)
+    user_phone = (cust.phone if cust and cust.phone else None) or identity_store.get_phone_for_channel_user("messenger", psid)
+    if user_phone and not identity_store.get_phone_for_channel_user("messenger", psid):
+        identity_store.bind_channel_user_phone("messenger", psid, user_phone)
+
+    if not user_phone:
+        from src.services.otp_service import otp_service, send_whatsapp_otp_challenge
+        pending_req = otp_service.get_pending_request("messenger", psid)
+
+        # 6.15.1 Cancelación o cambio de número solicitado por el usuario
+        if any(k in texto_clean for k in ["cambiar numero", "cambiar número", "otro numero", "otro número", "equivocado", "cancelar"]):
+            otp_service.cancel_request("messenger", psid)
+            await adapter.send_text_message(
+                psid,
+                "🔄 Operación reiniciada.\n\nPor favor escribe tu **número celular correcto a 10 dígitos**:",
+            )
+            return
+
+        # 6.15.2 Si el titular de WhatsApp rechazó la solicitud ("No soy esta persona")
+        if pending_req and pending_req.get("status") == "rejected":
+            phone_masked = f"******{pending_req.get('phone', '')[-4:]}"
+            otp_service.cancel_request("messenger", psid)
+            await adapter.send_text_message(
+                psid,
+                f"⛔ **Vinculación Rechazada**\n\n"
+                f"El titular del WhatsApp (**{phone_masked}**) indicó que no es esta persona (número equivocado).\n\n"
+                "Por favor verifica tu número y escribe nuevamente tus **10 dígitos correctos** para continuar:",
+            )
+            return
+
+        # 6.15.3 Si hay solicitud pendiente y el usuario envía 6 dígitos (Código OTP):
+        clean_code = re.sub(r"\D", "", texto_usuario.strip())
+        if pending_req and len(clean_code) == 6 and pending_req.get("status") == "pending":
+            ok, reason, req_data = otp_service.verify_code("messenger", psid, clean_code)
+            if ok and req_data:
+                phone_saved = req_data.get("phone", "")
+                name_saved = req_data.get("profile_name", "Cliente")
+                await adapter.send_quick_replies(
+                    recipient_psid=psid,
+                    text=(
+                        f"🎉 **¡Cuenta vinculada y verificada con éxito, {name_saved}!**\n\n"
+                        f"📱 **Teléfono vinculado:** `{phone_saved}`\n"
+                        "Tus direcciones guardadas y pedidos anteriores están sincronizados con WhatsApp y Telegram. ✨\n\n"
+                        "¿Qué tipo de servicio de gas necesitas hoy? ⛽"
+                    ),
+                    quick_replies=adapter.get_service_quick_replies(),
+                )
+                return
+            elif reason == "rejected":
+                phone_masked = f"******{pending_req.get('phone', '')[-4:]}"
+                otp_service.cancel_request("messenger", psid)
+                await adapter.send_text_message(
+                    psid,
+                    f"⛔ **Vinculación Rechazada**\n\n"
+                    f"El titular del WhatsApp (**{phone_masked}**) indicó que no es esta persona (número equivocado).\n\n"
+                    "Por favor escribe nuevamente tu **número celular a 10 dígitos correcto**:",
+                )
+                return
+            elif reason == "invalid_code":
+                attempts = (req_data or {}).get("attempts", 1)
+                remaining = max(0, 3 - attempts)
+                await adapter.send_text_message(
+                    psid,
+                    f"⚠️ **Código incorrecto.**\n\n"
+                    f"Por favor revisa el código de 6 dígitos que enviamos a tu WhatsApp. Te quedan {remaining} intento(s).\n\n"
+                    f"_(O escribe 'cambiar número' si te equivocaste de teléfono)_",
+                )
+                return
+            elif reason in ("max_attempts", "expired"):
+                otp_service.cancel_request("messenger", psid)
+                await adapter.send_text_message(
+                    psid,
+                    "⏳ **Código expirado o intentos agotados.**\n\n"
+                    "Por favor escribe de nuevo tu **número celular a 10 dígitos** para enviarte un nuevo código:",
+                )
+                return
+
+        # 6.15.4 Si el usuario envió 10 dígitos (su número telefónico):
+        found_phones = re.findall(r"\b(?:\+?52\s*)?(\d{10})\b", texto_usuario)
+        if len(found_phones) == 1 and not (pending_req and len(clean_code) == 6):
+            target_phone = found_phones[0]
+            profile = await adapter.get_user_profile(psid)
+            prof_name = f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip() if profile else ""
+            if not prof_name:
+                prof_name = "Cliente Messenger"
+
+            new_req = otp_service.create_linking_request(
+                channel="messenger",
+                channel_user_id=psid,
+                phone=target_phone,
+                profile_name=prof_name,
+                tenant_id=TENANT_ID,
+            )
+
+            await send_whatsapp_otp_challenge(
+                phone=target_phone,
+                code=new_req["code"],
+                channel="messenger",
+                profile_name=prof_name,
+                req_id=new_req["id"],
+                tenant_id=TENANT_ID,
+            )
+
+            phone_masked = f"******{target_phone[-4:]}"
+            await adapter.send_text_message(
+                psid,
+                f"📲 **Código de Verificación Enviado**\n\n"
+                f"Enviamos un código de 6 dígitos a tu WhatsApp (**{phone_masked}**).\n\n"
+                f"Por favor escribe aquí tu **código de 6 dígitos** para confirmar tu cuenta:\n\n"
+                f"_(Si te equivocaste de teléfono, escribe 'cambiar número')_",
+            )
+            return
+
+        # 6.15.5 Si hay solicitud pendiente y envió cualquier otro texto:
+        if pending_req and pending_req.get("status") == "pending":
+            phone_masked = f"******{pending_req.get('phone', '')[-4:]}"
+            await adapter.send_text_message(
+                psid,
+                f"🔐 **Verificación Pendiente**\n\n"
+                f"Estamos esperando el código de 6 dígitos enviado a tu WhatsApp (**{phone_masked}**).\n\n"
+                f"Escribe los 6 dígitos aquí, o escribe **'cambiar número'** si te equivocaste de teléfono.",
+            )
+            return
+
+        # 6.15.6 Primer contacto o solicitud de número:
+        profile = await adapter.get_user_profile(psid)
+        first_name = (profile.get("first_name") if profile else None) or "Cliente"
+        await adapter.send_text_message(
+            psid,
+            f"👋 **¡Hola, {first_name}! Bienvenido a Gas a Tu Puerta.**\n\n"
+            "Para proteger tu seguridad y sincronizar tus direcciones y pedidos anteriores con WhatsApp y Telegram, "
+            "necesitamos verificar tu número celular.\n\n"
+            "👉 Por favor escribe tu **número celular a 10 dígitos** (ej. *6691234567*):",
         )
         return
 
