@@ -3145,11 +3145,44 @@ class FlowRouter:
 
             clean_name = re.sub(r"^(?:me llamo|mi nombre es|soy|yo soy)\s+", "", text.strip(), flags=re.IGNORECASE).strip()
 
-            # 2. Validar que sea un nombre propio de persona verosímil
-            if not is_plausible_person_name(clean_name):
+            # 2. Validar que sea un nombre propio de persona verosímil (IA Semántica + Determinista)
+            is_valid_name, reason = await validate_person_name_semantic(clean_name, tenant_id=session.tenant_id)
+            if not is_valid_name:
                 telemetry.record_message(channel=session.channel, is_llm=False)
+                if reason == "groseria":
+                    msg = (
+                        "⚠️ **Nombre no permitido**\n\n"
+                        "Por favor evita ingresar groserías, palabras altisonantes o apodos ofensivos.\n\n"
+                        "Indícame tu **nombre y apellido** real (ej. *Juan Pérez*):"
+                    )
+                elif reason == "no_es_nombre":
+                    msg = (
+                        "⚠️ **Nombre no válido**\n\n"
+                        "El texto ingresado no parece ser un nombre propio de persona (evita nombres de objetos, productos, frases o saludos).\n\n"
+                        "Por favor indícame tu **nombre y apellido** real (ej. *Juan Pérez*):"
+                    )
+                elif reason in ("galimatias", "caracteres_invalidos"):
+                    msg = (
+                        "⚠️ **Nombre no válido**\n\n"
+                        "Por favor ingresa un nombre y apellido real usando únicamente letras (ej. *Juan Pérez*):"
+                    )
+                elif reason == "troll":
+                    msg = (
+                        "⚠️ **Nombre no válido**\n\n"
+                        "Por favor ingresa tu nombre de persona real (evita apodos ficticios o personajes):\n\n"
+                        "Indícame tu **nombre y apellido** (ej. *Juan Pérez*):"
+                    )
+                elif reason == "cambio_telefono":
+                    msg = (
+                        "⚠️ **Operación no permitida**\n\n"
+                        "No está permitido ingresar números de teléfono en el campo de nombre.\n\n"
+                        "Por favor indícame tu **nombre y apellido** real (ej. *Juan Pérez*):"
+                    )
+                else:
+                    msg = "Para poder registrar tu cuenta correctamente y avanzar con tu pedido, por favor indícame tu **nombre y apellido** (ej. *Juan Pérez*):"
+
                 return FlowResponse(
-                    text="Para poder registrar tu cuenta correctamente y avanzar con tu pedido, por favor indícame tu **nombre y apellido** (ej. *Juan Pérez*):",
+                    text=msg,
                     state=session.state,
                     is_llm=False,
                 )

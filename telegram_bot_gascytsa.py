@@ -220,7 +220,7 @@ def get_teclado_registro() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         one_time_keyboard=False,
         is_persistent=True,
-        input_field_placeholder="Toca '📱 Compartir mi número' abajo 👇",
+        input_field_placeholder="🔒 Toca '📱 Compartir mi número' 👇",
     )
 
 
@@ -1141,48 +1141,19 @@ async def recibir_contacto_cliente(update: Update, context: ContextTypes.DEFAULT
 
     repo = get_repository()
     context.user_data["phone"] = phone
+    context.user_data["awaiting_registration_name"] = True
 
     from src.repositories.identity_store import identity_store
     identity_store.bind_channel_user_phone("telegram", str(user_id), phone)
     if hasattr(repo, "bind_telegram_user_phone"):
         repo.bind_telegram_user_phone(str(user_id), phone)
 
-    # 2. Obtener automáticamente el nombre real del usuario de su perfil de Telegram
-    telegram_name = (
-        user.full_name
-        or f"{contact.first_name or ''} {contact.last_name or ''}".strip()
-        or user.first_name
-        or ""
-    ).strip()
-
-    from src.services.flow_router import is_plausible_person_name
-    if telegram_name and is_plausible_person_name(telegram_name):
-        # Nombre verosímil y legítimo del usuario en Telegram -> Registro automático sin permitir datos externos
-        context.user_data.pop("awaiting_registration_name", None)
-        cust = repo.save_or_update_customer(
-            tenant_id=TENANT_ID,
-            channel="telegram",
-            channel_user_id=str(user_id),
-            name=telegram_name,
-            phone=phone,
-        )
-        await safe_reply_text(
-            update.message,
-            f"📱 ¡Teléfono vinculado con éxito! (**{phone}**)\n"
-            f"👤 Nombre de usuario: **{telegram_name}**",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        await mostrar_menu_principal(update, context, telegram_name, phone)
-        return
-    else:
-        # En caso de que el perfil de Telegram tenga solo emojis o esté vacío
-        context.user_data["awaiting_registration_name"] = True
-        await update.message.reply_text(
-            f"📱 ¡Teléfono vinculado con éxito! (**{phone}**)\n\n"
-            "Para completar tu cuenta, por favor escribe tu **nombre y apellido** (ej. *Juan Pérez*):",
-            reply_markup=ReplyKeyboardRemove(),
-            parse_mode="Markdown",
-        )
+    await update.message.reply_text(
+        f"📱 ¡Teléfono vinculado con éxito desde tu dispositivo! (**{phone}**)\n\n"
+        "Ahora, por favor **escribe tu nombre y apellido** para tu cuenta (ej. *Juan Pérez*):",
+        reply_markup=ReplyKeyboardRemove(),
+        parse_mode="Markdown",
+    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1211,8 +1182,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             b_name = "Gas Cytsa"
         texto_onboarding = (
             f"👋 ¡Bienvenido a **{b_name}**! ⛽\n\n"
-            "Para brindarte un servicio personalizado y seguro (política de 1 cuenta por dispositivo), "
-            "es necesario vincular tu cuenta presionando el botón **'📱 Compartir mi número'** abajo:"
+            "🔒 **Vinculación obligatoria de dispositivo**\n"
+            "Por políticas de seguridad y protección contra fraudes (política de 1 cuenta por dispositivo), "
+            "el teclado se encuentra bloqueado para texto libre.\n\n"
+            "👉 Para continuar, presiona el botón oficial **'📱 Compartir mi número'** abajo:"
         )
         await update.message.reply_text(
             texto_onboarding,
@@ -1349,12 +1322,46 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-        from src.services.flow_router import is_plausible_person_name
-        digits_in_name = re.sub(r"\D", "", clean_name)
-        if len(digits_in_name) >= 7 or len(clean_name) < 2 or clean_name.startswith("/") or not is_plausible_person_name(clean_name):
+        from src.services.flow_router import validate_person_name_semantic
+        is_valid_name, reason = await validate_person_name_semantic(clean_name, tenant_id=TENANT_ID)
+        if not is_valid_name:
+            if reason == "groseria":
+                msg = (
+                    "⚠️ **Nombre no permitido**\n\n"
+                    "Por favor evita ingresar groserías, palabras altisonantes o apodos ofensivos.\n\n"
+                    "Escribe tu **nombre y apellido** real (ej. *Juan Pérez*):"
+                )
+            elif reason == "no_es_nombre":
+                msg = (
+                    "⚠️ **Nombre no válido**\n\n"
+                    "El texto ingresado no parece ser un nombre propio de persona (evita nombres de objetos, productos, frases o saludos).\n\n"
+                    "Por favor escribe tu **nombre y apellido** real (ej. *Juan Pérez*):"
+                )
+            elif reason in ("galimatias", "caracteres_invalidos"):
+                msg = (
+                    "⚠️ **Nombre no válido**\n\n"
+                    "Por favor ingresa un nombre y apellido real usando únicamente letras (ej. *Juan Pérez*):"
+                )
+            elif reason == "troll":
+                msg = (
+                    "⚠️ **Nombre no válido**\n\n"
+                    "Por favor ingresa tu nombre de persona real (evita apodos ficticios o personajes):\n\n"
+                    "Escribe tu **nombre y apellido** (ej. *Juan Pérez*):"
+                )
+            elif reason == "cambio_telefono":
+                phone_txt = f" (**{registered_phone}**)" if registered_phone else ""
+                msg = (
+                    f"⛔ **Operación no permitida por seguridad.**\n\n"
+                    f"Tu número celular ya quedó registrado{phone_txt}. Por políticas de seguridad y protección de datos, "
+                    f"no está permitido ingresar números telefónicos en el campo de nombre.\n\n"
+                    f"Por favor escribe tu **nombre y apellido** real (ej. *Juan Pérez*):"
+                )
+            else:
+                msg = "⚠️ Por favor escribe tu **nombre y apellido** real (ej. *Juan Pérez*):"
+
             await safe_reply_text(
                 update.message,
-                "⚠️ Por favor escribe tu **nombre y apellido** completo (ej. *Juan Pérez*):",
+                msg,
                 reply_markup=ReplyKeyboardRemove(),
             )
             return
@@ -1390,14 +1397,57 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await mostrar_menu_principal(update, context, clean_name, registered_phone)
         return
 
+    # 2.5 Control estricto de seguridad: Si no está registrado en BD ni tiene teléfono vinculado por botón:
+    cust = get_registered_customer(user_id)
+    if not cust or not cust.phone:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        await update.message.reply_text(
+            "🔒 **Entrada de texto bloqueada**\n\n"
+            "Tu mensaje fue eliminado. Para proteger tu seguridad y evitar fraudes (política de 1 cuenta por dispositivo), "
+            "**no se permite escribir texto libre ni ingresar números manuales**.\n\n"
+            "👉 **Debes presionar únicamente el botón oficial '📱 Compartir mi número' abajo:**",
+            reply_markup=get_teclado_registro(),
+            parse_mode="Markdown",
+        )
+        return
+
     # 2.5 Si el cliente estaba en proceso de editar su nombre de cuenta
     if context.user_data.get("awaiting_account_name_edit"):
         new_name = texto_usuario.strip()
-        from src.services.flow_router import is_plausible_person_name
-        if not is_plausible_person_name(new_name):
+        from src.services.flow_router import validate_person_name_semantic
+        is_valid_name, reason = await validate_person_name_semantic(new_name, tenant_id=TENANT_ID)
+        if not is_valid_name:
+            if reason == "groseria":
+                msg = (
+                    "⚠️ **Nombre no permitido**\n\n"
+                    "Por favor evita ingresar groserías, palabras altisonantes o apodos ofensivos.\n\n"
+                    "Escribe tu **nombre y apellido** real (ej. *Juan Pérez*):"
+                )
+            elif reason == "no_es_nombre":
+                msg = (
+                    "⚠️ **Nombre no válido**\n\n"
+                    "El texto ingresado no parece ser un nombre propio de persona (evita nombres de objetos, productos, frases o saludos).\n\n"
+                    "Por favor escribe tu **nombre y apellido** real (ej. *Juan Pérez*):"
+                )
+            elif reason in ("galimatias", "caracteres_invalidos"):
+                msg = (
+                    "⚠️ **Nombre no válido**\n\n"
+                    "Por favor ingresa un nombre y apellido real usando únicamente letras (ej. *Juan Pérez*):"
+                )
+            elif reason == "troll":
+                msg = (
+                    "⚠️ **Nombre no válido**\n\n"
+                    "Por favor ingresa tu nombre de persona real (evita apodos ficticios o personajes):\n\n"
+                    "Escribe tu **nombre y apellido** (ej. *Juan Pérez*):"
+                )
+            else:
+                msg = "⚠️ Por favor escribe un **nombre y apellido** válido (ej. *Juan Pérez*):"
             await safe_reply_text(
                 update.message,
-                "⚠️ Por favor escribe un **nombre y apellido** válido (ej. *Juan Pérez*):",
+                msg,
             )
             return
         context.user_data.pop("awaiting_account_name_edit", None)
@@ -1583,13 +1633,18 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     # 3. Control de seguridad y onboarding obligatorio de dispositivo (1 cuenta por dispositivo)
-    cust = get_registered_customer(user_id)
     if not cust or not cust.phone:
+        cust = get_registered_customer(user_id)
+    if not cust or not cust.phone:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
         await update.message.reply_text(
-            "🔒 **Vinculación obligatoria de dispositivo**\n\n"
-            "Por políticas de seguridad y protección contra fraudes (política de 1 cuenta por dispositivo), "
-            "es **obligatorio** presionar el botón oficial **'📱 Compartir mi número'** abajo para vincular tu cuenta desde este dispositivo.\n\n"
-            "⚠️ _Por seguridad, no se permite ingresar números telefónicos de forma manual por texto._",
+            "🔒 **Entrada de texto bloqueada**\n\n"
+            "Tu mensaje fue eliminado. Para proteger tu seguridad y evitar fraudes (política de 1 cuenta por dispositivo), "
+            "**no se permite escribir texto libre ni ingresar números manuales**.\n\n"
+            "👉 **Debes presionar únicamente el botón oficial '📱 Compartir mi número' abajo:**",
             reply_markup=get_teclado_registro(),
             parse_mode="Markdown",
         )

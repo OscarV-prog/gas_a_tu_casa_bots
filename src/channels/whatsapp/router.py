@@ -181,7 +181,14 @@ from pathlib import Path
 import time
 from src.models.customer import CustomerAddress
 from src.services.audio_transcription import transcribe_audio_file
-from src.services.flow_router import flow_router, clear_session, FlowState
+from src.services.flow_router import (
+    flow_router,
+    clear_session,
+    FlowState,
+    validate_person_name_semantic,
+    check_phone_change_attempt_deterministic,
+    is_phone_change_attempt_semantic,
+)
 from src.services.notifications import notify_driver
 
 # Mensaje de seguridad estricto contra inyecciones y consultas indebidas
@@ -1318,23 +1325,63 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
     # 5.0 Comprobación de estado de cuenta en WhatsApp (nombre o dirección nueva desde Mi Cuenta)
     wa_account_st = _get_wa_account_state(wa_id)
     if wa_account_st.get("awaiting_account_name"):
-        _clear_wa_account_state(wa_id)
         new_name = texto_usuario.strip()
-        if len(new_name) >= 2 and not any(k in new_name.lower() for k in ["/start", "cancelar", "menu"]):
-            repo = get_repository()
-            cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else repo.get_customer(TENANT_ID, "whatsapp", wa_id)
-            if cust:
-                repo.update_customer_name(TENANT_ID, phone_10 or cust.phone, new_name)
-            sess = flow_router.get_session(thread_id)
-            if sess and sess.draft_order:
-                sess.draft_order.customer_name = new_name
-            await adapter.send_text_message(wa_id, f"✅ *Tu nombre ha sido actualizado a:* {new_name}")
-            await _mostrar_mi_cuenta_wa(wa_id, phone_10)
-            return
-        else:
+        if any(k in new_name.lower() for k in ["/start", "cancelar", "menu", "volver", "salir", "regresar"]):
+            _clear_wa_account_state(wa_id)
             await adapter.send_text_message(wa_id, "ℹ️ Operación cancelada.")
             await _mostrar_mi_cuenta_wa(wa_id, phone_10)
             return
+
+        is_valid_name, reason = await validate_person_name_semantic(new_name, tenant_id=TENANT_ID)
+        if not is_valid_name:
+            if reason == "groseria":
+                msg = (
+                    "⚠️ *Nombre no permitido*\n\n"
+                    "Por favor evita ingresar groserías, palabras altisonantes o apodos ofensivos.\n\n"
+                    "Escribe tu *nombre y apellido* real (ej. _Juan Pérez_):"
+                )
+            elif reason == "no_es_nombre":
+                msg = (
+                    "⚠️ *Nombre no válido*\n\n"
+                    "El texto ingresado no parece ser un nombre propio de persona (evita nombres de objetos, productos, frases o saludos).\n\n"
+                    "Por favor escribe tu *nombre y apellido* real (ej. _Juan Pérez_):"
+                )
+            elif reason in ("galimatias", "caracteres_invalidos"):
+                msg = (
+                    "⚠️ *Nombre no válido*\n\n"
+                    "Por favor ingresa un nombre y apellido real usando únicamente letras (ej. _Juan Pérez_):"
+                )
+            elif reason == "troll":
+                msg = (
+                    "⚠️ *Nombre no válido*\n\n"
+                    "Por favor ingresa tu nombre de persona real (evita apodos ficticios o personajes):\n\n"
+                    "Escribe tu *nombre y apellido* (ej. _Juan Pérez_):"
+                )
+            elif reason == "cambio_telefono":
+                phone_txt = f" (*{phone_10}*)" if phone_10 else ""
+                msg = (
+                    f"⛔ *Operación no permitida por seguridad.*\n\n"
+                    f"Tu número celular ya quedó registrado{phone_txt}. Por políticas de seguridad y protección de datos, "
+                    f"no está permitido ingresar números telefónicos en el campo de nombre.\n\n"
+                    f"Por favor escribe tu *nombre y apellido* real (ej. _Juan Pérez_):"
+                )
+            else:
+                msg = "⚠️ Por favor escribe un *nombre y apellido* válido (ej. _Juan Pérez_):"
+
+            await adapter.send_text_message(wa_id, msg)
+            return
+
+        _clear_wa_account_state(wa_id)
+        repo = get_repository()
+        cust = repo.get_customer_by_phone(TENANT_ID, phone_10) if phone_10 else repo.get_customer(TENANT_ID, "whatsapp", wa_id)
+        if cust:
+            repo.update_customer_name(TENANT_ID, phone_10 or cust.phone, new_name)
+        sess = flow_router.get_session(thread_id)
+        if sess and sess.draft_order:
+            sess.draft_order.customer_name = new_name
+        await adapter.send_text_message(wa_id, f"✅ *Tu nombre ha sido actualizado a:* {new_name}")
+        await _mostrar_mi_cuenta_wa(wa_id, phone_10)
+        return
 
     if wa_account_st.get("awaiting_account_new_address"):
         _clear_wa_account_state(wa_id)
@@ -1377,7 +1424,30 @@ async def process_whatsapp_event(event: dict[str, Any]) -> None:
         await _mostrar_direcciones_cuenta_wa(wa_id, phone_10)
         return
 
-    # 5.1 Detección temprana de intentos de payload / inyección / jailbreak / scraping multi-número
+    # 5.1 Control de seguridad estricto: Bloquear cualquier intento de cambiar o registrar otro número
+    is_raw_different_phone = False
+    raw_digits_only = re.sub(r"\D", "", texto_usuario.strip())
+    if len(raw_digits_only) == 10 and phone_10 and raw_digits_only != phone_10 and len(texto_usuario.strip().split()) == 1:
+        is_raw_different_phone = True
+
+    is_phone_change = (
+        check_phone_change_attempt_deterministic(texto_usuario)
+        or is_raw_different_phone
+        or await is_phone_change_attempt_semantic(texto_usuario, tenant_id=TENANT_ID)
+    )
+    if is_phone_change:
+        phone_txt = f" (*{phone_10}*)" if phone_10 else ""
+        await adapter.send_text_message(
+            wa_id,
+            f"⛔ *Operación no permitida por seguridad.*\n\n"
+            f"Tu cuenta ya se encuentra vinculada a tu número de WhatsApp{phone_txt}.\n\n"
+            f"Por políticas de seguridad y protección de tus datos (política de 1 cuenta por dispositivo), "
+            f"*no está permitido cambiar de número celular ni registrar múltiples números* desde este mismo chat.\n\n"
+            f"Si cambiaste de número o requieres soporte para tu cuenta, por favor comunícate directamente con nuestro centro de atención a clientes. ⛽📞",
+        )
+        return
+
+    # 5.2 Detección temprana de intentos de payload / inyección / jailbreak / scraping multi-número
     found_phones = re.findall(r"\b(?:\+?52\s*)?(\d{10})\b", texto_usuario)
     es_payload_o_inyeccion = any(k in texto_clean for k in [
         "payload", "decodifica", "decodificar", "base64", "script", "ejecutar código", "ejecuta codigo",
